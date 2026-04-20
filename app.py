@@ -159,6 +159,41 @@ st.markdown("""
         font-size: 1rem;
         margin-bottom: 0.3rem;
     }
+    .app-header {
+        text-align: center;
+        padding: 1.15rem 1rem;
+        margin-bottom: 0.5rem;
+        border: 1px solid color-mix(in srgb, var(--primary-color) 35%, transparent);
+        border-radius: 14px;
+        border-bottom-width: 3px;
+        background: linear-gradient(
+            135deg,
+            color-mix(in srgb, var(--primary-color) 12%, transparent),
+            color-mix(in srgb, var(--primary-color) 4%, var(--background-color))
+        );
+    }
+    .app-header h1 {
+        color: var(--text-color);
+        margin-bottom: 0.2rem;
+    }
+    .app-header p {
+        color: color-mix(in srgb, var(--text-color) 82%, transparent);
+        margin: 0;
+    }
+    .app-header h3 {
+        color: var(--primary-color);
+        margin-top: 0.55rem;
+    }
+    .eeo-notice {
+        background: color-mix(in srgb, var(--primary-color) 8%, var(--secondary-background-color));
+        color: var(--text-color);
+        padding: 0.8rem;
+        border-radius: 8px;
+        margin: 0.5rem 0;
+        font-size: 0.85rem;
+        line-height: 1.5;
+        border-left: 4px solid var(--primary-color);
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -166,17 +201,17 @@ st.markdown("""
 # Header
 # ---------------------------------------------------------------------------
 st.markdown(f"""
-<div style="text-align: center; padding: 1rem; border-bottom: 3px solid #4f8dfd;">
-    <h1 style="color: #7fb3ff; margin-bottom: 0.2rem;">{COMPANY_NAME}</h1>
-    <p style="color: #d6deeb; margin: 0;">{COMPANY_ADDRESS} | {COMPANY_CITY_STATE_ZIP}</p>
-    <p style="color: #d6deeb; margin: 0;">Phone: {COMPANY_PHONE} | Email: {COMPANY_EMAIL}</p>
-    <h3 style="color: #9ec5ff; margin-top: 0.5rem;">Independent Contractor Driver Application</h3>
+<div class="app-header">
+    <h1>{COMPANY_NAME}</h1>
+    <p>{COMPANY_ADDRESS} | {COMPANY_CITY_STATE_ZIP}</p>
+    <p>Phone: {COMPANY_PHONE} | Email: {COMPANY_EMAIL}</p>
+    <h3>Independent Contractor Driver Application</h3>
 </div>
 """, unsafe_allow_html=True)
 
 # EEO statement - compliant language
 st.markdown("""
-<div style="background: #e8eef7; color: #1f2937; padding: 0.8rem; border-radius: 5px; margin: 0.5rem 0; font-size: 0.85rem; line-height: 1.5;">
+<div class="eeo-notice">
 In compliance with Federal and State equal opportunity laws, qualified applicants are
 considered for all positions without regard to race, color, religion, sex, national origin,
 age, marital status, veteran status, non-job related disability, or any other protected group status.
