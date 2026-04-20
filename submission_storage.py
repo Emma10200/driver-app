@@ -14,8 +14,12 @@ import requests
 
 try:
     import streamlit as st
+    from streamlit.errors import StreamlitSecretNotFoundError
 except ImportError:  # pragma: no cover - defensive import for non-Streamlit tooling
     st = None
+
+    class StreamlitSecretNotFoundError(Exception):
+        """Fallback used when Streamlit is unavailable."""
 
 VALID_BACKENDS = {"auto", "local", "supabase", "both"}
 DEFAULT_BUCKET = "driver-applications"
@@ -43,15 +47,20 @@ def _get_streamlit_secret(name: str) -> str | None:
     if st is None:
         return None
 
-    for candidate in _candidate_names(name):
-        if candidate in st.secrets:
-            return str(st.secrets[candidate])
+    try:
+        secrets = st.secrets
 
-    for section_name in ("app", "supabase", "storage"):
-        section = st.secrets.get(section_name, {})
         for candidate in _candidate_names(name):
-            if candidate in section:
-                return str(section[candidate])
+            if candidate in secrets:
+                return str(secrets[candidate])
+
+        for section_name in ("app", "supabase", "storage"):
+            section = secrets.get(section_name, {})
+            for candidate in _candidate_names(name):
+                if candidate in section:
+                    return str(section[candidate])
+    except StreamlitSecretNotFoundError:
+        return None
 
     return None
 
