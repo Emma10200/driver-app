@@ -37,6 +37,7 @@ def _attempt_submission_notification() -> None:
         form_data=st.session_state.form_data,
         submission_result={"location_label": saved_submission_dir},
         uploaded_documents=st.session_state.get("uploaded_documents", []),
+        application_pdf=(st.session_state.submission_artifacts or {}).get("application_pdf"),
     )
     status = notification_result.get("status")
     st.session_state.submission_notification_status_code = status

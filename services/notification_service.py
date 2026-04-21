@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import smtplib
 from email.message import EmailMessage
 from typing import Any
@@ -9,6 +10,12 @@ from typing import Any
 from config import DEFAULT_COMPANY_SLUG
 from runtime_context import is_test_mode_active
 from submission_storage import get_runtime_secret
+
+try:
+    from pypdf import PdfReader, PdfWriter
+except ModuleNotFoundError:  # pragma: no cover - optional until dependency is installed
+    PdfReader = None
+    PdfWriter = None
 
 
 def _as_bool(value: str | None, default: bool = False) -> bool:
@@ -39,7 +46,30 @@ def _notification_settings(company_slug: str, *, test_mode: bool) -> dict[str, A
         "recipients": recipients,
         "use_tls": _as_bool(get_runtime_secret("SMTP_USE_TLS", "true"), True),
         "use_ssl": _as_bool(get_runtime_secret("SMTP_USE_SSL", "false"), False),
+        "attachment_password": (get_runtime_secret("SMTP_ATTACHMENT_PASSWORD", "") or "").strip(),
     }
+
+
+def _protect_pdf(pdf_bytes: bytes, password: str) -> bytes:
+    if not password:
+        return pdf_bytes
+
+    if PdfReader is None or PdfWriter is None:
+        raise RuntimeError(
+            "Password-protected PDF attachments require pypdf. Add `pypdf` to dependencies and redeploy."
+        )
+
+    from io import BytesIO
+
+    reader = PdfReader(BytesIO(pdf_bytes))
+    writer = PdfWriter()
+    for page in reader.pages:
+        writer.add_page(page)
+    writer.encrypt(user_password=password, owner_password=password)
+
+    out = BytesIO()
+    writer.write(out)
+    return out.getvalue()
 
 
 def notifications_enabled(company_slug: str, *, test_mode: bool) -> bool:
@@ -71,6 +101,7 @@ def send_internal_submission_notification(
     form_data: dict[str, Any],
     submission_result: dict[str, Any],
     uploaded_documents: list[dict[str, Any]] | None = None,
+    application_pdf: bytes | None = None,
 ) -> dict[str, Any]:
     company_slug = str(form_data.get("company_slug") or DEFAULT_COMPANY_SLUG).strip() or DEFAULT_COMPANY_SLUG
     test_mode = bool(form_data.get("test_mode")) or is_test_mode_active()
@@ -102,6 +133,22 @@ def send_internal_submission_notification(
     applicant_email = str(form_data.get("email", "") or "").strip()
     if applicant_email:
         message["Reply-To"] = applicant_email
+
+    if not application_pdf:
+        return {
+            "status": "error",
+            "message": "Notification email requires application PDF bytes, but none were available.",
+        }
+
+    pdf_bytes = _protect_pdf(application_pdf, settings["attachment_password"])
+    applicant_last = str(form_data.get("last_name", "driver")).strip().lower().replace(" ", "-") or "driver"
+    timestamp = datetime.now().strftime("%Y%m%d")
+    filename = f"application_{applicant_last}_{timestamp}.pdf"
+    message.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=filename)
+    attachment_note = "Application PDF attachment: included" + (
+        " (password-protected)." if settings["attachment_password"] else "."
+    )
+
     message.set_content(
         "\n".join(
             [
@@ -114,6 +161,7 @@ def send_internal_submission_notification(
                 f"Submitted at: {form_data.get('final_submission_timestamp', 'Unknown')}",
                 f"Saved to: {submission_result.get('location_label', 'Unknown location')}",
                 f"Supporting document count: {len(uploaded_documents)}",
+                attachment_note,
                 "",
                 "This notification intentionally excludes attachments and sensitive SSN data.",
             ]
