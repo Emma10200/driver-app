@@ -18,6 +18,40 @@ ALLOWED_UPLOAD_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}
 MAX_SUPPORTING_DOCUMENTS = 6
 MAX_SUPPORTING_DOCUMENT_SIZE_MB = 10
 MAX_SUPPORTING_DOCUMENT_SIZE_BYTES = MAX_SUPPORTING_DOCUMENT_SIZE_MB * 1024 * 1024
+REQUESTED_SUPPORTING_DOCUMENTS = [
+    {
+        "label": "CDL (Commercial Driver’s License)",
+        "form_key": "supporting_doc_cdl",
+        "status": "Required before onboarding",
+    },
+    {
+        "label": "Medical Card",
+        "form_key": "supporting_doc_medical_card",
+        "status": "Required before onboarding",
+    },
+    {
+        "label": "W-9 Form",
+        "form_key": "supporting_doc_w9",
+        "status": "Required before onboarding",
+    },
+    {
+        "label": "Direct Deposit Form / Voided Check / Bank Letter",
+        "form_key": "supporting_doc_direct_deposit",
+        "status": "Required before onboarding",
+    },
+]
+
+
+def _requested_document_widget_key(form_key: str) -> str:
+    return f"requested_upload_{form_key}"
+
+
+def _ensure_requested_document_checklist_state() -> None:
+    form_data = st.session_state.setdefault("form_data", {})
+    for document in REQUESTED_SUPPORTING_DOCUMENTS:
+        widget_key = _requested_document_widget_key(str(document["form_key"]))
+        if widget_key not in st.session_state:
+            st.session_state[widget_key] = bool(form_data.get(str(document["form_key"]), False))
 
 
 def get_pending_uploads() -> list[Any]:
@@ -106,6 +140,21 @@ def render_supporting_documents_section() -> None:
         f"Accepted file types: PDF, JPG/JPEG, PNG. Maximum {MAX_SUPPORTING_DOCUMENTS} files, up to "
         f"{MAX_SUPPORTING_DOCUMENT_SIZE_MB} MB per file. Files are stored server-side when you save a draft or submit."
     )
+    st.markdown("**Requested uploads**")
+    st.caption("Check off any document included with this upload. These items are required before onboarding.")
+    _ensure_requested_document_checklist_state()
+    form_data = st.session_state.setdefault("form_data", {})
+    for document in REQUESTED_SUPPORTING_DOCUMENTS:
+        label = str(document["label"])
+        form_key = str(document["form_key"])
+        status = str(document["status"])
+        checked = st.checkbox(
+            f"{label} — {status}",
+            key=_requested_document_widget_key(form_key),
+        )
+        form_data[form_key] = bool(checked)
+    st.caption("Optional: you can also upload any extra endorsements, certificates, or supporting paperwork below.")
+    st.caption("You can upload combined PDFs or separate images if a document has multiple pages or front/back sides.")
     if is_test_mode_active():
         st.info("Safe test mode stores uploaded files in a separate company test namespace.")
 
@@ -114,7 +163,7 @@ def render_supporting_documents_section() -> None:
         type=["pdf", "png", "jpg", "jpeg"],
         accept_multiple_files=True,
         key=UPLOAD_WIDGET_KEY,
-        help="Upload optional supporting documents such as license images, medical cards, or insurance PDFs.",
+        help="Upload requested documents such as your CDL, medical card, W-9 form, or direct deposit form / voided check / bank letter.",
     )
 
     saved_documents = st.session_state.get("uploaded_documents", [])
