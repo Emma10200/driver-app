@@ -63,7 +63,7 @@ def render_review_submit_page(submissions_dir: Path) -> None:
     )
     st.info(
         f"When you submit, a company copy will be saved to {submission_destination}. "
-        "If SMTP is configured, an internal notification email will also be sent without attachments."
+        "Your application packet and documents are stored securely for processing."
     )
     if is_test_mode_active():
         st.warning(
@@ -150,8 +150,7 @@ def render_review_submit_page(submissions_dir: Path) -> None:
         "1. A timestamped submission bundle is created for this applicant.\n"
         f"2. The app saves `submission.json` plus PDF copies of the application and disclosures to {submission_destination}.\n"
         "3. Any uploaded PDF/JPG/PNG supporting documents are stored in the secure backend and linked to the submission record.\n"
-        "4. The applicant can manually download copies from the confirmation page.\n"
-        "5. If SMTP is configured, an internal notification email is sent without attachments or SSN data."
+        "4. The applicant can manually download copies from the confirmation page."
     )
 
     review_confirm = st.checkbox(
@@ -236,14 +235,8 @@ def render_submission_complete(submissions_dir: Path) -> None:
     if st.session_state.submission_save_notice:
         st.warning(st.session_state.submission_save_notice)
 
-    if st.session_state.get("submission_notification_status"):
-        st.info(st.session_state.submission_notification_status)
-    if st.session_state.get("submission_notification_error"):
-        st.warning(f"Internal notification warning: {st.session_state.submission_notification_error}")
-
     st.caption(
-        "This app stores the submission using the configured storage backend and offers manual downloads below. "
-        "Notification emails, when configured, exclude attachments and sensitive SSN data."
+        "This app stores the submission using the configured storage backend and offers manual downloads below."
     )
 
     st.markdown("---")
