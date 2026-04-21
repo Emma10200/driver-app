@@ -153,6 +153,90 @@ def _open_sidebar_via_js() -> None:
     )
 
 
+def _sync_browser_autofill_via_js() -> None:
+    components.html(
+        """
+        <script>
+        const parentWindow = window.parent;
+        const parentDocument = parentWindow.document;
+        const INPUT_SELECTOR = [
+            'input[type="text"]',
+            'input[type="email"]',
+            'input[type="tel"]',
+            'input[type="search"]',
+            'input:not([type])',
+            'textarea'
+        ].join(',');
+
+        function rememberValue(input) {
+            input.dataset.autofillSyncLastValue = input.value ?? '';
+        }
+
+        function bindInput(input) {
+            if (input.dataset.autofillSyncBound === '1') {
+                return;
+            }
+
+            input.dataset.autofillSyncBound = '1';
+            rememberValue(input);
+
+            input.addEventListener('input', () => rememberValue(input));
+            input.addEventListener('change', () => rememberValue(input));
+            input.addEventListener('blur', () => rememberValue(input));
+        }
+
+        function looksAutofilled(input) {
+            try {
+                return input.matches(':-webkit-autofill') || input.matches(':autofill');
+            } catch (error) {
+                return false;
+            }
+        }
+
+        function syncInput(input) {
+            const currentValue = input.value ?? '';
+            const lastValue = input.dataset.autofillSyncLastValue ?? '';
+            if (!currentValue || currentValue === lastValue) {
+                return;
+            }
+
+            rememberValue(input);
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        function scanForAutofill() {
+            parentDocument.querySelectorAll(INPUT_SELECTOR).forEach((input) => {
+                bindInput(input);
+                if (looksAutofilled(input)) {
+                    syncInput(input);
+                    return;
+                }
+
+                const isFocused = parentDocument.activeElement === input;
+                if (!isFocused) {
+                    syncInput(input);
+                }
+            });
+        }
+
+        [0, 150, 400, 900, 1600, 2600].forEach((delay) => {
+            parentWindow.setTimeout(scanForAutofill, delay);
+        });
+
+        const observer = new MutationObserver(() => {
+            parentWindow.setTimeout(scanForAutofill, 0);
+        });
+
+        if (parentDocument.body) {
+            observer.observe(parentDocument.body, { childList: true, subtree: true });
+        }
+        </script>
+        """,
+        height=0,
+    )
+
+
 def render_save_draft_button(button_key: str, label: str = "💾 Save Draft") -> None:
     if not st.button(label, key=button_key, use_container_width=True):
         return
@@ -210,6 +294,7 @@ def render_app_shell() -> None:
 
     st.markdown(BASE_STYLES, unsafe_allow_html=True)
     render_draft_sidebar()
+    _sync_browser_autofill_via_js()
     st.markdown(
         f"""
 <div class="app-header">
