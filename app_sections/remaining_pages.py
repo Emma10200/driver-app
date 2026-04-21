@@ -639,10 +639,9 @@ def render_remaining_page(page: int) -> bool:
         return True
 
     if page == 8:
-        st.subheader("📄 Federal FCRA Disclosure — Standalone Document")
-        st.warning(
-            "**IMPORTANT: Federal law (15 U.S.C. § 1681b) requires this disclosure be presented "
-            "as a standalone document, separate from the application.**"
+        st.subheader("📄 Background Check Disclosure & Authorization")
+        st.caption(
+            "This is a separate disclosure document. Please review it carefully before acknowledging."
         )
 
         st.markdown(
@@ -783,8 +782,10 @@ def render_remaining_page(page: int) -> bool:
         return True
 
     if page == 10:
-        st.subheader("📄 PSP Disclosure and Authorization — Standalone Document")
-        st.warning("**This disclosure is presented as a standalone document as required by federal regulation.**")
+        st.subheader("📄 PSP Disclosure and Authorization")
+        st.caption(
+            "This is a separate disclosure document. Please review it carefully before acknowledging."
+        )
 
         st.markdown(
             f"""
@@ -843,8 +844,10 @@ def render_remaining_page(page: int) -> bool:
         return True
 
     if page == 11:
-        st.subheader("📄 FMCSA Clearinghouse Release — Standalone Document")
-        st.warning("**This disclosure is presented as a standalone document as required by federal regulation.**")
+        st.subheader("📄 FMCSA Clearinghouse Release")
+        st.caption(
+            "This is a separate disclosure document. Please review it carefully before acknowledging."
+        )
 
         st.markdown(
             f"""

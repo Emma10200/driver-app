@@ -34,12 +34,25 @@ def _attempt_submission_notification() -> None:
     if not saved_submission_dir:
         return
 
-    notification_result = send_internal_submission_notification(
-        form_data=st.session_state.form_data,
-        submission_result={"location_label": saved_submission_dir},
-        uploaded_documents=st.session_state.get("uploaded_documents", []),
-        application_pdf=(st.session_state.submission_artifacts or {}).get("application_pdf"),
-    )
+    try:
+        notification_result = send_internal_submission_notification(
+            form_data=st.session_state.form_data,
+            submission_result={"location_label": saved_submission_dir},
+            uploaded_documents=st.session_state.get("uploaded_documents", []),
+            application_pdf=(st.session_state.submission_artifacts or {}).get("application_pdf"),
+        )
+    except Exception as exc:  # noqa: BLE001 - never let notification break the success page
+        st.session_state.submission_notification_status_code = "error"
+        st.session_state.submission_notification_status = None
+        st.session_state.submission_notification_error = str(exc)
+        log_application_error(
+            code="submission_notification_exception",
+            user_message="Internal submission notification raised an exception.",
+            technical_details=str(exc),
+            severity="warning",
+        )
+        return
+
     status = notification_result.get("status")
     st.session_state.submission_notification_status_code = status
 
@@ -50,6 +63,12 @@ def _attempt_submission_notification() -> None:
     elif status == "disabled":
         st.session_state.submission_notification_status = notification_result.get("message")
         st.session_state.submission_notification_error = None
+        log_application_error(
+            code="submission_notification_disabled",
+            user_message="Internal submission notification skipped (not configured).",
+            technical_details=notification_result.get("message"),
+            severity="warning",
+        )
     else:
         st.session_state.submission_notification_status = None
         st.session_state.submission_notification_error = notification_result.get("message")
@@ -204,6 +223,23 @@ def render_review_submit_page(submissions_dir: Path) -> None:
 
 
 def render_submission_complete(submissions_dir: Path) -> None:
+    try:
+        _render_submission_complete_body(submissions_dir)
+    except Exception as exc:  # noqa: BLE001 - applicant must always see a success state
+        log_application_error(
+            code="submission_complete_render_failed",
+            user_message="Submission completed but the confirmation page hit an error.",
+            technical_details=str(exc),
+            severity="error",
+        )
+        st.success("### ✅ Application Submitted Successfully!")
+        st.markdown(
+            "Your application has been received. "
+            "If you'd like a copy for your records, please contact us and we'll send one over."
+        )
+
+
+def _render_submission_complete_body(submissions_dir: Path) -> None:
     company = get_active_company_profile()
     st.session_state.current_page = 99
 
