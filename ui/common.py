@@ -169,79 +169,56 @@ def _sync_browser_autofill_via_js() -> None:
         ].join(',');
         const BUTTON_SELECTOR = 'button, [role="button"], input[type="submit"]';
 
-        function getBaselineValue(input) {
-            return input.getAttribute('value') ?? input.defaultValue ?? '';
-        }
-
-        function rememberValue(input) {
-            input.dataset.autofillSyncLastValue = input.value ?? '';
-        }
-
-        function bindInput(input) {
-            if (input.dataset.autofillSyncBound === '1') {
-                return;
-            }
-
-            input.dataset.autofillSyncBound = '1';
-            input.dataset.autofillSyncLastValue = getBaselineValue(input);
-
-            input.addEventListener('input', () => rememberValue(input));
-            input.addEventListener('change', () => rememberValue(input));
-            input.addEventListener('blur', () => rememberValue(input));
-        }
-
-        function looksAutofilled(input) {
-            try {
-                return input.matches(':-webkit-autofill') || input.matches(':autofill');
-            } catch (error) {
-                return false;
-            }
-        }
-
-        function syncInput(input) {
+        function dispatchReactInputEvents(input) {
             const currentValue = input.value ?? '';
-            const lastValue = input.dataset.autofillSyncLastValue ?? '';
-            if (!currentValue || currentValue === lastValue) {
+            if (!currentValue) {
                 return;
             }
 
-            input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            const prototype = input.tagName === 'TEXTAREA'
+                ? parentWindow.HTMLTextAreaElement.prototype
+                : parentWindow.HTMLInputElement.prototype;
+            const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+            if (descriptor && typeof descriptor.set === 'function') {
+                descriptor.set.call(input, currentValue);
+            } else {
+                input.value = currentValue;
+            }
+
+            if (input._valueTracker) {
+                input._valueTracker.setValue('');
+            }
+
+            try {
+                input.dispatchEvent(new InputEvent('input', {
+                    bubbles: true,
+                    composed: true,
+                    data: null,
+                    inputType: 'insertReplacementText'
+                }));
+            } catch (error) {
+                input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            }
+
             input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-            input.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
-            rememberValue(input);
         }
 
-        function scanForAutofill(force = false) {
+        function commitAutofilledInputs() {
             parentDocument.querySelectorAll(INPUT_SELECTOR).forEach((input) => {
-                bindInput(input);
-                const isFocused = parentDocument.activeElement === input;
-                if (force || looksAutofilled(input) || !isFocused) {
-                    syncInput(input);
+                if ((input.value ?? '').trim()) {
+                    dispatchReactInputEvents(input);
                 }
             });
         }
 
-        [0, 150, 400, 900, 1600, 2600].forEach((delay) => {
-            parentWindow.setTimeout(scanForAutofill, delay);
-        });
-
-        const observer = new MutationObserver(() => {
-            parentWindow.setTimeout(scanForAutofill, 0);
-        });
-
-        if (parentDocument.body) {
-            observer.observe(parentDocument.body, { childList: true, subtree: true });
+        if (parentDocument.body && parentDocument.body.dataset.autofillButtonSyncBound !== '1') {
+            parentDocument.body.dataset.autofillButtonSyncBound = '1';
+            parentDocument.addEventListener('pointerdown', (event) => {
+                if (event.target && event.target.closest(BUTTON_SELECTOR)) {
+                    commitAutofilledInputs();
+                }
+            }, true);
         }
-
-        parentDocument.addEventListener('pointerdown', (event) => {
-            if (event.target && event.target.closest(BUTTON_SELECTOR)) {
-                scanForAutofill(true);
-            }
-        }, true);
-
-        parentWindow.addEventListener('focus', () => {
-            parentWindow.setTimeout(scanForAutofill, 0);
-        }, true);
         </script>
         """,
         height=0,
