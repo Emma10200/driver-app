@@ -139,11 +139,6 @@ def render_personal_information_page() -> None:
         )
 
     st.markdown("---")
-    sms_opt_in_number = cell_phone or primary_phone
-    st.caption(
-        f"SMS/contact note: Text updates would go to `{sms_opt_in_number or 'the mobile number you provide'}`. "
-        "Carrier email-to-text delivery can be unreliable, so a dedicated SMS platform is still recommended for bulk messaging."
-    )
     text_consent = st.checkbox(
         f"I consent to receive text messages from {company.name} "
         "regarding my application and contracting status. I may opt out at any time by texting STOP.",
