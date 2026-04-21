@@ -161,18 +161,17 @@ def render_remaining_page(page: int) -> bool:
     if page == 4:
         st.subheader("Employment / Contracting History — Past 10 Years")
         st.markdown(
-            """
-    **49 CFR § 391.21 requires a complete 10-year work history.**
-    List ALL employers/contractors for the past 10 years, starting with the most recent.
-    Account for all gaps in employment/contracting.
-    """
+            "Federal regulations require a complete 10-year work history. "
+            "Please list every employer or contractor you've worked with in the last 10 years, "
+            "starting with the most recent. Be sure to account for any gaps."
         )
 
         num_employers = st.number_input(
-            "Number of employers/contractors to add",
+            "How many employers/contractors would you like to add?",
             min_value=1,
-            max_value=15,
+            max_value=10,
             value=max(1, len(st.session_state.employers) if st.session_state.employers else 1),
+            help="You can add more entries if needed.",
         )
 
         employers_input = []
@@ -414,31 +413,30 @@ def render_remaining_page(page: int) -> bool:
         return True
 
     if page == 6:
-        st.subheader("FMCSR Disqualifications, Accident Record & Violations")
+        st.subheader("Safety Record & Disqualification Questions")
 
-        st.markdown("#### DOT Disqualification Questions (49 CFR 391.15)")
-        st.markdown("*These are DOT-specific safety questions required by federal regulation.*")
+        st.markdown("#### DOT Disqualification Questions")
+        st.caption("These questions are required for all commercial drivers under federal regulations.")
 
         disq_391_15 = selectbox_with_placeholder(
-            "Under FMCSR 391.15, are you currently disqualified from driving a commercial motor vehicle? [49 CFR 391.15]",
+            "Are you currently disqualified from driving a commercial motor vehicle?",
             ["No", "Yes"],
         )
         disq_suspended = selectbox_with_placeholder(
-            "Has your license, permit, or privilege to drive ever been suspended or revoked for any reason? [49 CFR 391.21(b)(9)]",
+            "Has your license, permit, or privilege to drive ever been suspended or revoked for any reason?",
             ["No", "Yes"],
         )
         disq_denied = selectbox_with_placeholder(
-            "Have you ever been denied a license, permit, or privilege to operate a motor vehicle? [49 CFR 391.21(b)(9)]",
+            "Have you ever been denied a license, permit, or privilege to operate a motor vehicle?",
             ["No", "Yes"],
         )
         disq_drug_test = selectbox_with_placeholder(
             "Within the past two years, have you tested positive, or refused to test, on a pre-employment "
-            "drug or alcohol test by an employer to whom you applied, but did not obtain, safety-sensitive "
-            "transportation work covered by DOT agency drug and alcohol testing rules? [49 CFR 40.25(j)]",
+            "drug or alcohol test by an employer to whom you applied for safety-sensitive transportation work?",
             ["No", "Yes"],
         )
         disq_convicted = selectbox_with_placeholder(
-            "In the past three (3) years, have you been convicted of any of the following offenses? [49 CFR 391.15]:\n"
+            "In the past three (3) years, have you been convicted of any of the following offenses?\n"
             "• Driving a CMV with a BAC of .04 or more\n"
             "• Driving under the influence of alcohol as prescribed by state law\n"
             "• Refusal to undergo drug and alcohol testing\n"
@@ -451,7 +449,7 @@ def render_remaining_page(page: int) -> bool:
 
         st.markdown("---")
         st.markdown("#### Vehicle Accident Record")
-        st.markdown("Were you involved in any accidents/incidents with any vehicle in the last 5 years (even if not at fault)?")
+        st.caption("Please list any accidents or incidents from the last 5 years, even if you were not at fault. If you've had none, just select 'No'.")
 
         has_accidents = selectbox_with_placeholder("Any accidents to report?", ["No", "Yes"], key="has_acc")
         if has_accidents == "Yes":
@@ -484,7 +482,7 @@ def render_remaining_page(page: int) -> bool:
 
         st.markdown("---")
         st.markdown("#### Traffic Convictions / Violations")
-        st.markdown("Have you had any moving violations or traffic convictions in the past 3 years?")
+        st.caption("Please list any moving violations or traffic convictions from the past 3 years. If you've had none, just select 'No'.")
 
         has_violations = selectbox_with_placeholder("Any violations to report?", ["No", "Yes"], key="has_viol")
         if has_violations == "Yes":
@@ -522,7 +520,7 @@ def render_remaining_page(page: int) -> bool:
             if st.button("Next →", key="p6_next", use_container_width=True, type="primary"):
                 missing = []
                 if not disq_391_15:
-                    missing.append("FMCSR 391.15 disqualification question")
+                    missing.append("Disqualification question")
                 if not disq_suspended:
                     missing.append("License suspension/revocation question")
                 if not disq_denied:
@@ -555,24 +553,23 @@ def render_remaining_page(page: int) -> bool:
         return True
 
     if page == 7:
-        st.subheader("Drug and Alcohol Policy — O/O & Independent Contractor Certification")
+        st.subheader("Certifications & Signature")
 
-        st.markdown(
-            f"""
+        with st.expander("Drug and Alcohol Policy Certification", expanded=True):
+            st.markdown(
+                f"""
     I certify that I have received a copy of, and have read, the Drug and Alcohol Policy.
     I understand that as a **condition of this independent contractor agreement**, I must comply
     with these guidelines and agree that I will remain medically qualified by these procedures.
     I also acknowledge that if I become disqualified as a driver for any reason, I have
     self-terminated my contract with {company.name}.
     """
-        )
+            )
+            drug_alcohol_cert = st.checkbox("I certify I have read and understand the Drug and Alcohol Policy *")
 
-        drug_alcohol_cert = st.checkbox("I certify I have read and understand the Drug and Alcohol Policy *")
-
-        st.markdown("---")
-        st.subheader("Applicant Certification")
-        st.markdown(
-            f"""
+        with st.expander("Applicant Certification", expanded=True):
+            st.markdown(
+                f"""
     I certify that all information provided in this application is true and complete to the
     best of my knowledge. I understand that any misrepresentation or omission of facts may
     result in rejection of this application or termination of my independent contractor agreement
@@ -591,9 +588,8 @@ def render_remaining_page(page: int) -> bool:
     contractors to submit to substance abuse testing in accordance with applicable federal
     and state regulations.
     """
-        )
-
-        applicant_cert = st.checkbox("I certify that all information in this application is true and complete *")
+            )
+            applicant_cert = st.checkbox("I certify that all information in this application is true and complete *")
 
         st.markdown("---")
         st.subheader("Digital Signature")
@@ -884,7 +880,15 @@ def render_remaining_page(page: int) -> bool:
             "I acknowledge that I have read and understand the Clearinghouse Release, "
             "and I consent to the full and limited queries of the FMCSA Clearinghouse. *"
         )
-        inv_consumer_report = st.checkbox("I understand and agree to the Investigative Consumer Report Disclosure.")
+
+        st.markdown(
+            "**Investigative Consumer Report**\n\n"
+            "In addition to the standard background check disclosures above, an *investigative consumer report* may include "
+            "information about your character, general reputation, personal characteristics, and mode of living, gathered "
+            "through interviews with people who know you (such as previous employers, neighbors, or references). "
+            "You have the right to request additional details about the nature and scope of any such report."
+        )
+        inv_consumer_report = st.checkbox("I understand and agree to the Investigative Consumer Report Disclosure. *")
 
         st.markdown("---")
 

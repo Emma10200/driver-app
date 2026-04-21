@@ -83,19 +83,19 @@ def _attempt_submission_notification() -> None:
 def render_review_submit_page(submissions_dir: Path) -> None:
     company = get_active_company_profile()
     st.subheader("🧾 Review & Submit")
+    st.markdown(
+        "Please review the summary of your application below. "
+        "Use the **Back** button if you need to make any changes before submitting."
+    )
+    if is_test_mode_active():
+        st.warning(
+            "Safe test mode is active. Test submissions use fake data and are kept separate from real applications."
+        )
+    # Note: actual storage destination is logged internally; not shown to applicants.
     submission_destination = get_submission_destination_summary(
         submissions_dir,
         storage_namespace=get_storage_namespace(),
     )
-    st.info(
-        f"When you submit, a company copy will be saved to {submission_destination}. "
-        "Your application packet and documents are stored securely for processing."
-    )
-    if is_test_mode_active():
-        st.warning(
-            "Safe test mode is active. Test submissions use fake data, save under a separate namespace, "
-            "and tag internal notification emails as [TEST]."
-        )
 
     with st.expander("Personal Information", expanded=True):
         summary_item(
@@ -171,12 +171,11 @@ def render_review_submit_page(submissions_dir: Path) -> None:
     render_supporting_documents_section()
 
     st.markdown("---")
-    st.markdown("### What happens when you submit")
+    st.markdown("### What happens next")
     st.markdown(
-        "1. A timestamped submission bundle is created for this applicant.\n"
-        f"2. The app saves `submission.json` plus PDF copies of the application and disclosures to {submission_destination}.\n"
-        "3. Any uploaded PDF/JPG/PNG supporting documents are stored in the secure backend and linked to the submission record.\n"
-        "4. The applicant can manually download copies from the confirmation page."
+        f"When you submit, your application is securely sent to {company.name} for review. "
+        "You'll be able to download a copy of your application and disclosures from the confirmation page. "
+        f"Our team will reach out to you using the contact information you provided."
     )
 
     review_confirm = st.checkbox(
@@ -276,17 +275,16 @@ def _render_submission_complete_body(submissions_dir: Path) -> None:
         f"""
     Thank you, **{st.session_state.form_data.get('first_name', '')} {st.session_state.form_data.get('last_name', '')}**!
 
-    Your application to {company.name} has been received.
-    A confirmation has been created with the following details:
+    Your application to {company.name} has been received. Our team will reach out to you using the contact information you provided.
 
-    - **Submission Timestamp:** {st.session_state.form_data.get('final_submission_timestamp', datetime.now().isoformat())}
-    - **Application Signature:** {st.session_state.form_data.get('sig_full_name', 'N/A')}
+    - **Submitted:** {st.session_state.form_data.get('final_submission_timestamp', datetime.now().isoformat())}
+    - **Signed by:** {st.session_state.form_data.get('sig_full_name', 'N/A')}
+
+    A copy of your application and disclosure documents is available for download below.
     """
     )
 
-    if st.session_state.saved_submission_dir:
-        st.info(f"A company copy was saved to: `{st.session_state.saved_submission_dir}`")
-    elif st.session_state.submission_save_error:
+    if st.session_state.submission_save_error:
         st.warning(st.session_state.submission_save_error)
 
     if st.session_state.submission_save_notice:
@@ -297,10 +295,6 @@ def _render_submission_complete_body(submissions_dir: Path) -> None:
             severity="warning",
         )
         st.warning("Your application was submitted, but an internal follow-up check is pending.")
-
-    st.caption(
-        "This app stores the submission using the configured storage backend and offers manual downloads below."
-    )
 
     st.markdown("---")
     st.subheader("Download Your Application PDF")
@@ -421,6 +415,12 @@ def _render_submission_complete_body(submissions_dir: Path) -> None:
             size_kb = max(1, int(document.get("size_bytes", 0) / 1024))
             st.markdown(f"- `{document.get('file_name', 'document')}` ({size_kb} KB)")
 
-    if st.button("🔄 Start New Application"):
-        reset_application_state()
-        st.rerun()
+    st.markdown("---")
+    with st.expander("Need to start a new application?"):
+        st.caption(
+            "This will clear the current confirmation and start a fresh application from page 1. "
+            "Only do this if you're submitting on behalf of a different applicant."
+        )
+        if st.button("Start New Application", key="start_new_application"):
+            reset_application_state()
+            st.rerun()

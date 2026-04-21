@@ -25,7 +25,12 @@ def render_company_questions_page() -> None:
 
     col1, col2 = st.columns(2)
     with col1:
-        st.text_input("Position applying for", value=OWNER_OPERATOR_POSITION, disabled=True)
+        st.text_input(
+            "Position applying for",
+            value=OWNER_OPERATOR_POSITION,
+            disabled=True,
+            help="This portal is for Owner Operators only.",
+        )
         eligible_us = selectbox_with_placeholder(
             "Are you legally eligible to provide contracted services in the United States? *",
             ["Yes", "No"],
