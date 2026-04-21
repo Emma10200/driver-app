@@ -82,6 +82,12 @@ def render_review_submit_page(submissions_dir: Path) -> None:
             f"{st.session_state.form_data.get('state', '')} {st.session_state.form_data.get('zip_code', '')}".strip(", "),
         )
         summary_item("Primary phone", st.session_state.form_data.get("primary_phone"))
+        summary_item("Cell/text number", st.session_state.form_data.get("cell_phone"))
+        summary_item(
+            "Mobile carrier/provider",
+            st.session_state.form_data.get("mobile_carrier_other") or st.session_state.form_data.get("mobile_carrier"),
+        )
+        summary_item("SMS consent", st.session_state.form_data.get("text_consent"))
         summary_item("Email", st.session_state.form_data.get("email"))
         summary_item(
             "Emergency contact",

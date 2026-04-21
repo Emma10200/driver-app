@@ -6,7 +6,8 @@ from datetime import date
 
 import streamlit as st
 
-from config import US_STATES
+from config import MOBILE_CARRIERS, US_STATES
+from runtime_context import get_active_company_profile
 from services.draft_service import autosave_draft
 from state import next_page
 from ui.common import selectbox_with_placeholder, show_missing_fields
@@ -35,6 +36,7 @@ def _ensure_ssn_widget_state() -> None:
 
 def render_personal_information_page() -> None:
     _ensure_ssn_widget_state()
+    company = get_active_company_profile()
 
     st.subheader("Personal Information")
 
@@ -81,7 +83,23 @@ def render_personal_information_page() -> None:
             current_value=st.session_state.form_data.get("preferred_contact"),
         )
     with col4:
-        cell_phone = st.text_input("Cell Phone", value=st.session_state.form_data.get("cell_phone", ""))
+        cell_phone = st.text_input(
+            "Cell Phone / Text Number",
+            value=st.session_state.form_data.get("cell_phone", ""),
+            help="If you want text updates sent to a different number than your primary phone, enter it here.",
+        )
+        mobile_carrier = selectbox_with_placeholder(
+            "Mobile Carrier / Provider",
+            MOBILE_CARRIERS,
+            current_value=st.session_state.form_data.get("mobile_carrier"),
+            help="Used only if the company contacts drivers through a carrier email-to-text workflow.",
+        )
+        mobile_carrier_other = ""
+        if mobile_carrier == "Other":
+            mobile_carrier_other = st.text_input(
+                "Other Mobile Carrier / Provider",
+                value=st.session_state.form_data.get("mobile_carrier_other", ""),
+            )
         best_time = st.text_input("Best Time to Contact You", value=st.session_state.form_data.get("best_time", "Any"))
         resided_3_years = selectbox_with_placeholder(
             "Have you resided at your current address for 3+ years?",
@@ -121,8 +139,13 @@ def render_personal_information_page() -> None:
         )
 
     st.markdown("---")
+    sms_opt_in_number = cell_phone or primary_phone
+    st.caption(
+        f"SMS/contact note: Text updates would go to `{sms_opt_in_number or 'the mobile number you provide'}`. "
+        "Carrier email-to-text delivery can be unreliable, so a dedicated SMS platform is still recommended for bulk messaging."
+    )
     text_consent = st.checkbox(
-        "I consent to receive text messages from PRESTIGE TRANSPORTATION INC. "
+        f"I consent to receive text messages from {company.name} "
         "regarding my application and contracting status. I may opt out at any time by texting STOP.",
         value=st.session_state.form_data.get("text_consent", False),
     )
@@ -175,6 +198,8 @@ def render_personal_information_page() -> None:
                 "country": country,
                 "primary_phone": primary_phone,
                 "cell_phone": cell_phone,
+                "mobile_carrier": mobile_carrier,
+                "mobile_carrier_other": mobile_carrier_other if mobile_carrier == "Other" else "",
                 "email": email,
                 "preferred_contact": preferred_contact,
                 "best_time": best_time,

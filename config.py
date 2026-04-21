@@ -110,6 +110,22 @@ OFFICE_LOCATIONS = [
     "Chicago Office",
 ]
 
+MOBILE_CARRIERS = [
+    "AT&T",
+    "Verizon",
+    "T-Mobile",
+    "Cricket Wireless",
+    "Boost Mobile",
+    "Metro by T-Mobile",
+    "UScellular",
+    "Xfinity Mobile",
+    "Spectrum Mobile",
+    "Google Fi",
+    "Mint Mobile",
+    "Consumer Cellular",
+    "Other",
+]
+
 # How did you hear about us options
 REFERRAL_SOURCES = [
     "Internet Search",

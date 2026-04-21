@@ -35,16 +35,25 @@ def test_page_one_next_advances_without_ssn_exception(monkeypatch, tmp_path):
     _widget_by_label(at.text_input, "City *").set_value("Fontana")
     _widget_by_label(at.text_input, "Zip Code *").set_value("92335")
     _widget_by_label(at.text_input, "Primary Phone *").set_value("5551234567")
+    _widget_by_label(at.text_input, "Cell Phone / Text Number").set_value("5551239999")
     _widget_by_label(at.text_input, "Email Address *").set_value("emma@example.com")
     _widget_by_label(at.text_input, "Emergency Contact Name *").set_value("John Driver")
     _widget_by_label(at.text_input, "Emergency Contact Phone *").set_value("5557654321")
     _widget_by_label(at.selectbox, "State *").set_value("CA")
+    _widget_by_label(at.selectbox, "Mobile Carrier / Provider").set_value("Verizon")
+    _widget_by_label(
+        at.checkbox,
+        "I consent to receive text messages from PRESTIGE TRANSPORTATION INC. regarding my application and contracting status. I may opt out at any time by texting STOP.",
+    ).check()
 
     _widget_by_label(at.button, "Next →").click().run(timeout=15)
 
     assert not at.exception
     assert at.session_state["current_page"] == 2
     assert at.session_state["form_data"]["ssn"] == "123456789"
+    assert at.session_state["form_data"]["cell_phone"] == "5551239999"
+    assert at.session_state["form_data"]["mobile_carrier"] == "Verizon"
+    assert at.session_state["form_data"]["text_consent"] is True
     assert any(node.value == "Company Questions & Driving Experience" for node in at.subheader)
 
 
