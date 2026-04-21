@@ -21,8 +21,16 @@ def _format_ssn_input() -> None:
 
 
 def _ensure_ssn_widget_state() -> None:
+    stored_ssn = st.session_state.form_data.get("ssn", "")
+    formatted_stored_ssn = format_ssn(stored_ssn)
+
     if SSN_WIDGET_KEY not in st.session_state:
-        st.session_state[SSN_WIDGET_KEY] = format_ssn(st.session_state.form_data.get("ssn", ""))
+        st.session_state[SSN_WIDGET_KEY] = formatted_stored_ssn
+        return
+
+    current_widget_value = st.session_state.get(SSN_WIDGET_KEY, "")
+    if normalize_digits(current_widget_value) == normalize_digits(stored_ssn):
+        st.session_state[SSN_WIDGET_KEY] = formatted_stored_ssn
 
 
 def render_personal_information_page() -> None:
@@ -151,10 +159,8 @@ def render_personal_information_page() -> None:
 
         if len(ssn_digits) != 9:
             st.error("Social Security Number must contain exactly 9 digits.")
-            st.session_state[SSN_WIDGET_KEY] = format_ssn(ssn_display)
             return
 
-        st.session_state[SSN_WIDGET_KEY] = format_ssn(ssn_digits)
         st.session_state.form_data.update(
             {
                 "first_name": first_name,
