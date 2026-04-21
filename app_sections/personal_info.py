@@ -10,7 +10,7 @@ from config import MOBILE_CARRIERS, US_STATES
 from runtime_context import get_active_company_profile
 from services.draft_service import autosave_draft
 from state import next_page
-from ui.common import selectbox_with_placeholder, show_missing_fields, show_user_error
+from ui.common import render_eeo_notice, selectbox_with_placeholder, show_missing_fields, show_user_error
 from utils.formatting import normalize_digits
 
 
@@ -97,6 +97,7 @@ def render_personal_information_page() -> None:
     _ensure_ssn_widget_state()
     company = get_active_company_profile()
 
+    render_eeo_notice()
     st.subheader("Personal Information")
 
     col1, col2 = st.columns(2)

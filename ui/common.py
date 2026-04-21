@@ -351,6 +351,15 @@ def render_app_shell() -> None:
 """,
         unsafe_allow_html=True,
     )
+
+    if is_test_mode_active():
+        st.warning(
+            "Safe test mode is active. This session uses fake applicant data, stores records in a separate test namespace, "
+            "and tags internal notification emails as [TEST]."
+        )
+
+
+def render_eeo_notice() -> None:
     st.markdown(
         """
 <div class="eeo-notice">
@@ -361,12 +370,6 @@ age, marital status, veteran status, non-job related disability, or any other pr
 """,
         unsafe_allow_html=True,
     )
-
-    if is_test_mode_active():
-        st.warning(
-            "Safe test mode is active. This session uses fake applicant data, stores records in a separate test namespace, "
-            "and tags internal notification emails as [TEST]."
-        )
 
 
 def render_version_footer() -> None:
