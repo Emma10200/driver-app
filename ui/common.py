@@ -174,7 +174,7 @@ age, marital status, veteran status, non-job related disability, or any other pr
     if is_test_mode_active():
         st.warning(
             "Safe test mode is active. This session uses fake applicant data, stores records in a separate test namespace, "
-            "and suppresses or redirects internal notification emails."
+            "and tags internal notification emails as [TEST]."
         )
 
 

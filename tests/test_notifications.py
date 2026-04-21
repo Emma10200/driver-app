@@ -142,7 +142,14 @@ def test_attempt_submission_notification_skips_when_disabled(monkeypatch):
     assert calls == []
 
 
-def test_send_internal_submission_notification_is_suppressed_in_test_mode(monkeypatch):
+def test_send_internal_submission_notification_in_test_mode_uses_fallback_recipients(monkeypatch):
+    smtp_instance: FakeSMTP | None = None
+
+    def fake_smtp(host: str, port: int, timeout: int = 30):
+        nonlocal smtp_instance
+        smtp_instance = FakeSMTP(host, port, timeout)
+        return smtp_instance
+
     monkeypatch.setattr(
         notification_service,
         "_notification_settings",
@@ -152,11 +159,12 @@ def test_send_internal_submission_notification_is_suppressed_in_test_mode(monkey
             "username": "mailer",
             "password": "secret",
             "from_email": "alerts@example.com",
-            "recipients": [],
+            "recipients": ["statements@prestigetransportation.com"],
             "use_tls": True,
             "use_ssl": False,
         },
     )
+    monkeypatch.setattr(notification_service.smtplib, "SMTP", fake_smtp)
 
     result = notification_service.send_internal_submission_notification(
         form_data={
@@ -164,10 +172,14 @@ def test_send_internal_submission_notification_is_suppressed_in_test_mode(monkey
             "test_mode": True,
             "first_name": "Test",
             "last_name": "Applicant",
+            "email": "qa@example.com",
         },
         submission_result={"location_label": "driver-applications/companies/prestige/test-mode/submissions/test"},
         uploaded_documents=[],
     )
 
-    assert result["status"] == "disabled"
-    assert "Safe test mode" in result["message"]
+    assert result["status"] == "sent"
+    assert smtp_instance is not None
+    assert smtp_instance.sent_message is not None
+    assert smtp_instance.sent_message["Subject"].startswith("[TEST] ")
+    assert smtp_instance.sent_message["To"] == "statements@prestigetransportation.com"

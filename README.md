@@ -46,7 +46,7 @@ See `.env` and `.streamlit/secrets.toml.example` for the expected keys.
 - Supporting documents are limited to **PDF, JPG/JPEG, and PNG**.
 - The app currently enforces **up to 6 supporting documents** and **10 MB per file**.
 - Notification emails are **summary-only** and do **not** include attachments or SSN data.
-- Safe test mode uses fake data, stores records under a separate company test namespace, and suppresses live notifications unless `TEST_INTERNAL_NOTIFICATION_TO` is configured.
+- Safe test mode uses fake data, stores records under a separate company test namespace, and tags notification emails as `[TEST]`. If `TEST_INTERNAL_NOTIFICATION_TO` is set, test emails go there; otherwise they fall back to the normal internal recipients.
 
 ## Company links and hidden admin mode
 

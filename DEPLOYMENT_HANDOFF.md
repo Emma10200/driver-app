@@ -110,7 +110,7 @@ For internal QA, you can also use dedicated links like:
 
 If `ADMIN_TEST_TOKEN` is set, append `&token=YOUR_TOKEN` to those links.
 
-Safe test mode uses fake data, stores records under a separate company test namespace, and suppresses live notification emails unless `TEST_INTERNAL_NOTIFICATION_TO` is configured.
+Safe test mode uses fake data, stores records under a separate company test namespace, and tags notification emails as `[TEST]`. If `TEST_INTERNAL_NOTIFICATION_TO` is set, test emails go there; otherwise they fall back to the normal internal recipients.
 
 ## Recommended settings
 

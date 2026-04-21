@@ -67,7 +67,7 @@ def render_review_submit_page(submissions_dir: Path) -> None:
     if is_test_mode_active():
         st.warning(
             "Safe test mode is active. Test submissions use fake data, save under a separate namespace, "
-            "and suppress or redirect internal notification emails."
+            "and tag internal notification emails as [TEST]."
         )
 
     with st.expander("Personal Information", expanded=True):
@@ -208,7 +208,6 @@ def render_submission_complete(submissions_dir: Path) -> None:
 
     _attempt_submission_notification()
 
-    st.balloons()
     st.success("### ✅ Application Submitted Successfully!")
     st.markdown(
         f"""

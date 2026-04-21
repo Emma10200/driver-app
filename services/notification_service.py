@@ -22,14 +22,13 @@ def _recipient_secret_key(company_slug: str) -> str:
 
 
 def _notification_settings(company_slug: str, *, test_mode: bool) -> dict[str, Any]:
-    if test_mode:
-        recipients_raw = get_runtime_secret("TEST_INTERNAL_NOTIFICATION_TO", "") or ""
-    else:
-        recipients_raw = (
-            get_runtime_secret(_recipient_secret_key(company_slug), "")
-            or get_runtime_secret("INTERNAL_NOTIFICATION_TO", "")
-            or ""
-        )
+    recipients_raw = (
+        (get_runtime_secret("TEST_INTERNAL_NOTIFICATION_TO", "") or "") if test_mode else ""
+    ) or (
+        get_runtime_secret(_recipient_secret_key(company_slug), "")
+        or get_runtime_secret("INTERNAL_NOTIFICATION_TO", "")
+        or ""
+    )
     recipients = [item.strip() for item in recipients_raw.split(",") if item.strip()]
     return {
         "host": (get_runtime_secret("SMTP_HOST", "") or "").strip(),
@@ -75,19 +74,14 @@ def send_internal_submission_notification(
 ) -> dict[str, Any]:
     company_slug = str(form_data.get("company_slug") or DEFAULT_COMPANY_SLUG).strip() or DEFAULT_COMPANY_SLUG
     test_mode = bool(form_data.get("test_mode")) or is_test_mode_active()
-    settings = _notification_settings(company_slug, test_mode=test_mode)
-
-    if test_mode and not settings["recipients"]:
-        return {
-            "status": "disabled",
-            "message": "Safe test mode is active, so internal notification emails are suppressed.",
-        }
 
     if not notifications_enabled(company_slug, test_mode=test_mode):
         return {
             "status": "disabled",
             "message": "Internal notification email is not configured yet.",
         }
+
+    settings = _notification_settings(company_slug, test_mode=test_mode)
 
     applicant_name = " ".join(
         part
