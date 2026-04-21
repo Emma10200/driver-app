@@ -1,4 +1,4 @@
 {
-  "python.defaultInterpreterPath": "/usr/local/bin/python3",
+  "python.defaultInterpreterPath": "/workspaces/prestige-driver-app/.venv/bin/python",
   "python.useEnvironmentsExtension": false
 }

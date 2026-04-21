@@ -11,7 +11,12 @@ from typing import Any
 from urllib.parse import quote
 
 import requests
-from dotenv import load_dotenv
+
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:  # pragma: no cover - optional on hosted environments
+    def load_dotenv(*_args, **_kwargs):
+        return False
 
 try:
     import streamlit as st
