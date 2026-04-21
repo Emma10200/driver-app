@@ -100,7 +100,8 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
     # --- Company Questions ---
     pdf.section_title("Company Questions")
     pdf.field_row("Position Applied For:", _safe(form_data, "position"))
-    pdf.field_row("Applying Location:", _safe(form_data, "applying_location"))
+    preferred_office = _safe(form_data, "preferred_office") or _safe(form_data, "applying_location")
+    pdf.field_row("Preferred Office for Onboarding:", preferred_office)
     pdf.field_row("Legally Eligible (US):", _safe(form_data, "eligible_us"))
     pdf.field_row("Read/Write/Speak English:", _safe(form_data, "read_english"))
     pdf.field_row("Currently Employed/Contracted Elsewhere:", _safe(form_data, "currently_employed"))
@@ -109,9 +110,8 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
     pdf.field_row("Previously Contracted Here:", _safe(form_data, "worked_here_before"))
     pdf.field_row("TWIC Card:", _safe(form_data, "twic_card"))
     pdf.field_row("How Heard About Us:", _safe(form_data, "referral_source"))
-    pdf.field_row("Email Opportunities Opt-In:", "Yes" if form_data.get("email_marketing_opt_in") else "No")
     pdf.field_row("Text Message Consent:", "Yes" if form_data.get("text_consent") else "No")
-    pdf.field_row("Safe Driving Awards:", _safe(form_data, "safe_driving_awards", "None"))
+    pdf.field_row("Safe Driving Awards:", _safe(form_data, "safe_driving_awards"))
     if _safe(form_data, "position") == "Owner Operator":
         pdf.field_row("Owner Op Equipment:", _safe(form_data, "equipment_description"))
         pdf.field_row("  Year/Make/Model:", f"{_safe(form_data, 'equipment_year')} {_safe(form_data, 'equipment_make')} {_safe(form_data, 'equipment_model')}")

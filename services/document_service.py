@@ -1,0 +1,131 @@
+"""Supporting document upload helpers."""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+from typing import Any
+
+import streamlit as st
+
+from services.draft_service import LOCAL_STORAGE_DIR, ensure_draft_id
+from submission_storage import save_supporting_documents
+from ui.common import show_missing_fields
+
+UPLOAD_WIDGET_KEY = "supporting_documents_uploader"
+ALLOWED_UPLOAD_EXTENSIONS = {"pdf", "png", "jpg", "jpeg"}
+MAX_SUPPORTING_DOCUMENTS = 6
+MAX_SUPPORTING_DOCUMENT_SIZE_MB = 10
+MAX_SUPPORTING_DOCUMENT_SIZE_BYTES = MAX_SUPPORTING_DOCUMENT_SIZE_MB * 1024 * 1024
+
+
+def get_pending_uploads() -> list[Any]:
+    uploads = st.session_state.get(UPLOAD_WIDGET_KEY) or []
+    if uploads is None:
+        return []
+    if isinstance(uploads, list):
+        return [upload for upload in uploads if upload is not None]
+    return [uploads]
+
+
+def _normalize_pending_uploads() -> tuple[list[dict[str, Any]], list[str]]:
+    uploads = get_pending_uploads()
+    errors: list[str] = []
+    normalized: list[dict[str, Any]] = []
+
+    if len(uploads) > MAX_SUPPORTING_DOCUMENTS:
+        errors.append(f"Upload no more than {MAX_SUPPORTING_DOCUMENTS} supporting documents at a time.")
+
+    for upload in uploads:
+        file_name = Path(str(getattr(upload, 'name', '') or '')).name
+        extension = Path(file_name).suffix.lower().lstrip('.')
+        content = upload.getvalue()
+        size_bytes = int(getattr(upload, 'size', len(content)) or len(content))
+        content_type = str(getattr(upload, 'type', '') or 'application/octet-stream')
+
+        if extension not in ALLOWED_UPLOAD_EXTENSIONS:
+            errors.append(f"`{file_name}` must be a PDF, JPG, or PNG file.")
+            continue
+        if size_bytes > MAX_SUPPORTING_DOCUMENT_SIZE_BYTES:
+            errors.append(
+                f"`{file_name}` exceeds the {MAX_SUPPORTING_DOCUMENT_SIZE_MB} MB per-file limit."
+            )
+            continue
+
+        normalized.append(
+            {
+                "file_name": file_name,
+                "content": content,
+                "content_type": content_type,
+                "size_bytes": size_bytes,
+                "content_digest": hashlib.sha256(content).hexdigest(),
+            }
+        )
+
+    return normalized, errors
+
+
+def sync_pending_uploads() -> dict[str, Any]:
+    normalized, errors = _normalize_pending_uploads()
+    existing_documents = st.session_state.get("uploaded_documents", [])
+
+    if errors:
+        return {"ok": False, "errors": errors, "documents": existing_documents}
+
+    if not normalized:
+        return {"ok": True, "saved": 0, "documents": existing_documents, "warnings": []}
+
+    existing_digests = {document.get("content_digest") for document in existing_documents}
+    new_documents = [document for document in normalized if document.get("content_digest") not in existing_digests]
+
+    if not new_documents:
+        return {"ok": True, "saved": 0, "documents": existing_documents, "warnings": []}
+
+    draft_id = ensure_draft_id()
+    result = save_supporting_documents(
+        draft_id=draft_id,
+        documents=new_documents,
+        local_base_dir=LOCAL_STORAGE_DIR,
+    )
+    merged_documents = [*existing_documents, *result.get("documents", [])]
+    st.session_state.uploaded_documents = merged_documents
+    return {
+        "ok": True,
+        "saved": len(result.get("documents", [])),
+        "documents": merged_documents,
+        "warnings": result.get("warnings", []),
+    }
+
+
+def render_supporting_documents_section() -> None:
+    st.markdown("---")
+    st.subheader("Supporting Documents")
+    st.caption(
+        f"Accepted file types: PDF, JPG/JPEG, PNG. Maximum {MAX_SUPPORTING_DOCUMENTS} files, up to "
+        f"{MAX_SUPPORTING_DOCUMENT_SIZE_MB} MB per file. Files are stored server-side when you save a draft or submit."
+    )
+
+    st.file_uploader(
+        "Upload supporting documents",
+        type=["pdf", "png", "jpg", "jpeg"],
+        accept_multiple_files=True,
+        key=UPLOAD_WIDGET_KEY,
+        help="Upload optional supporting documents such as license images, medical cards, or insurance PDFs.",
+    )
+
+    saved_documents = st.session_state.get("uploaded_documents", [])
+    if saved_documents:
+        st.markdown("**Saved documents**")
+        for document in saved_documents:
+            size_kb = max(1, int(document.get("size_bytes", 0) / 1024))
+            st.markdown(f"- `{document.get('file_name', 'document')}` ({size_kb} KB)")
+
+    pending_uploads = get_pending_uploads()
+    normalized, errors = _normalize_pending_uploads()
+    if errors:
+        show_missing_fields(errors, "Please fix the supporting document upload issues:")
+    elif pending_uploads:
+        duplicate_digests = {document.get("content_digest") for document in saved_documents}
+        new_count = sum(1 for document in normalized if document.get("content_digest") not in duplicate_digests)
+        if new_count:
+            st.info(f"{new_count} new document(s) selected. They’ll be saved securely when you save a draft or submit.")

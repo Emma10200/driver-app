@@ -2,6 +2,13 @@
 
 Streamlit application for Phase 1 driver pre-qualification.
 
+Recent upgrades in this branch include:
+
+- secure **server-side draft persistence** with resumable draft codes
+- **supporting document uploads** for PDF/JPG/PNG files
+- internal **notification emails without attachments**
+- removal of silent default answers from the remaining major dropdown-heavy pages
+
 ## Compliance Features
 - **No criminal history questions** — California Fair Chance Act (AB 1008)
 - **FCRA disclosure as standalone page** — 15 U.S.C. § 1681b
@@ -30,6 +37,13 @@ Configuration can be supplied with either:
 - Streamlit Community Cloud secrets for deployment
 
 See `.env` and `.streamlit/secrets.toml.example` for the expected keys.
+
+## Drafts, uploads, and notifications
+
+- Completed steps are autosaved to the configured backend with a draft code shown in the sidebar.
+- Supporting documents are limited to **PDF, JPG/JPEG, and PNG**.
+- The app currently enforces **up to 6 supporting documents** and **10 MB per file**.
+- Notification emails are **summary-only** and do **not** include attachments or SSN data.
 
 ## Run
 
@@ -71,6 +85,16 @@ SUPABASE_URL = "https://your-project-ref.supabase.co"
 SUPABASE_SERVICE_KEY = "your-supabase-service-role-key"
 SUPABASE_BUCKET = "driver-applications"
 SUPABASE_TABLE = ""
+
+[smtp]
+SMTP_HOST = "smtp.your-provider.com"
+SMTP_PORT = "587"
+SMTP_USERNAME = "smtp-username"
+SMTP_PASSWORD = "smtp-password"
+SMTP_FROM_EMAIL = "alerts@your-company.com"
+SMTP_USE_TLS = "true"
+SMTP_USE_SSL = "false"
+INTERNAL_NOTIFICATION_TO = "dispatch@your-company.com,safety@your-company.com"
 ```
 
 ### Notes on cost
@@ -110,4 +134,4 @@ After submission, the applicant can download:
 - Standalone PSP Disclosure PDF
 - Standalone Clearinghouse Release PDF
 
-The app also stores a company copy of each submission either locally or in Supabase, depending on configuration.
+The app also stores a company copy of each submission either locally or in Supabase, depending on configuration, and can notify internal recipients by SMTP when configured.

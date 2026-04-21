@@ -66,8 +66,12 @@ US_STATES = [
 
 # Position types (independent contractor language)
 POSITION_TYPES = [
-    "Independent Contractor Driver",
     "Owner Operator",
+]
+
+OFFICE_LOCATIONS = [
+    "California Office",
+    "Chicago Office",
 ]
 
 # How did you hear about us options

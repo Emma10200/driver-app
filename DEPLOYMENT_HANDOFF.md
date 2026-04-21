@@ -6,6 +6,12 @@ This project is ready for a low-cost public launch using:
 - **Streamlit Community Cloud** for hosting
 - **Supabase** for cloud submission storage
 
+It now also supports:
+
+- resumable **server-side draft saves**
+- supporting document uploads for **PDF/JPG/PNG**
+- internal **SMTP notification emails without attachments**
+
 ## What this app does
 
 - Collects Phase 1 driver pre-qualification data
@@ -47,6 +53,7 @@ Optional:
 
 - If you want metadata rows in a table, create a table and set `SUPABASE_TABLE`
 - If not, leave `SUPABASE_TABLE` blank
+- Drafts and supporting documents are stored under their own folders in the same bucket
 
 ### 3. Deploy on Streamlit Community Cloud
 
@@ -68,6 +75,16 @@ SUPABASE_URL = "https://your-project-ref.supabase.co"
 SUPABASE_SERVICE_KEY = "your-supabase-service-role-key"
 SUPABASE_BUCKET = "driver-applications"
 SUPABASE_TABLE = ""
+
+[smtp]
+SMTP_HOST = "smtp.your-provider.com"
+SMTP_PORT = "587"
+SMTP_USERNAME = "smtp-username"
+SMTP_PASSWORD = "smtp-password"
+SMTP_FROM_EMAIL = "alerts@your-company.com"
+SMTP_USE_TLS = "true"
+SMTP_USE_SSL = "false"
+INTERNAL_NOTIFICATION_TO = "dispatch@your-company.com,safety@your-company.com"
 ```
 
 ### 4. Launch and test
@@ -79,13 +96,15 @@ After deploy:
 3. Confirm:
    - the app completes successfully
    - PDFs download
-   - files appear in Supabase Storage
+   - submission files, drafts, and supporting documents appear in Supabase Storage
+   - internal notification email arrives without attachments (if SMTP is configured)
 
 ## Recommended settings
 
 - Keep `SUBMISSION_STORAGE_BACKEND = "auto"` for launch
 - Use `"both"` only if you also want local file saves during local development
 - Do not put real secrets in GitHub
+- Keep SMTP recipients limited to internal company inboxes only
 
 ## What safety/owner should review
 
@@ -104,6 +123,24 @@ Check:
 - `SUPABASE_SERVICE_KEY`
 - bucket name is exactly `driver-applications`
 - Streamlit secrets were pasted correctly
+
+### Uploads are rejected
+
+Check:
+
+- files are PDF, JPG/JPEG, or PNG
+- each file is under the configured per-file limit
+- `.streamlit/config.toml` is present in the repo for the deployed app
+
+### Notification email does not arrive
+
+Check:
+
+- `SMTP_HOST`
+- `SMTP_PORT`
+- `SMTP_FROM_EMAIL`
+- `INTERNAL_NOTIFICATION_TO`
+- SMTP username/password if your provider requires authentication
 
 ### App works locally but not in the cloud
 
