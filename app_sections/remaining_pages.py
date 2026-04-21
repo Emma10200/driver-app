@@ -15,7 +15,7 @@ from config import (
 from runtime_context import get_active_company_profile
 from services.draft_service import autosave_draft
 from state import next_page, prev_page
-from ui.common import default_california_applicability, selectbox_with_placeholder, show_missing_fields
+from ui.common import default_california_applicability, selectbox_with_placeholder, show_missing_fields, show_user_error
 
 
 def render_remaining_page(page: int) -> bool:
@@ -687,7 +687,11 @@ def render_remaining_page(page: int) -> bool:
         with bcol2:
             if st.button("Next → (California Disclosure)", key="p8_next", use_container_width=True, type="primary"):
                 if not fcra_acknowledge:
-                    st.error("You must acknowledge the FCRA Disclosure to proceed.")
+                    show_user_error(
+                        "You must acknowledge the FCRA Disclosure to proceed.",
+                        code="validation_fcra_ack_required",
+                        severity="warning",
+                    )
                 else:
                     st.session_state.form_data["fcra_acknowledge"] = True
                     st.session_state.form_data["fcra_timestamp"] = datetime.now().isoformat()
@@ -747,7 +751,11 @@ def render_remaining_page(page: int) -> bool:
         with bcol2:
             if st.button("Next → (PSP Disclosure)", key="p9_next", use_container_width=True, type="primary"):
                 if ca_applicable and not ca_disclosure_acknowledge:
-                    st.error("You must acknowledge the California Disclosure to proceed.")
+                    show_user_error(
+                        "You must acknowledge the California Disclosure to proceed.",
+                        code="validation_ca_disclosure_ack_required",
+                        severity="warning",
+                    )
                 else:
                     st.session_state.form_data["ca_applicable"] = ca_applicable
                     st.session_state.form_data["ca_disclosure_acknowledge"] = ca_disclosure_acknowledge
@@ -805,7 +813,11 @@ def render_remaining_page(page: int) -> bool:
         with bcol2:
             if st.button("Next → (Clearinghouse Release)", key="p10_next", use_container_width=True, type="primary"):
                 if not psp_acknowledge:
-                    st.error("You must acknowledge the PSP Disclosure to proceed.")
+                    show_user_error(
+                        "You must acknowledge the PSP Disclosure to proceed.",
+                        code="validation_psp_ack_required",
+                        severity="warning",
+                    )
                 else:
                     st.session_state.form_data["psp_acknowledge"] = True
                     st.session_state.form_data["psp_timestamp"] = datetime.now().isoformat()
@@ -870,7 +882,12 @@ def render_remaining_page(page: int) -> bool:
                         missing.append("Clearinghouse Release acknowledgment")
                     if not inv_consumer_report:
                         missing.append("Investigative Consumer Report Disclosure acknowledgment")
-                    st.error("Please complete the required final acknowledgments: " + ", ".join(missing))
+                    show_user_error(
+                        "Please complete the required final acknowledgments: " + ", ".join(missing),
+                        code="validation_final_ack_required",
+                        severity="warning",
+                        extra={"missing_acknowledgments": missing},
+                    )
                 else:
                     st.session_state.form_data["clearinghouse_acknowledge"] = True
                     st.session_state.form_data["clearinghouse_timestamp"] = datetime.now().isoformat()

@@ -13,6 +13,7 @@ from config import (
 )
 from runtime_context import get_active_company_profile, is_test_mode_active
 from services.draft_service import render_draft_sidebar
+from services.error_log_service import log_application_error
 
 
 BASE_STYLES = """
@@ -101,7 +102,32 @@ def show_missing_fields(
         return
 
     bullet_list = "\n".join(f"- {field}" for field in missing_fields)
-    st.error(f"{header_text}\n\n{bullet_list}")
+    log_application_error(
+        code="validation_missing_fields",
+        user_message=header_text,
+        technical_details=", ".join(missing_fields),
+        severity="warning",
+        extra={"missing_fields": missing_fields},
+    )
+    st.warning(f"{header_text}\n\n{bullet_list}")
+
+
+def show_user_error(
+    message: str,
+    *,
+    code: str,
+    technical_details: str | None = None,
+    severity: str = "error",
+    extra: dict[str, Any] | None = None,
+) -> None:
+    log_application_error(
+        code=code,
+        user_message=message,
+        technical_details=technical_details,
+        severity=severity,
+        extra=extra,
+    )
+    st.warning(message)
 
 
 def default_california_applicability() -> bool:

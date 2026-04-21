@@ -16,11 +16,12 @@ from pdf_generator import (
 from runtime_context import get_active_company_profile, get_storage_namespace, is_test_mode_active
 from services.document_service import render_supporting_documents_section, sync_pending_uploads
 from services.draft_service import autosave_draft
+from services.error_log_service import log_application_error
 from services.notification_service import send_internal_submission_notification
 from services.submission_service import build_submission_artifacts, save_submission_bundle
 from state import prev_page, reset_application_state
 from submission_storage import get_submission_destination_summary
-from ui.common import show_missing_fields, summary_item
+from ui.common import show_missing_fields, show_user_error, summary_item
 
 
 def _attempt_submission_notification() -> None:
@@ -52,6 +53,12 @@ def _attempt_submission_notification() -> None:
     else:
         st.session_state.submission_notification_status = None
         st.session_state.submission_notification_error = notification_result.get("message")
+        log_application_error(
+            code="submission_notification_failed",
+            user_message="Internal submission notification failed.",
+            technical_details=notification_result.get("message"),
+            severity="warning",
+        )
 
 
 def render_review_submit_page(submissions_dir: Path) -> None:
@@ -179,7 +186,11 @@ def render_review_submit_page(submissions_dir: Path) -> None:
     with bcol3:
         if st.button("✅ Submit Application", key="p12_submit", use_container_width=True, type="primary"):
             if not review_confirm:
-                st.error("Please confirm that you reviewed the application before submitting.")
+                show_user_error(
+                    "Please confirm that you reviewed the application before submitting.",
+                    code="validation_review_confirm_required",
+                    severity="warning",
+                )
             else:
                 upload_result = sync_pending_uploads()
                 if not upload_result.get("ok"):
@@ -200,7 +211,12 @@ def render_submission_complete(submissions_dir: Path) -> None:
         try:
             st.session_state.submission_artifacts = build_submission_artifacts()
         except Exception as exc:
-            st.session_state.submission_save_error = f"Could not generate submission PDFs: {exc}"
+            log_application_error(
+                code="submission_pdf_generation_failed",
+                user_message="Could not generate submission PDFs.",
+                technical_details=str(exc),
+            )
+            st.session_state.submission_save_error = "We could not finish preparing your submission packet. Please try again."
 
     if st.session_state.submission_artifacts is not None and st.session_state.saved_submission_dir is None:
         try:
@@ -210,7 +226,12 @@ def render_submission_complete(submissions_dir: Path) -> None:
             if warnings:
                 st.session_state.submission_save_notice = "\n".join(warnings)
         except Exception as exc:
-            st.session_state.submission_save_error = f"Could not save submission files: {exc}"
+            log_application_error(
+                code="submission_persistence_failed",
+                user_message="Could not save submission files.",
+                technical_details=str(exc),
+            )
+            st.session_state.submission_save_error = "Your application could not be saved right now. Please try again shortly."
 
     _attempt_submission_notification()
 
@@ -233,7 +254,13 @@ def render_submission_complete(submissions_dir: Path) -> None:
         st.warning(st.session_state.submission_save_error)
 
     if st.session_state.submission_save_notice:
-        st.warning(st.session_state.submission_save_notice)
+        log_application_error(
+            code="submission_persistence_warning",
+            user_message="Submission completed with storage warnings.",
+            technical_details=st.session_state.submission_save_notice,
+            severity="warning",
+        )
+        st.warning("Your application was submitted, but an internal follow-up check is pending.")
 
     st.caption(
         "This app stores the submission using the configured storage backend and offers manual downloads below."
@@ -262,7 +289,11 @@ def render_submission_complete(submissions_dir: Path) -> None:
             use_container_width=True,
         )
     except Exception as exc:
-        st.error(f"PDF generation error: {exc}")
+        show_user_error(
+            "We couldn't prepare the application PDF download right now.",
+            code="download_application_pdf_failed",
+            technical_details=str(exc),
+        )
 
     st.markdown("---")
     st.subheader("Standalone Disclosure Documents")
@@ -283,7 +314,11 @@ def render_submission_complete(submissions_dir: Path) -> None:
                 use_container_width=True,
             )
         except Exception as exc:
-            st.error(f"FCRA PDF error: {exc}")
+            show_user_error(
+                "We couldn't prepare the FCRA disclosure PDF right now.",
+                code="download_fcra_pdf_failed",
+                technical_details=str(exc),
+            )
 
     with dcol2:
         try:
@@ -300,7 +335,11 @@ def render_submission_complete(submissions_dir: Path) -> None:
                 use_container_width=True,
             )
         except Exception as exc:
-            st.error(f"PSP PDF error: {exc}")
+            show_user_error(
+                "We couldn't prepare the PSP disclosure PDF right now.",
+                code="download_psp_pdf_failed",
+                technical_details=str(exc),
+            )
 
     with dcol3:
         try:
@@ -317,7 +356,11 @@ def render_submission_complete(submissions_dir: Path) -> None:
                 use_container_width=True,
             )
         except Exception as exc:
-            st.error(f"Clearinghouse PDF error: {exc}")
+            show_user_error(
+                "We couldn't prepare the Clearinghouse release PDF right now.",
+                code="download_clearinghouse_pdf_failed",
+                technical_details=str(exc),
+            )
 
     if st.session_state.submission_artifacts and st.session_state.submission_artifacts.get("california_pdf"):
         try:
@@ -329,7 +372,11 @@ def render_submission_complete(submissions_dir: Path) -> None:
                 use_container_width=True,
             )
         except Exception as exc:
-            st.error(f"California PDF error: {exc}")
+            show_user_error(
+                "We couldn't prepare the California disclosure PDF right now.",
+                code="download_california_pdf_failed",
+                technical_details=str(exc),
+            )
 
     if st.session_state.get("uploaded_documents"):
         st.markdown("---")

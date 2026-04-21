@@ -10,7 +10,7 @@ from config import MOBILE_CARRIERS, US_STATES
 from runtime_context import get_active_company_profile
 from services.draft_service import autosave_draft
 from state import next_page
-from ui.common import selectbox_with_placeholder, show_missing_fields
+from ui.common import selectbox_with_placeholder, show_missing_fields, show_user_error
 from utils.formatting import format_ssn, normalize_digits
 
 
@@ -176,7 +176,12 @@ def render_personal_information_page() -> None:
             return
 
         if len(ssn_digits) != 9:
-            st.error("Social Security Number must contain exactly 9 digits.")
+            show_user_error(
+                "Social Security Number must contain exactly 9 digits.",
+                code="validation_ssn_length",
+                severity="warning",
+                extra={"ssn_digits_length": len(ssn_digits)},
+            )
             return
 
         st.session_state.form_data.update(

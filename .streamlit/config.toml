@@ -1,2 +1,5 @@
 [server]
 maxUploadSize = 15
+
+[client]
+showErrorDetails = "none"

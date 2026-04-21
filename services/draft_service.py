@@ -11,6 +11,7 @@ from typing import Any
 import streamlit as st
 
 from runtime_context import get_storage_namespace, sync_runtime_context
+from services.error_log_service import log_application_error
 from services.test_mode_service import render_admin_test_tools
 from state import init_session_state, reset_application_state
 from submission_storage import load_draft_bundle, save_draft_bundle
@@ -73,8 +74,14 @@ def autosave_draft() -> dict[str, Any] | None:
             storage_namespace=get_storage_namespace(),
         )
     except Exception as exc:
-        st.session_state.draft_save_error = str(exc)
-        return {"ok": False, "error": str(exc)}
+        log_application_error(
+            code="draft_autosave_failed",
+            user_message="Draft autosave failed.",
+            technical_details=str(exc),
+            severity="warning",
+        )
+        st.session_state.draft_save_error = "Secure autosave is temporarily unavailable."
+        return {"ok": False, "error": "draft_autosave_failed"}
 
     st.session_state.draft_id = snapshot["draft_id"]
     st.session_state.draft_saved_at = snapshot["saved_at"]
@@ -137,7 +144,14 @@ def render_draft_sidebar() -> None:
                 try:
                     load_draft_into_session(resume_code)
                 except Exception as exc:
-                    st.session_state.draft_load_error = str(exc)
+                    log_application_error(
+                        code="draft_load_failed",
+                        user_message="Draft load failed.",
+                        technical_details=str(exc),
+                        severity="warning",
+                        extra={"resume_code": resume_code.strip()},
+                    )
+                    st.session_state.draft_load_error = "We couldn't load that draft code. Please check it and try again."
                 else:
                     st.session_state.draft_load_error = None
                     st.rerun()
