@@ -9,7 +9,7 @@ import streamlit as st
 from config import EQUIPMENT_TYPES, OFFICE_LOCATIONS, REFERRAL_SOURCES
 from services.draft_service import autosave_draft
 from state import next_page, prev_page
-from ui.common import selectbox_with_placeholder, show_missing_fields
+from ui.common import render_save_draft_button, selectbox_with_placeholder, show_missing_fields
 
 
 OWNER_OPERATOR_POSITION = "Owner Operator"
@@ -173,12 +173,14 @@ def render_company_questions_page() -> None:
         if known_other_name == "Yes":
             other_name = st.text_input("Enter other name(s)", value=st.session_state.form_data.get("other_name", ""))
 
-    bcol1, bcol2 = st.columns(2)
+    bcol1, bcol2, bcol3 = st.columns(3)
     with bcol1:
         if st.button("← Back", key="p2_back", use_container_width=True):
             prev_page()
             st.rerun()
     with bcol2:
+        render_save_draft_button("p2_save_draft")
+    with bcol3:
         if st.button("Next →", key="p2_next", use_container_width=True, type="primary"):
             missing: list[str] = []
             if not preferred_office:

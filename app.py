@@ -29,6 +29,7 @@ st.set_page_config(
     page_title=f"{REQUESTED_COMPANY.name} - Driver Application",
     page_icon="🚛",
     layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
 init_session_state()

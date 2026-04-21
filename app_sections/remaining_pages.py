@@ -15,7 +15,7 @@ from config import (
 from runtime_context import get_active_company_profile
 from services.draft_service import autosave_draft
 from state import next_page, prev_page
-from ui.common import default_california_applicability, selectbox_with_placeholder, show_missing_fields, show_user_error
+from ui.common import default_california_applicability, render_save_draft_button, selectbox_with_placeholder, show_missing_fields, show_user_error
 
 
 def render_remaining_page(page: int) -> bool:
@@ -120,12 +120,14 @@ def render_remaining_page(page: int) -> bool:
             )
             st.markdown("---")
 
-        bcol1, bcol2 = st.columns(2)
+        bcol1, bcol2, bcol3 = st.columns(3)
         with bcol1:
             if st.button("← Back", key="p3_back", use_container_width=True):
                 prev_page()
                 st.rerun()
         with bcol2:
+            render_save_draft_button("p3_save_draft")
+        with bcol3:
             if st.button("Next →", key="p3_next", use_container_width=True, type="primary"):
                 missing: list[str] = []
                 for index, license_entry in enumerate(licenses_input, start=1):
@@ -276,12 +278,14 @@ def render_remaining_page(page: int) -> bool:
                     }
                 )
 
-        bcol1, bcol2 = st.columns(2)
+        bcol1, bcol2, bcol3 = st.columns(3)
         with bcol1:
             if st.button("← Back", key="p4_back", use_container_width=True):
                 prev_page()
                 st.rerun()
         with bcol2:
+            render_save_draft_button("p4_save_draft")
+        with bcol3:
             if st.button("Next →", key="p4_next", use_container_width=True, type="primary"):
                 missing: list[str] = []
                 for index, employer in enumerate(employers_input, start=1):
@@ -366,12 +370,14 @@ def render_remaining_page(page: int) -> bool:
         ref1 = st.text_input("Reference #1", value=st.session_state.form_data.get("ref1", ""))
         ref2 = st.text_input("Reference #2", value=st.session_state.form_data.get("ref2", ""))
 
-        bcol1, bcol2 = st.columns(2)
+        bcol1, bcol2, bcol3 = st.columns(3)
         with bcol1:
             if st.button("← Back", key="p5_back", use_container_width=True):
                 prev_page()
                 st.rerun()
         with bcol2:
+            render_save_draft_button("p5_save_draft")
+        with bcol3:
             if st.button("Next →", key="p5_next", use_container_width=True, type="primary"):
                 missing: list[str] = []
                 if not highest_grade:
@@ -505,12 +511,14 @@ def render_remaining_page(page: int) -> bool:
         else:
             st.session_state.violations = []
 
-        bcol1, bcol2 = st.columns(2)
+        bcol1, bcol2, bcol3 = st.columns(3)
         with bcol1:
             if st.button("← Back", key="p6_back", use_container_width=True):
                 prev_page()
                 st.rerun()
         with bcol2:
+            render_save_draft_button("p6_save_draft")
+        with bcol3:
             if st.button("Next →", key="p6_next", use_container_width=True, type="primary"):
                 missing = []
                 if not disq_391_15:
@@ -597,12 +605,14 @@ def render_remaining_page(page: int) -> bool:
             "legally binding as an ink signature. A submission timestamp will be recorded."
         )
 
-        bcol1, bcol2 = st.columns(2)
+        bcol1, bcol2, bcol3 = st.columns(3)
         with bcol1:
             if st.button("← Back", key="p7_back", use_container_width=True):
                 prev_page()
                 st.rerun()
         with bcol2:
+            render_save_draft_button("p7_save_draft")
+        with bcol3:
             if st.button("Next → (FCRA Disclosure)", key="p7_next", use_container_width=True, type="primary"):
                 missing = []
                 if not drug_alcohol_cert:
@@ -679,12 +689,14 @@ def render_remaining_page(page: int) -> bool:
             "authorize the background investigation. *"
         )
 
-        bcol1, bcol2 = st.columns(2)
+        bcol1, bcol2, bcol3 = st.columns(3)
         with bcol1:
             if st.button("← Back", key="p8_back", use_container_width=True):
                 prev_page()
                 st.rerun()
         with bcol2:
+            render_save_draft_button("p8_save_draft")
+        with bcol3:
             if st.button("Next → (California Disclosure)", key="p8_next", use_container_width=True, type="primary"):
                 if not fcra_acknowledge:
                     show_user_error(
@@ -743,12 +755,14 @@ def render_remaining_page(page: int) -> bool:
             value=ca_copy_default,
         )
 
-        bcol1, bcol2 = st.columns(2)
+        bcol1, bcol2, bcol3 = st.columns(3)
         with bcol1:
             if st.button("← Back", key="p9_back", use_container_width=True):
                 prev_page()
                 st.rerun()
         with bcol2:
+            render_save_draft_button("p9_save_draft")
+        with bcol3:
             if st.button("Next → (PSP Disclosure)", key="p9_next", use_container_width=True, type="primary"):
                 if ca_applicable and not ca_disclosure_acknowledge:
                     show_user_error(
@@ -805,12 +819,14 @@ def render_remaining_page(page: int) -> bool:
             "and Authorization above, and authorize access to my PSP record. *"
         )
 
-        bcol1, bcol2 = st.columns(2)
+        bcol1, bcol2, bcol3 = st.columns(3)
         with bcol1:
             if st.button("← Back", key="p10_back", use_container_width=True):
                 prev_page()
                 st.rerun()
         with bcol2:
+            render_save_draft_button("p10_save_draft")
+        with bcol3:
             if st.button("Next → (Clearinghouse Release)", key="p10_next", use_container_width=True, type="primary"):
                 if not psp_acknowledge:
                     show_user_error(
@@ -869,12 +885,14 @@ def render_remaining_page(page: int) -> bool:
 
         st.markdown("---")
 
-        bcol1, bcol2 = st.columns(2)
+        bcol1, bcol2, bcol3 = st.columns(3)
         with bcol1:
             if st.button("← Back", key="p11_back", use_container_width=True):
                 prev_page()
                 st.rerun()
         with bcol2:
+            render_save_draft_button("p11_save_draft")
+        with bcol3:
             if st.button("Next → (Review & Submit)", key="p11_next", use_container_width=True, type="primary"):
                 if not clearinghouse_acknowledge or not inv_consumer_report:
                     missing = []

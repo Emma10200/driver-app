@@ -12,7 +12,7 @@ from config import (
     PHASE_LABELS,
 )
 from runtime_context import get_active_company_profile, is_test_mode_active
-from services.draft_service import render_draft_sidebar
+from services.draft_service import autosave_draft, render_draft_sidebar
 from services.error_log_service import log_application_error
 
 
@@ -128,6 +128,41 @@ def show_user_error(
         extra=extra,
     )
     st.warning(message)
+
+
+def _open_sidebar_via_js() -> None:
+    components.html(
+        """
+        <script>
+        const parentWindow = window.parent;
+        const parentDocument = parentWindow.document;
+
+        function tryOpenSidebar() {
+            const openButton = parentDocument.querySelector('button[aria-label="Open sidebar"]');
+            if (openButton) {
+                openButton.click();
+            }
+        }
+
+        [0, 60, 140].forEach((delay) => {
+            parentWindow.setTimeout(tryOpenSidebar, delay);
+        });
+        </script>
+        """,
+        height=0,
+    )
+
+
+def render_save_draft_button(button_key: str, label: str = "💾 Save Draft") -> None:
+    if not st.button(label, key=button_key, use_container_width=True):
+        return
+
+    result = autosave_draft()
+    if result and result.get("ok"):
+        st.success(f"Draft saved. Resume later with code `{st.session_state.draft_id}`.")
+        _open_sidebar_via_js()
+    else:
+        st.warning("The form is still open, but the secure draft save did not complete.")
 
 
 def default_california_applicability() -> bool:
