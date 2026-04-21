@@ -84,6 +84,15 @@ BASE_STYLES = """
         font-size: 0.72rem;
         color: color-mix(in srgb, var(--text-color) 62%, transparent);
     }
+    /* Keep the sidebar open/close control visible at all times instead of
+       fading until hovered. Applies to both the collapsed and expanded states. */
+    [data-testid="stSidebarCollapsedControl"],
+    [data-testid="stSidebarCollapseButton"],
+    button[kind="headerNoPadding"][aria-label="Open sidebar"],
+    button[kind="headerNoPadding"][aria-label="Close sidebar"] {
+        opacity: 1 !important;
+        visibility: visible !important;
+    }
 </style>
 """
 
@@ -195,13 +204,24 @@ def _open_sidebar_via_js() -> None:
         const parentDocument = parentWindow.document;
 
         function tryOpenSidebar() {
-            const openButton = parentDocument.querySelector('button[aria-label="Open sidebar"]');
-            if (openButton) {
-                openButton.click();
+            const selectors = [
+                'button[aria-label="Open sidebar"]',
+                '[data-testid="stSidebarCollapsedControl"] button',
+                '[data-testid="stSidebarCollapsedControl"]',
+                '[data-testid="collapsedControl"] button',
+                '[data-testid="collapsedControl"]'
+            ];
+            for (const sel of selectors) {
+                const el = parentDocument.querySelector(sel);
+                if (el) {
+                    el.click();
+                    return true;
+                }
             }
+            return false;
         }
 
-        [0, 60, 140].forEach((delay) => {
+        [0, 60, 140, 280, 500].forEach((delay) => {
             parentWindow.setTimeout(tryOpenSidebar, delay);
         });
         </script>
