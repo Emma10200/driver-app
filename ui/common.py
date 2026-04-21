@@ -252,14 +252,6 @@ def _sync_browser_autofill_via_js() -> None:
         if (parentDocument.body && parentDocument.body.dataset.autofillButtonSyncBound !== '1') {
             parentDocument.body.dataset.autofillButtonSyncBound = '1';
 
-            // Run on pointerdown of any button so values are committed
-            // before Streamlit processes the click.
-            parentDocument.addEventListener('pointerdown', (event) => {
-                if (event.target && event.target.closest(BUTTON_SELECTOR)) {
-                    commitAutofilledInputs();
-                }
-            }, true);
-
             // Also run when the user presses Enter inside a form field.
             parentDocument.addEventListener('keydown', (event) => {
                 if (event.key === 'Enter') {
