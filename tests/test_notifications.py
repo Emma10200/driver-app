@@ -57,7 +57,7 @@ def test_send_internal_submission_notification_uses_tls_and_reply_to(monkeypatch
     monkeypatch.setattr(
         notification_service,
         "_notification_settings",
-        lambda: {
+        lambda company_slug, test_mode: {
             "host": "smtp.example.com",
             "port": 587,
             "username": "mailer",
@@ -140,3 +140,34 @@ def test_attempt_submission_notification_skips_when_disabled(monkeypatch):
     review_submit._attempt_submission_notification()
 
     assert calls == []
+
+
+def test_send_internal_submission_notification_is_suppressed_in_test_mode(monkeypatch):
+    monkeypatch.setattr(
+        notification_service,
+        "_notification_settings",
+        lambda company_slug, test_mode: {
+            "host": "smtp.gmail.com",
+            "port": 587,
+            "username": "mailer",
+            "password": "secret",
+            "from_email": "alerts@example.com",
+            "recipients": [],
+            "use_tls": True,
+            "use_ssl": False,
+        },
+    )
+
+    result = notification_service.send_internal_submission_notification(
+        form_data={
+            "company_slug": "prestige",
+            "test_mode": True,
+            "first_name": "Test",
+            "last_name": "Applicant",
+        },
+        submission_result={"location_label": "driver-applications/companies/prestige/test-mode/submissions/test"},
+        uploaded_documents=[],
+    )
+
+    assert result["status"] == "disabled"
+    assert "Safe test mode" in result["message"]

@@ -17,19 +17,21 @@ from app_sections.company_questions import render_company_questions_page
 from app_sections.personal_info import render_personal_information_page
 from app_sections.remaining_pages import render_remaining_page
 from app_sections.review_submit import render_review_submit_page, render_submission_complete
-from config import COMPANY_NAME
+from runtime_context import get_company_profile, resolve_company_slug, sync_runtime_context
 from state import init_session_state
 from ui.common import render_app_shell, render_progress_bar, scroll_to_top_on_page_change
 
 SUBMISSIONS_DIR = Path(__file__).resolve().parent / "submissions"
+REQUESTED_COMPANY = get_company_profile(resolve_company_slug())
 
 st.set_page_config(
-    page_title=f"{COMPANY_NAME} - Driver Application",
+    page_title=f"{REQUESTED_COMPANY.name} - Driver Application",
     page_icon="🚛",
     layout="wide",
 )
 
 init_session_state()
+sync_runtime_context()
 render_app_shell()
 page = render_progress_bar()
 scroll_to_top_on_page_change(page)

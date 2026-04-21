@@ -11,6 +11,9 @@ import streamlit as st
 SESSION_DEFAULTS: dict[str, Any] = {
     "current_page": 1,
     "last_rendered_page": None,
+    "company_slug": "prestige",
+    "admin_tools_enabled": False,
+    "test_mode": False,
     "form_data": {},
     "submitted": False,
     "draft_id": None,

@@ -7,6 +7,8 @@ Recent upgrades in this branch include:
 - secure **server-side draft persistence** with resumable draft codes
 - **supporting document uploads** for PDF/JPG/PNG files
 - internal **notification emails without attachments**
+- hidden **safe admin test mode** with review-ready autofill tools
+- runtime **company switching via URL query parameters**
 - removal of silent default answers from the remaining major dropdown-heavy pages
 
 ## Compliance Features
@@ -44,6 +46,23 @@ See `.env` and `.streamlit/secrets.toml.example` for the expected keys.
 - Supporting documents are limited to **PDF, JPG/JPEG, and PNG**.
 - The app currently enforces **up to 6 supporting documents** and **10 MB per file**.
 - Notification emails are **summary-only** and do **not** include attachments or SSN data.
+- Safe test mode uses fake data, stores records under a separate company test namespace, and suppresses live notifications unless `TEST_INTERNAL_NOTIFICATION_TO` is configured.
+
+## Company links and hidden admin mode
+
+The same deployment can serve multiple company-specific entry links:
+
+- `...?company=prestige`
+- `...?company=side-xpress`
+
+Unknown company values safely fall back to `prestige`.
+
+For internal QA, you can enable the hidden admin tools with:
+
+- `...?company=prestige&admin=1`
+- `...?company=prestige&mode=test`
+
+If `ADMIN_TEST_TOKEN` is configured in secrets, add `&token=YOUR_TOKEN` to the URL as well.
 
 ## Run
 
@@ -79,6 +98,7 @@ The fastest $0 starter setup is:
 ```toml
 [app]
 SUBMISSION_STORAGE_BACKEND = "auto"
+ADMIN_TEST_TOKEN = "set-a-secret-token-for-admin-test-links"
 
 [supabase]
 SUPABASE_URL = "https://your-project-ref.supabase.co"
@@ -95,6 +115,7 @@ SMTP_FROM_EMAIL = "alerts@your-company.com"
 SMTP_USE_TLS = "true"
 SMTP_USE_SSL = "false"
 INTERNAL_NOTIFICATION_TO = "dispatch@your-company.com,safety@your-company.com"
+TEST_INTERNAL_NOTIFICATION_TO = "qa@your-company.com"
 ```
 
 ### Notes on cost

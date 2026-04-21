@@ -6,6 +6,8 @@ import smtplib
 from email.message import EmailMessage
 from typing import Any
 
+from config import DEFAULT_COMPANY_SLUG
+from runtime_context import is_test_mode_active
 from submission_storage import get_runtime_secret
 
 
@@ -15,8 +17,19 @@ def _as_bool(value: str | None, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _notification_settings() -> dict[str, Any]:
-    recipients_raw = get_runtime_secret("INTERNAL_NOTIFICATION_TO", "") or ""
+def _recipient_secret_key(company_slug: str) -> str:
+    return f"INTERNAL_NOTIFICATION_TO_{company_slug.upper().replace('-', '_')}"
+
+
+def _notification_settings(company_slug: str, *, test_mode: bool) -> dict[str, Any]:
+    if test_mode:
+        recipients_raw = get_runtime_secret("TEST_INTERNAL_NOTIFICATION_TO", "") or ""
+    else:
+        recipients_raw = (
+            get_runtime_secret(_recipient_secret_key(company_slug), "")
+            or get_runtime_secret("INTERNAL_NOTIFICATION_TO", "")
+            or ""
+        )
     recipients = [item.strip() for item in recipients_raw.split(",") if item.strip()]
     return {
         "host": (get_runtime_secret("SMTP_HOST", "") or "").strip(),
@@ -30,8 +43,8 @@ def _notification_settings() -> dict[str, Any]:
     }
 
 
-def notifications_enabled() -> bool:
-    settings = _notification_settings()
+def notifications_enabled(company_slug: str, *, test_mode: bool) -> bool:
+    settings = _notification_settings(company_slug, test_mode=test_mode)
     return bool(settings["host"] and settings["from_email"] and settings["recipients"])
 
 
@@ -60,8 +73,17 @@ def send_internal_submission_notification(
     submission_result: dict[str, Any],
     uploaded_documents: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    settings = _notification_settings()
-    if not notifications_enabled():
+    company_slug = str(form_data.get("company_slug") or DEFAULT_COMPANY_SLUG).strip() or DEFAULT_COMPANY_SLUG
+    test_mode = bool(form_data.get("test_mode")) or is_test_mode_active()
+    settings = _notification_settings(company_slug, test_mode=test_mode)
+
+    if test_mode and not settings["recipients"]:
+        return {
+            "status": "disabled",
+            "message": "Safe test mode is active, so internal notification emails are suppressed.",
+        }
+
+    if not notifications_enabled(company_slug, test_mode=test_mode):
         return {
             "status": "disabled",
             "message": "Internal notification email is not configured yet.",
@@ -79,7 +101,8 @@ def send_internal_submission_notification(
     uploaded_documents = uploaded_documents or []
 
     message = EmailMessage()
-    message["Subject"] = f"New driver application submitted: {applicant_name}"
+    subject_prefix = "[TEST] " if test_mode else ""
+    message["Subject"] = f"{subject_prefix}New driver application submitted: {applicant_name}"
     message["From"] = settings["from_email"]
     message["To"] = ", ".join(settings["recipients"])
     applicant_email = str(form_data.get("email", "") or "").strip()

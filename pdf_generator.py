@@ -1,25 +1,33 @@
-"""
-PDF generation for Prestige Transportation Inc. driver application.
-Uses FPDF2 to generate compliant application and standalone disclosure PDFs.
-"""
+"""PDF generation helpers for company-specific driver application packets."""
 
-from fpdf import FPDF
 from datetime import date
 from io import BytesIO
-from config import COMPANY_NAME, COMPANY_ADDRESS, COMPANY_CITY_STATE_ZIP, COMPANY_PHONE, COMPANY_EMAIL
+
+from fpdf import FPDF
+
+from runtime_context import get_active_company_profile
 
 
-class PrestigePDF(FPDF):
-    """Base PDF class with Prestige Transportation header/footer."""
+class CompanyPDF(FPDF):
+    """Base PDF class with runtime company header/footer."""
+
+    def __init__(self, company):
+        super().__init__()
+        self.company = company
 
     def header(self):
         self.set_font("Helvetica", "B", 14)
         self.set_text_color(26, 60, 110)
-        self.cell(0, 8, COMPANY_NAME, align="C", new_x="LMARGIN", new_y="NEXT")
+        self.cell(0, 8, self.company.name, align="C", new_x="LMARGIN", new_y="NEXT")
         self.set_font("Helvetica", "", 8)
         self.set_text_color(100, 100, 100)
-        self.cell(0, 4, f"{COMPANY_ADDRESS} | {COMPANY_CITY_STATE_ZIP} | {COMPANY_PHONE}", align="C", new_x="LMARGIN", new_y="NEXT")
-        self.cell(0, 4, COMPANY_EMAIL, align="C", new_x="LMARGIN", new_y="NEXT")
+        contact_line = " | ".join(
+            part for part in [self.company.address, self.company.city_state_zip, self.company.phone] if part
+        )
+        if contact_line:
+            self.cell(0, 4, contact_line, align="C", new_x="LMARGIN", new_y="NEXT")
+        if self.company.email:
+            self.cell(0, 4, self.company.email, align="C", new_x="LMARGIN", new_y="NEXT")
         self.set_draw_color(26, 60, 110)
         self.line(10, self.get_y() + 2, 200, self.get_y() + 2)
         self.ln(6)
@@ -67,7 +75,9 @@ def _safe(data, key, default=""):
 
 def generate_application_pdf(form_data, employers, licenses, accidents, violations):
     """Generate the main application PDF."""
-    pdf = PrestigePDF()
+    company = get_active_company_profile()
+    company_name = form_data.get("company_name") or company.name
+    pdf = CompanyPDF(company)
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=20)
     pdf.add_page()
@@ -227,7 +237,7 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
     pdf.set_font("Helvetica", "", 8)
     pdf.multi_cell(0, 4,
         f"I certify that all information provided in this application is true and complete. "
-        f"I authorize {COMPANY_NAME} to make investigations and inquiries as necessary. "
+        f"I authorize {company_name} to make investigations and inquiries as necessary. "
         f"I understand this is not a contract for services. Engagement as an independent contractor "
         f"is based on mutual agreement and allows either party to terminate at any time.")
     pdf.ln(4)
@@ -246,7 +256,9 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
 
 def generate_fcra_pdf(form_data):
     """Generate standalone FCRA Disclosure PDF (federal requirement)."""
-    pdf = PrestigePDF()
+    company = get_active_company_profile()
+    company_name = form_data.get("company_name") or company.name
+    pdf = CompanyPDF(company)
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=20)
     pdf.add_page()
@@ -267,7 +279,7 @@ def generate_fcra_pdf(form_data):
     pdf.cell(0, 8, "Disclosure Regarding Background Investigation", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 9)
     pdf.multi_cell(0, 5,
-        f'{COMPANY_NAME} ("the Company") may obtain information about you from a third-party '
+        f'{company_name} ("the Company") may obtain information about you from a third-party '
         f'consumer reporting agency for contracting purposes. Thus, you may be the subject of a '
         f'"consumer report" and/or an "investigative consumer report" which may include information '
         f'about your character, general reputation, personal characteristics, and/or mode of living, '
@@ -301,7 +313,7 @@ def generate_fcra_pdf(form_data):
     pdf.cell(0, 8, "Authorization", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 9)
     pdf.multi_cell(0, 5,
-        f'By signing below, I authorize {COMPANY_NAME} to obtain a consumer report and/or '
+        f'By signing below, I authorize {company_name} to obtain a consumer report and/or '
         f'investigative consumer report about me for contracting and independent contractor '
         f'qualification purposes.')
     pdf.ln(8)
@@ -321,7 +333,9 @@ def generate_fcra_pdf(form_data):
 
 def generate_psp_pdf(form_data):
     """Generate standalone PSP Disclosure PDF."""
-    pdf = PrestigePDF()
+    company = get_active_company_profile()
+    company_name = form_data.get("company_name") or company.name
+    pdf = CompanyPDF(company)
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=20)
     pdf.add_page()
@@ -342,7 +356,7 @@ def generate_psp_pdf(form_data):
     pdf.cell(0, 8, "Pre-Employment Screening Program (PSP) Disclosure", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 9)
     pdf.multi_cell(0, 5,
-        f'In connection with your application for contracting with {COMPANY_NAME}, we may obtain '
+        f'In connection with your application for contracting with {company_name}, we may obtain '
         f'one or more reports from the Federal Motor Carrier Safety Administration (FMCSA) '
         f'Pre-Employment Screening Program (PSP) regarding your safety record.\n\n'
         f'The PSP report will contain your crash and inspection history from the FMCSA\'s '
@@ -368,7 +382,7 @@ def generate_psp_pdf(form_data):
     pdf.cell(0, 8, "Authorization", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 9)
     pdf.multi_cell(0, 5,
-        f'By signing below, I authorize {COMPANY_NAME} and its agents to access my PSP record '
+        f'By signing below, I authorize {company_name} and its agents to access my PSP record '
         f'from FMCSA in connection with my application to contract as an independent contractor driver.')
     pdf.ln(8)
 
@@ -386,7 +400,9 @@ def generate_psp_pdf(form_data):
 
 def generate_california_disclosure_pdf(form_data):
     """Generate California background check disclosure PDF."""
-    pdf = PrestigePDF()
+    company = get_active_company_profile()
+    company_name = form_data.get("company_name") or company.name
+    pdf = CompanyPDF(company)
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=20)
     pdf.add_page()
@@ -407,7 +423,7 @@ def generate_california_disclosure_pdf(form_data):
     pdf.multi_cell(
         0,
         5,
-        f"{COMPANY_NAME} may obtain information about you from a consumer reporting agency for contracting purposes. "
+        f"{company_name} may obtain information about you from a consumer reporting agency for contracting purposes. "
         f"Thus, you may be the subject of a consumer report or investigative consumer report under California law. "
         f"These reports may include information regarding your character, general reputation, personal characteristics, "
         f"and mode of living. The Company may use such information to evaluate your qualifications to provide contracted services.",
@@ -444,7 +460,9 @@ def generate_california_disclosure_pdf(form_data):
 
 def generate_clearinghouse_pdf(form_data):
     """Generate standalone Clearinghouse Release PDF."""
-    pdf = PrestigePDF()
+    company = get_active_company_profile()
+    company_name = form_data.get("company_name") or company.name
+    pdf = CompanyPDF(company)
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=20)
     pdf.add_page()
@@ -465,10 +483,10 @@ def generate_clearinghouse_pdf(form_data):
     pdf.cell(0, 8, "FMCSA Drug & Alcohol Clearinghouse Consent", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 9)
     pdf.multi_cell(0, 5,
-        f'In accordance with 49 CFR Part 382, Subpart G, {COMPANY_NAME} is required to conduct '
+        f'In accordance with 49 CFR Part 382, Subpart G, {company_name} is required to conduct '
         f'a query of the FMCSA Drug and Alcohol Clearinghouse prior to contracting with any '
         f'commercial motor vehicle (CMV) driver.\n\n'
-        f'By providing consent, the applicant authorizes {COMPANY_NAME} to conduct:\n'
+        f'By providing consent, the applicant authorizes {company_name} to conduct:\n'
         f'1. A full query of the FMCSA Clearinghouse to determine whether any drug or alcohol '
         f'violation information exists.\n'
         f'2. Annual limited queries for the duration of the independent contractor agreement.')
@@ -489,7 +507,7 @@ def generate_clearinghouse_pdf(form_data):
     pdf.multi_cell(0, 5,
         f'I authorize the release of information from my Department of Transportation regulated '
         f'drug and alcohol testing records by my previous employers/contractors listed in my '
-        f'application to {COMPANY_NAME} or its designated agents.')
+        f'application to {company_name} or its designated agents.')
     pdf.ln(8)
 
     pdf.section_title("Acknowledgment")

@@ -9,6 +9,7 @@ from typing import Any
 import streamlit as st
 
 from services.draft_service import LOCAL_STORAGE_DIR, ensure_draft_id
+from runtime_context import get_storage_namespace, is_test_mode_active
 from submission_storage import save_supporting_documents
 from ui.common import show_missing_fields
 
@@ -86,6 +87,7 @@ def sync_pending_uploads() -> dict[str, Any]:
         draft_id=draft_id,
         documents=new_documents,
         local_base_dir=LOCAL_STORAGE_DIR,
+        storage_namespace=get_storage_namespace(),
     )
     merged_documents = [*existing_documents, *result.get("documents", [])]
     st.session_state.uploaded_documents = merged_documents
@@ -104,6 +106,8 @@ def render_supporting_documents_section() -> None:
         f"Accepted file types: PDF, JPG/JPEG, PNG. Maximum {MAX_SUPPORTING_DOCUMENTS} files, up to "
         f"{MAX_SUPPORTING_DOCUMENT_SIZE_MB} MB per file. Files are stored server-side when you save a draft or submit."
     )
+    if is_test_mode_active():
+        st.info("Safe test mode stores uploaded files in a separate company test namespace.")
 
     st.file_uploader(
         "Upload supporting documents",

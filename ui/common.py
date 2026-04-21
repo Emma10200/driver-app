@@ -9,13 +9,9 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from config import (
-    COMPANY_ADDRESS,
-    COMPANY_CITY_STATE_ZIP,
-    COMPANY_EMAIL,
-    COMPANY_NAME,
-    COMPANY_PHONE,
     PHASE_LABELS,
 )
+from runtime_context import get_active_company_profile, is_test_mode_active
 from services.draft_service import render_draft_sidebar
 
 
@@ -143,14 +139,22 @@ def selectbox_with_placeholder(
 
 
 def render_app_shell() -> None:
+    company = get_active_company_profile()
+    location_parts = [part for part in [company.address, company.city_state_zip] if part]
+    contact_parts: list[str] = []
+    if company.phone:
+        contact_parts.append(f"Phone: {company.phone}")
+    if company.email:
+        contact_parts.append(f"Email: {company.email}")
+
     st.markdown(BASE_STYLES, unsafe_allow_html=True)
     render_draft_sidebar()
     st.markdown(
         f"""
 <div class="app-header">
-    <h1>{COMPANY_NAME}</h1>
-    <p>{COMPANY_ADDRESS} | {COMPANY_CITY_STATE_ZIP}</p>
-    <p>Phone: {COMPANY_PHONE} | Email: {COMPANY_EMAIL}</p>
+    <h1>{company.name}</h1>
+    {f'<p>{" | ".join(location_parts)}</p>' if location_parts else ''}
+    {f'<p>{" | ".join(contact_parts)}</p>' if contact_parts else ''}
     <h3>Independent Contractor Driver Application</h3>
 </div>
 """,
@@ -166,6 +170,12 @@ age, marital status, veteran status, non-job related disability, or any other pr
 """,
         unsafe_allow_html=True,
     )
+
+    if is_test_mode_active():
+        st.warning(
+            "Safe test mode is active. This session uses fake applicant data, stores records in a separate test namespace, "
+            "and suppresses or redirects internal notification emails."
+        )
 
 
 def render_progress_bar() -> int:

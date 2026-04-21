@@ -10,6 +10,8 @@ from typing import Any
 
 import streamlit as st
 
+from runtime_context import get_storage_namespace, sync_runtime_context
+from services.test_mode_service import render_admin_test_tools
 from state import init_session_state, reset_application_state
 from submission_storage import load_draft_bundle, save_draft_bundle
 
@@ -46,6 +48,8 @@ def build_draft_snapshot() -> dict[str, Any]:
     return {
         "draft_id": draft_id,
         "saved_at": saved_at,
+        "company_slug": st.session_state.get("company_slug", "prestige"),
+        "test_mode": bool(st.session_state.get("test_mode")),
         "current_page": st.session_state.get("current_page", 1),
         "form_data": st.session_state.form_data,
         "employers": st.session_state.employers,
@@ -66,6 +70,7 @@ def autosave_draft() -> dict[str, Any] | None:
             draft_id=snapshot["draft_id"],
             draft_payload=snapshot,
             local_base_dir=LOCAL_STORAGE_DIR,
+            storage_namespace=get_storage_namespace(),
         )
     except Exception as exc:
         st.session_state.draft_save_error = str(exc)
@@ -78,12 +83,19 @@ def autosave_draft() -> dict[str, Any] | None:
 
 
 def load_draft_into_session(draft_id: str) -> dict[str, Any]:
-    snapshot = load_draft_bundle(draft_id=draft_id, local_base_dir=LOCAL_STORAGE_DIR)
+    snapshot = load_draft_bundle(
+        draft_id=draft_id,
+        local_base_dir=LOCAL_STORAGE_DIR,
+        storage_namespace=get_storage_namespace(),
+    )
 
     reset_application_state()
     init_session_state()
+    sync_runtime_context()
 
     st.session_state.current_page = int(snapshot.get("current_page") or 1)
+    st.session_state.company_slug = snapshot.get("company_slug") or st.session_state.company_slug
+    st.session_state.test_mode = bool(snapshot.get("test_mode", False))
     st.session_state.form_data = snapshot.get("form_data", {})
     st.session_state.employers = snapshot.get("employers", [])
     st.session_state.licenses = snapshot.get("licenses", [])
@@ -134,3 +146,5 @@ def render_draft_sidebar() -> None:
             st.warning(st.session_state.draft_load_error)
         if st.session_state.get("draft_save_error"):
             st.warning(f"Autosave warning: {st.session_state.draft_save_error}")
+
+        render_admin_test_tools()

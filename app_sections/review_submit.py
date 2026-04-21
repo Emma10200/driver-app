@@ -7,13 +7,13 @@ from pathlib import Path
 
 import streamlit as st
 
-from config import COMPANY_NAME
 from pdf_generator import (
     generate_application_pdf,
     generate_clearinghouse_pdf,
     generate_fcra_pdf,
     generate_psp_pdf,
 )
+from runtime_context import get_active_company_profile, get_storage_namespace, is_test_mode_active
 from services.document_service import render_supporting_documents_section, sync_pending_uploads
 from services.draft_service import autosave_draft
 from services.notification_service import send_internal_submission_notification
@@ -54,12 +54,21 @@ def _attempt_submission_notification() -> None:
 
 
 def render_review_submit_page(submissions_dir: Path) -> None:
+    company = get_active_company_profile()
     st.subheader("🧾 Review & Submit")
-    submission_destination = get_submission_destination_summary(submissions_dir)
+    submission_destination = get_submission_destination_summary(
+        submissions_dir,
+        storage_namespace=get_storage_namespace(),
+    )
     st.info(
         f"When you submit, a company copy will be saved to {submission_destination}. "
         "If SMTP is configured, an internal notification email will also be sent without attachments."
     )
+    if is_test_mode_active():
+        st.warning(
+            "Safe test mode is active. Test submissions use fake data, save under a separate namespace, "
+            "and suppress or redirect internal notification emails."
+        )
 
     with st.expander("Personal Information", expanded=True):
         summary_item(
@@ -178,6 +187,7 @@ def render_review_submit_page(submissions_dir: Path) -> None:
 
 
 def render_submission_complete(submissions_dir: Path) -> None:
+    company = get_active_company_profile()
     st.session_state.current_page = 99
 
     if st.session_state.submission_artifacts is None:
@@ -204,7 +214,7 @@ def render_submission_complete(submissions_dir: Path) -> None:
         f"""
     Thank you, **{st.session_state.form_data.get('first_name', '')} {st.session_state.form_data.get('last_name', '')}**!
 
-    Your application to {COMPANY_NAME} has been received.
+    Your application to {company.name} has been received.
     A confirmation has been created with the following details:
 
     - **Submission Timestamp:** {st.session_state.form_data.get('final_submission_timestamp', datetime.now().isoformat())}
@@ -248,7 +258,7 @@ def render_submission_complete(submissions_dir: Path) -> None:
         st.download_button(
             label="📥 Download Application PDF",
             data=pdf_bytes,
-            file_name=f"prestige_application_{st.session_state.form_data.get('last_name', 'driver')}_{date.today().isoformat()}.pdf",
+            file_name=f"{company.slug}_application_{st.session_state.form_data.get('last_name', 'driver')}_{date.today().isoformat()}.pdf",
             mime="application/pdf",
             use_container_width=True,
         )

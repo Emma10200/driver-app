@@ -11,6 +11,8 @@ It now also supports:
 - resumable **server-side draft saves**
 - supporting document uploads for **PDF/JPG/PNG**
 - internal **SMTP notification emails without attachments**
+- hidden **safe admin test mode** with autofill helpers
+- runtime **company-specific links** using `?company=`
 
 ## What this app does
 
@@ -69,6 +71,7 @@ In Streamlit Community Cloud:
 ```toml
 [app]
 SUBMISSION_STORAGE_BACKEND = "auto"
+ADMIN_TEST_TOKEN = "set-a-secret-token-for-admin-test-links"
 
 [supabase]
 SUPABASE_URL = "https://your-project-ref.supabase.co"
@@ -85,6 +88,7 @@ SMTP_FROM_EMAIL = "alerts@your-company.com"
 SMTP_USE_TLS = "true"
 SMTP_USE_SSL = "false"
 INTERNAL_NOTIFICATION_TO = "dispatch@your-company.com,safety@your-company.com"
+TEST_INTERNAL_NOTIFICATION_TO = "qa@your-company.com"
 ```
 
 ### 4. Launch and test
@@ -98,6 +102,15 @@ After deploy:
    - PDFs download
    - submission files, drafts, and supporting documents appear in Supabase Storage
    - internal notification email arrives without attachments (if SMTP is configured)
+
+For internal QA, you can also use dedicated links like:
+
+- `https://your-app.streamlit.app/?company=prestige&admin=1`
+- `https://your-app.streamlit.app/?company=prestige&mode=test`
+
+If `ADMIN_TEST_TOKEN` is set, append `&token=YOUR_TOKEN` to those links.
+
+Safe test mode uses fake data, stores records under a separate company test namespace, and suppresses live notification emails unless `TEST_INTERNAL_NOTIFICATION_TO` is configured.
 
 ## Recommended settings
 

@@ -14,6 +14,7 @@ from pdf_generator import (
     generate_fcra_pdf,
     generate_psp_pdf,
 )
+from runtime_context import get_storage_namespace
 from submission_storage import save_submission_bundle as persist_submission_bundle
 
 
@@ -45,4 +46,5 @@ def save_submission_bundle(local_base_dir: Path, artifacts: dict[str, bytes | No
         uploaded_documents=st.session_state.get("uploaded_documents", []),
         artifacts=artifacts,
         local_base_dir=local_base_dir,
+        storage_namespace=get_storage_namespace(),
     )

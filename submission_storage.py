@@ -39,6 +39,10 @@ DRAFTS_DIRNAME = "drafts"
 UPLOADS_DIRNAME = "uploads"
 
 
+def _join_relative_prefix(*parts: str | None) -> str:
+    return "/".join(str(part).strip("/") for part in parts if str(part or "").strip("/"))
+
+
 def _slugify(value: str) -> str:
     cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in value.strip())
     while "--" in cleaned:
@@ -229,23 +233,25 @@ def _read_supabase_bytes(relative_path: str) -> bytes:
     return response.content
 
 
-def _draft_relative_prefix(draft_id: str) -> str:
-    return f"{DRAFTS_DIRNAME}/{draft_id}"
+def _draft_relative_prefix(draft_id: str, storage_namespace: str = "") -> str:
+    return _join_relative_prefix(storage_namespace, DRAFTS_DIRNAME, draft_id)
 
 
-def get_submission_destination_summary(local_base_dir: Path) -> str:
+def get_submission_destination_summary(local_base_dir: Path, storage_namespace: str = "") -> str:
     backend = _get_backend()
     settings = _get_supabase_settings()
+    local_target = local_base_dir / storage_namespace if storage_namespace else local_base_dir
+    bucket_target = _join_relative_prefix(settings["bucket"], storage_namespace)
 
     if backend == "local":
-        return f"the local folder `{local_base_dir}`"
+        return f"the local folder `{local_target}`"
     if backend == "supabase":
-        return f"Supabase bucket `{settings['bucket']}`"
+        return f"Supabase bucket `{bucket_target or settings['bucket']}`"
     if backend == "both":
-        return f"both Supabase bucket `{settings['bucket']}` and the local folder `{local_base_dir}`"
+        return f"both Supabase bucket `{bucket_target or settings['bucket']}` and the local folder `{local_target}`"
     if _supabase_enabled():
-        return f"Supabase bucket `{settings['bucket']}`"
-    return f"the local folder `{local_base_dir}`"
+        return f"Supabase bucket `{bucket_target or settings['bucket']}`"
+    return f"the local folder `{local_target}`"
 
 
 def _build_submission_key(form_data: dict[str, Any]) -> tuple[str, str]:
@@ -295,8 +301,13 @@ def _build_file_map(payload: dict[str, Any], artifacts: dict[str, bytes]) -> dic
     return file_map
 
 
-def _save_locally(local_base_dir: Path, submission_key: str, file_map: dict[str, tuple[bytes, str]]) -> dict[str, Any]:
-    submission_dir = local_base_dir / submission_key
+def _save_locally(
+    local_base_dir: Path,
+    submission_key: str,
+    file_map: dict[str, tuple[bytes, str]],
+    storage_namespace: str = "",
+) -> dict[str, Any]:
+    submission_dir = local_base_dir / storage_namespace / submission_key if storage_namespace else local_base_dir / submission_key
     submission_dir.mkdir(parents=True, exist_ok=True)
 
     for file_name, (content, _) in file_map.items():
@@ -310,11 +321,16 @@ def _save_locally(local_base_dir: Path, submission_key: str, file_map: dict[str,
     }
 
 
-def _save_to_supabase(payload: dict[str, Any], submission_key: str, file_map: dict[str, tuple[bytes, str]]) -> dict[str, Any]:
+def _save_to_supabase(
+    payload: dict[str, Any],
+    submission_key: str,
+    file_map: dict[str, tuple[bytes, str]],
+    storage_namespace: str = "",
+) -> dict[str, Any]:
     settings = _get_supabase_settings()
     base_url = settings["url"].rstrip("/")
     bucket = settings["bucket"] or DEFAULT_BUCKET
-    remote_prefix = f"submissions/{submission_key}"
+    remote_prefix = _join_relative_prefix(storage_namespace, "submissions", submission_key)
     headers = _build_supabase_headers()
 
     for file_name, (content, content_type) in file_map.items():
@@ -384,6 +400,7 @@ def save_submission_bundle(
     artifacts: dict[str, bytes],
     local_base_dir: Path,
     uploaded_documents: list[dict[str, Any]] | None = None,
+    storage_namespace: str = "",
 ) -> dict[str, Any]:
     payload = _build_payload(form_data, employers, licenses, accidents, violations, uploaded_documents)
     file_map = _build_file_map(payload, artifacts)
@@ -393,17 +410,17 @@ def save_submission_bundle(
 
     if backend == "auto":
         if supabase_ready:
-            return _save_to_supabase(payload, submission_key, file_map)
-        return _save_locally(local_base_dir, submission_key, file_map)
+            return _save_to_supabase(payload, submission_key, file_map, storage_namespace)
+        return _save_locally(local_base_dir, submission_key, file_map, storage_namespace)
 
     if backend == "local":
-        return _save_locally(local_base_dir, submission_key, file_map)
+        return _save_locally(local_base_dir, submission_key, file_map, storage_namespace)
 
     if backend == "supabase":
-        return _save_to_supabase(payload, submission_key, file_map)
+        return _save_to_supabase(payload, submission_key, file_map, storage_namespace)
 
-    local_result = _save_locally(local_base_dir, submission_key, file_map)
-    supabase_result = _save_to_supabase(payload, submission_key, file_map)
+    local_result = _save_locally(local_base_dir, submission_key, file_map, storage_namespace)
+    supabase_result = _save_to_supabase(payload, submission_key, file_map, storage_namespace)
     warnings = []
     warnings.extend(local_result.get("warnings", []))
     warnings.extend(supabase_result.get("warnings", []))
@@ -416,8 +433,14 @@ def save_submission_bundle(
     }
 
 
-def save_draft_bundle(*, draft_id: str, draft_payload: dict[str, Any], local_base_dir: Path) -> dict[str, Any]:
-    relative_prefix = _draft_relative_prefix(draft_id)
+def save_draft_bundle(
+    *,
+    draft_id: str,
+    draft_payload: dict[str, Any],
+    local_base_dir: Path,
+    storage_namespace: str = "",
+) -> dict[str, Any]:
+    relative_prefix = _draft_relative_prefix(draft_id, storage_namespace)
     file_map = {
         "draft.json": (
             json.dumps(draft_payload, indent=2, default=_json_default).encode("utf-8"),
@@ -434,12 +457,12 @@ def save_draft_bundle(*, draft_id: str, draft_payload: dict[str, Any], local_bas
     return result
 
 
-def load_draft_bundle(*, draft_id: str, local_base_dir: Path) -> dict[str, Any]:
+def load_draft_bundle(*, draft_id: str, local_base_dir: Path, storage_namespace: str = "") -> dict[str, Any]:
     draft_id = draft_id.strip()
     if not draft_id:
         raise ValueError("Draft ID is required.")
 
-    relative_path = f"{_draft_relative_prefix(draft_id)}/draft.json"
+    relative_path = f"{_draft_relative_prefix(draft_id, storage_namespace)}/draft.json"
     backend = _get_backend()
     read_order: list[str]
 
@@ -474,6 +497,7 @@ def save_supporting_documents(
     draft_id: str,
     documents: list[dict[str, Any]],
     local_base_dir: Path,
+    storage_namespace: str = "",
 ) -> dict[str, Any]:
     if not documents:
         return {
@@ -484,7 +508,7 @@ def save_supporting_documents(
             "warnings": [],
         }
 
-    relative_prefix = f"{_draft_relative_prefix(draft_id)}/{UPLOADS_DIRNAME}"
+    relative_prefix = _join_relative_prefix(_draft_relative_prefix(draft_id, storage_namespace), UPLOADS_DIRNAME)
     file_map: dict[str, tuple[bytes, str]] = {}
     metadata: list[dict[str, Any]] = []
 

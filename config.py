@@ -1,6 +1,8 @@
-"""
-Company configuration and constants for Prestige Transportation Inc.
-"""
+"""Company configuration and shared constants for the driver application."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
 
 COMPANY_NAME = "PRESTIGE TRANSPORTATION INC."
 COMPANY_ADDRESS = "8622 Hemlock Ave."
@@ -8,6 +10,35 @@ COMPANY_CITY_STATE_ZIP = "Fontana, CA 92335"
 COMPANY_PHONE = "(877) 549-9529"
 COMPANY_FAX = "(888) 283-6538"
 COMPANY_EMAIL = "safety@prestigecalifornia.com"
+
+
+@dataclass(frozen=True)
+class CompanyProfile:
+    slug: str
+    name: str
+    address: str = ""
+    city_state_zip: str = ""
+    phone: str = ""
+    fax: str = ""
+    email: str = ""
+
+
+DEFAULT_COMPANY_SLUG = "prestige"
+COMPANY_PROFILES: dict[str, CompanyProfile] = {
+    "prestige": CompanyProfile(
+        slug="prestige",
+        name=COMPANY_NAME,
+        address=COMPANY_ADDRESS,
+        city_state_zip=COMPANY_CITY_STATE_ZIP,
+        phone=COMPANY_PHONE,
+        fax=COMPANY_FAX,
+        email=COMPANY_EMAIL,
+    ),
+    "side-xpress": CompanyProfile(
+        slug="side-xpress",
+        name="SIDE XPRESS",
+    ),
+}
 
 # Application phases
 PHASE_LABELS = {

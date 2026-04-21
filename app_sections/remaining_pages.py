@@ -7,18 +7,20 @@ from datetime import date, datetime
 import streamlit as st
 
 from config import (
-    COMPANY_NAME,
     LICENSE_CLASSES,
     TRAILER_LENGTHS,
     TRAILER_TYPES,
     US_STATES,
 )
+from runtime_context import get_active_company_profile
 from services.draft_service import autosave_draft
 from state import next_page, prev_page
 from ui.common import default_california_applicability, selectbox_with_placeholder, show_missing_fields
 
 
 def render_remaining_page(page: int) -> bool:
+    company = get_active_company_profile()
+
     if page == 3:
         st.subheader("Licenses & Endorsements")
         st.markdown("List all driver's licenses held in the past 3 years and current endorsements.")
@@ -553,7 +555,7 @@ def render_remaining_page(page: int) -> bool:
     I understand that as a **condition of this independent contractor agreement**, I must comply
     with these guidelines and agree that I will remain medically qualified by these procedures.
     I also acknowledge that if I become disqualified as a driver for any reason, I have
-    self-terminated my contract with {COMPANY_NAME}.
+    self-terminated my contract with {company.name}.
     """
         )
 
@@ -566,18 +568,18 @@ def render_remaining_page(page: int) -> bool:
     I certify that all information provided in this application is true and complete to the
     best of my knowledge. I understand that any misrepresentation or omission of facts may
     result in rejection of this application or termination of my independent contractor agreement
-    with {COMPANY_NAME}.
+    with {company.name}.
 
-    I authorize {COMPANY_NAME} to make such investigations and inquiries of my personal,
+    I authorize {company.name} to make such investigations and inquiries of my personal,
     contracting, financial, driving, and other related matters as may be necessary in arriving
     at a contracting decision. I understand that this application is not and is not intended to
     be a contract for services.
 
-    I understand that engagement as an independent contractor with {COMPANY_NAME} is based
+    I understand that engagement as an independent contractor with {company.name} is based
     on mutual agreement and allows either party to terminate the contractor relationship at any
     time, with or without cause or advance notice.
 
-    I also understand that {COMPANY_NAME} reserves the right to require all independent
+    I also understand that {company.name} reserves the right to require all independent
     contractors to submit to substance abuse testing in accordance with applicable federal
     and state regulations.
     """
@@ -637,7 +639,7 @@ def render_remaining_page(page: int) -> bool:
             f"""
     ### Disclosure Regarding Background Investigation
 
-    {COMPANY_NAME} ("the Company") may obtain information about you from a third-party
+    {company.name} ("the Company") may obtain information about you from a third-party
     consumer reporting agency for contracting purposes. Thus, you may be the subject of
     a "consumer report" and/or an "investigative consumer report" which may include
     information about your character, general reputation, personal characteristics, and/or
@@ -665,7 +667,7 @@ def render_remaining_page(page: int) -> bool:
 
     ### Authorization
 
-    By acknowledging below, I authorize {COMPANY_NAME} to obtain a consumer report and/or
+    By acknowledging below, I authorize {company.name} to obtain a consumer report and/or
     investigative consumer report about me for contracting and independent contractor
     qualification purposes.
     """
@@ -711,7 +713,7 @@ def render_remaining_page(page: int) -> bool:
                 f"""
         ### California Disclosure
 
-        {COMPANY_NAME} may obtain information about you from a consumer reporting agency
+        {company.name} may obtain information about you from a consumer reporting agency
         for contracting purposes. Thus, you may be the subject of a consumer report and/or
         an investigative consumer report under California law. These reports may include
         information about your character, general reputation, personal characteristics,
@@ -766,7 +768,7 @@ def render_remaining_page(page: int) -> bool:
             f"""
     ### Pre-Employment Screening Program (PSP) Disclosure
 
-    In connection with your application for contracting with {COMPANY_NAME}, we may obtain
+    In connection with your application for contracting with {company.name}, we may obtain
     one or more reports from the Federal Motor Carrier Safety Administration (FMCSA)
     Pre-Employment Screening Program (PSP) regarding your safety record.
 
@@ -784,7 +786,7 @@ def render_remaining_page(page: int) -> bool:
 
     ### Authorization
 
-    By acknowledging below, I authorize {COMPANY_NAME} and its agents to access my
+    By acknowledging below, I authorize {company.name} and its agents to access my
     PSP record from FMCSA in connection with my application to contract as an
     independent contractor driver.
     """
@@ -820,18 +822,18 @@ def render_remaining_page(page: int) -> bool:
             f"""
     ### FMCSA Drug & Alcohol Clearinghouse Consent
 
-    In accordance with 49 CFR Part 382, Subpart G, {COMPANY_NAME} is required to conduct
+    In accordance with 49 CFR Part 382, Subpart G, {company.name} is required to conduct
     a query of the FMCSA Drug and Alcohol Clearinghouse prior to contracting with any
     commercial motor vehicle (CMV) driver.
 
     ### What This Means
 
-    By providing consent below, you authorize {COMPANY_NAME} to conduct:
+    By providing consent below, you authorize {company.name} to conduct:
 
     1. A **full query** of the FMCSA Clearinghouse to determine whether any drug or alcohol
        violation information exists about you.
     2. **Annual limited queries** for the duration of your independent contractor agreement
-       with {COMPANY_NAME}.
+    with {company.name}.
 
     ### Your Responsibilities
 
@@ -843,7 +845,7 @@ def render_remaining_page(page: int) -> bool:
 
     I authorize the release of information from my Department of Transportation regulated
     drug and alcohol testing records by my previous employers/contractors listed in this
-    application to {COMPANY_NAME} or its designated agents.
+    application to {company.name} or its designated agents.
     """
         )
 
