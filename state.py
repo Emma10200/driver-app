@@ -28,6 +28,7 @@ SESSION_DEFAULTS: dict[str, Any] = {
     "submission_save_error": None,
     "submission_save_notice": None,
     "submission_notification_sent": False,
+    "submission_notification_status_code": None,
     "submission_notification_status": None,
     "submission_notification_error": None,
 }

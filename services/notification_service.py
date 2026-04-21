@@ -35,6 +35,25 @@ def notifications_enabled() -> bool:
     return bool(settings["host"] and settings["from_email"] and settings["recipients"])
 
 
+def _deliver_message(message: EmailMessage, settings: dict[str, Any]) -> None:
+    if settings["use_ssl"]:
+        with smtplib.SMTP_SSL(settings["host"], settings["port"], timeout=30) as server:
+            server.ehlo()
+            if settings["username"]:
+                server.login(settings["username"], settings["password"])
+            server.send_message(message)
+        return
+
+    with smtplib.SMTP(settings["host"], settings["port"], timeout=30) as server:
+        server.ehlo()
+        if settings["use_tls"]:
+            server.starttls()
+            server.ehlo()
+        if settings["username"]:
+            server.login(settings["username"], settings["password"])
+        server.send_message(message)
+
+
 def send_internal_submission_notification(
     *,
     form_data: dict[str, Any],
@@ -63,6 +82,9 @@ def send_internal_submission_notification(
     message["Subject"] = f"New driver application submitted: {applicant_name}"
     message["From"] = settings["from_email"]
     message["To"] = ", ".join(settings["recipients"])
+    applicant_email = str(form_data.get("email", "") or "").strip()
+    if applicant_email:
+        message["Reply-To"] = applicant_email
     message.set_content(
         "\n".join(
             [
@@ -82,18 +104,7 @@ def send_internal_submission_notification(
     )
 
     try:
-        if settings["use_ssl"]:
-            with smtplib.SMTP_SSL(settings["host"], settings["port"], timeout=30) as server:
-                if settings["username"]:
-                    server.login(settings["username"], settings["password"])
-                server.send_message(message)
-        else:
-            with smtplib.SMTP(settings["host"], settings["port"], timeout=30) as server:
-                if settings["use_tls"]:
-                    server.starttls()
-                if settings["username"]:
-                    server.login(settings["username"], settings["password"])
-                server.send_message(message)
+        _deliver_message(message, settings)
     except Exception as exc:
         return {
             "status": "error",

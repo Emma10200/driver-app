@@ -23,6 +23,36 @@ from submission_storage import get_submission_destination_summary
 from ui.common import show_missing_fields, summary_item
 
 
+def _attempt_submission_notification() -> None:
+    if st.session_state.get("submission_notification_sent"):
+        return
+    if st.session_state.get("submission_notification_status_code") == "disabled":
+        return
+
+    saved_submission_dir = st.session_state.get("saved_submission_dir")
+    if not saved_submission_dir:
+        return
+
+    notification_result = send_internal_submission_notification(
+        form_data=st.session_state.form_data,
+        submission_result={"location_label": saved_submission_dir},
+        uploaded_documents=st.session_state.get("uploaded_documents", []),
+    )
+    status = notification_result.get("status")
+    st.session_state.submission_notification_status_code = status
+
+    if status == "sent":
+        st.session_state.submission_notification_sent = True
+        st.session_state.submission_notification_status = notification_result.get("message")
+        st.session_state.submission_notification_error = None
+    elif status == "disabled":
+        st.session_state.submission_notification_status = notification_result.get("message")
+        st.session_state.submission_notification_error = None
+    else:
+        st.session_state.submission_notification_status = None
+        st.session_state.submission_notification_error = notification_result.get("message")
+
+
 def render_review_submit_page(submissions_dir: Path) -> None:
     st.subheader("🧾 Review & Submit")
     submission_destination = get_submission_destination_summary(submissions_dir)
@@ -163,25 +193,10 @@ def render_submission_complete(submissions_dir: Path) -> None:
             warnings = saved_result.get("warnings", [])
             if warnings:
                 st.session_state.submission_save_notice = "\n".join(warnings)
-
-            if not st.session_state.get("submission_notification_sent"):
-                notification_result = send_internal_submission_notification(
-                    form_data=st.session_state.form_data,
-                    submission_result=saved_result,
-                    uploaded_documents=st.session_state.get("uploaded_documents", []),
-                )
-                if notification_result.get("status") == "sent":
-                    st.session_state.submission_notification_sent = True
-                    st.session_state.submission_notification_status = notification_result.get("message")
-                    st.session_state.submission_notification_error = None
-                elif notification_result.get("status") == "disabled":
-                    st.session_state.submission_notification_status = notification_result.get("message")
-                    st.session_state.submission_notification_error = None
-                else:
-                    st.session_state.submission_notification_status = None
-                    st.session_state.submission_notification_error = notification_result.get("message")
         except Exception as exc:
             st.session_state.submission_save_error = f"Could not save submission files: {exc}"
+
+    _attempt_submission_notification()
 
     st.balloons()
     st.success("### ✅ Application Submitted Successfully!")
