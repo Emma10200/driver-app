@@ -23,10 +23,15 @@ from state import init_session_state
 from ui.common import (
     render_app_shell,
     render_progress_bar,
-    render_version_footer,
     scroll_to_top_on_page_change,
     show_user_error,
 )
+
+try:
+    from ui.common import render_version_footer
+except ImportError:
+    def render_version_footer() -> None:
+        return None
 
 SUBMISSIONS_DIR = Path(__file__).resolve().parent / "submissions"
 REQUESTED_COMPANY = get_company_profile(resolve_company_slug())
