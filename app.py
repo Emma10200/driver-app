@@ -20,7 +20,13 @@ from app_sections.review_submit import render_review_submit_page, render_submiss
 from runtime_context import get_company_profile, resolve_company_slug, sync_runtime_context
 from services.error_log_service import log_application_error
 from state import init_session_state
-from ui.common import render_app_shell, render_progress_bar, scroll_to_top_on_page_change, show_user_error
+from ui.common import (
+    render_app_shell,
+    render_progress_bar,
+    render_version_footer,
+    scroll_to_top_on_page_change,
+    show_user_error,
+)
 
 SUBMISSIONS_DIR = Path(__file__).resolve().parent / "submissions"
 REQUESTED_COMPANY = get_company_profile(resolve_company_slug())
@@ -62,3 +68,5 @@ except Exception as exc:
         extra={"page": page},
     )
     st.warning("We hit an unexpected issue while loading this step. Please refresh and try again.")
+
+render_version_footer()

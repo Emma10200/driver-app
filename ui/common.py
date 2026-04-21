@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
 from datetime import date, datetime
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import streamlit as st
@@ -73,10 +77,63 @@ BASE_STYLES = """
         line-height: 1.5;
         border-left: 4px solid var(--primary-color);
     }
+    .app-version-footer {
+        margin-top: 2rem;
+        padding-bottom: 0.35rem;
+        text-align: center;
+        font-size: 0.72rem;
+        color: color-mix(in srgb, var(--text-color) 62%, transparent);
+    }
 </style>
 """
 
 PLACEHOLDER_OPTION = "Select one..."
+VERSION_ENV_KEYS = (
+    "APP_VERSION",
+    "GIT_COMMIT_SHA",
+    "GITHUB_SHA",
+    "RENDER_GIT_COMMIT",
+    "COMMIT_SHA",
+)
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+@lru_cache(maxsize=1)
+def _resolve_runtime_version() -> str:
+    for key in VERSION_ENV_KEYS:
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value[:7]
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        git_version = result.stdout.strip()
+        if git_version:
+            return git_version
+    except Exception:
+        pass
+
+    git_head = REPO_ROOT / ".git" / "HEAD"
+    try:
+        if git_head.exists():
+            head_value = git_head.read_text(encoding="utf-8").strip()
+            if head_value.startswith("ref: "):
+                ref_name = head_value.split(" ", 1)[1].strip()
+                ref_path = REPO_ROOT / ".git" / ref_name
+                if ref_path.exists():
+                    return ref_path.read_text(encoding="utf-8").strip()[:7]
+            elif head_value:
+                return head_value[:7]
+    except Exception:
+        pass
+
+    return "unknown"
 
 
 def display_value(value: Any, default: str = "—") -> str:
@@ -318,6 +375,13 @@ age, marital status, veteran status, non-job related disability, or any other pr
             "Safe test mode is active. This session uses fake applicant data, stores records in a separate test namespace, "
             "and tags internal notification emails as [TEST]."
         )
+
+
+def render_version_footer() -> None:
+    st.markdown(
+        f'<div class="app-version-footer">Build {_resolve_runtime_version()}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def render_progress_bar() -> int:
