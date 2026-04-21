@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+from collections.abc import Mapping
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -66,8 +67,10 @@ def _get_streamlit_secret(name: str) -> str | None:
             if candidate in secrets:
                 return str(secrets[candidate])
 
-        for section_name in ("app", "supabase", "storage"):
-            section = secrets.get(section_name, {})
+        for section in secrets.values():
+            if not isinstance(section, Mapping):
+                continue
+
             for candidate in _candidate_names(name):
                 if candidate in section:
                     return str(section[candidate])
