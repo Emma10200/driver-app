@@ -164,60 +164,68 @@ def _sync_browser_autofill_via_js() -> None:
             'input[type="email"]',
             'input[type="tel"]',
             'input[type="search"]',
+            'input[type="password"]',
             'input:not([type])',
             'textarea'
         ].join(',');
         const BUTTON_SELECTOR = 'button, [role="button"], input[type="submit"]';
 
-        function dispatchReactInputEvents(input) {
-            const currentValue = input.value ?? '';
-            if (!currentValue) {
-                return;
-            }
-
-            const prototype = input.tagName === 'TEXTAREA'
-                ? parentWindow.HTMLTextAreaElement.prototype
-                : parentWindow.HTMLInputElement.prototype;
-            const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
-            if (descriptor && typeof descriptor.set === 'function') {
-                descriptor.set.call(input, currentValue);
-            } else {
-                input.value = currentValue;
-            }
-
-            if (input._valueTracker) {
-                input._valueTracker.setValue('');
-            }
-
-            try {
-                input.dispatchEvent(new InputEvent('input', {
-                    bubbles: true,
-                    composed: true,
-                    data: null,
-                    inputType: 'insertReplacementText'
-                }));
-            } catch (error) {
-                input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-            }
-
-            input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-        }
-
+        // Mimic the user's "click in, click out" gesture exactly.
+        // Streamlit's text_input commits on the native blur event, so we
+        // programmatically focus + blur every filled input. We do it via
+        // a real focus()/blur() pair so React's synthetic event system
+        // and Streamlit's onBlur handler both fire normally.
         function commitAutofilledInputs() {
-            parentDocument.querySelectorAll(INPUT_SELECTOR).forEach((input) => {
-                if ((input.value ?? '').trim()) {
-                    dispatchReactInputEvents(input);
-                }
+            const previouslyFocused = parentDocument.activeElement;
+            const inputs = parentDocument.querySelectorAll(INPUT_SELECTOR);
+            inputs.forEach((input) => {
+                const value = (input.value ?? '').trim();
+                if (!value) { return; }
+                if (input.disabled || input.readOnly) { return; }
+                try {
+                    input.focus({ preventScroll: true });
+                    input.blur();
+                } catch (e) { /* ignore */ }
             });
+            if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
+                try { previouslyFocused.focus({ preventScroll: true }); } catch (e) {}
+            }
         }
 
         if (parentDocument.body && parentDocument.body.dataset.autofillButtonSyncBound !== '1') {
             parentDocument.body.dataset.autofillButtonSyncBound = '1';
+
+            // Run on pointerdown of any button so values are committed
+            // before Streamlit processes the click.
             parentDocument.addEventListener('pointerdown', (event) => {
                 if (event.target && event.target.closest(BUTTON_SELECTOR)) {
                     commitAutofilledInputs();
                 }
             }, true);
+
+            // Also run when the user presses Enter inside a form field.
+            parentDocument.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') {
+                    commitAutofilledInputs();
+                }
+            }, true);
+
+            // Catch Chrome/Edge autofill the moment it happens via the
+            // animationstart event fired by the :-webkit-autofill style.
+            try {
+                const style = parentDocument.createElement('style');
+                style.textContent = `
+                    @keyframes onAutoFillStart { from {} to {} }
+                    input:-webkit-autofill { animation-name: onAutoFillStart; animation-duration: 1ms; }
+                `;
+                parentDocument.head.appendChild(style);
+                parentDocument.addEventListener('animationstart', (event) => {
+                    if (event.animationName === 'onAutoFillStart' && event.target) {
+                        // Defer so the browser finishes filling all fields first.
+                        setTimeout(commitAutofilledInputs, 50);
+                    }
+                }, true);
+            } catch (e) { /* ignore */ }
         }
         </script>
         """,
