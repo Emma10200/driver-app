@@ -15,6 +15,58 @@ from utils.formatting import format_ssn, normalize_digits
 
 
 SSN_WIDGET_KEY = "personal_ssn_display"
+STATE_NAME_TO_CODE = {
+    "alabama": "AL",
+    "alaska": "AK",
+    "arizona": "AZ",
+    "arkansas": "AR",
+    "california": "CA",
+    "colorado": "CO",
+    "connecticut": "CT",
+    "delaware": "DE",
+    "florida": "FL",
+    "georgia": "GA",
+    "hawaii": "HI",
+    "idaho": "ID",
+    "illinois": "IL",
+    "indiana": "IN",
+    "iowa": "IA",
+    "kansas": "KS",
+    "kentucky": "KY",
+    "louisiana": "LA",
+    "maine": "ME",
+    "maryland": "MD",
+    "massachusetts": "MA",
+    "michigan": "MI",
+    "minnesota": "MN",
+    "mississippi": "MS",
+    "missouri": "MO",
+    "montana": "MT",
+    "nebraska": "NE",
+    "nevada": "NV",
+    "new hampshire": "NH",
+    "new jersey": "NJ",
+    "new mexico": "NM",
+    "new york": "NY",
+    "north carolina": "NC",
+    "north dakota": "ND",
+    "ohio": "OH",
+    "oklahoma": "OK",
+    "oregon": "OR",
+    "pennsylvania": "PA",
+    "rhode island": "RI",
+    "south carolina": "SC",
+    "south dakota": "SD",
+    "tennessee": "TN",
+    "texas": "TX",
+    "utah": "UT",
+    "vermont": "VT",
+    "virginia": "VA",
+    "washington": "WA",
+    "west virginia": "WV",
+    "wisconsin": "WI",
+    "wyoming": "WY",
+}
 
 
 def _format_ssn_input() -> None:
@@ -32,6 +84,18 @@ def _ensure_ssn_widget_state() -> None:
     current_widget_value = st.session_state.get(SSN_WIDGET_KEY, "")
     if normalize_digits(current_widget_value) == normalize_digits(stored_ssn):
         st.session_state[SSN_WIDGET_KEY] = formatted_stored_ssn
+
+
+def _normalize_state_input(value: str) -> str:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return ""
+
+    upper_cleaned = cleaned.upper()
+    if upper_cleaned in US_STATES:
+        return upper_cleaned
+
+    return STATE_NAME_TO_CODE.get(cleaned.lower(), "")
 
 
 def render_personal_information_page() -> None:
@@ -63,10 +127,10 @@ def render_personal_information_page() -> None:
     with col2:
         address = st.text_input("Current Address *", value=st.session_state.form_data.get("address", ""))
         city = st.text_input("City *", value=st.session_state.form_data.get("city", ""))
-        state = selectbox_with_placeholder(
+        state_input = st.text_input(
             "State *",
-            US_STATES,
-            current_value=st.session_state.form_data.get("state"),
+            value=st.session_state.form_data.get("state", ""),
+            help="Enter the 2-letter abbreviation or full state name.",
         )
         zip_code = st.text_input("Zip Code *", value=st.session_state.form_data.get("zip_code", ""))
         country = st.text_input("Country", value=st.session_state.form_data.get("country", "United States"))
@@ -147,6 +211,7 @@ def render_personal_information_page() -> None:
 
     if st.button("Next →", key="p1_next", use_container_width=True, type="primary"):
         ssn_digits = normalize_digits(ssn_display)
+        state = _normalize_state_input(state_input)
         missing: list[str] = []
         if not first_name:
             missing.append("First Name")
@@ -181,6 +246,15 @@ def render_personal_information_page() -> None:
                 code="validation_ssn_length",
                 severity="warning",
                 extra={"ssn_digits_length": len(ssn_digits)},
+            )
+            return
+
+        if not state:
+            show_user_error(
+                "Please enter a valid U.S. state abbreviation or full state name.",
+                code="validation_state_invalid",
+                severity="warning",
+                extra={"state_input": state_input},
             )
             return
 

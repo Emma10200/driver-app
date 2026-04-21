@@ -33,13 +33,13 @@ def test_page_one_next_advances_without_ssn_exception(monkeypatch, tmp_path):
     _widget_by_label(at.text_input, "Social Security Number *").set_value("123456789")
     _widget_by_label(at.text_input, "Current Address *").set_value("123 Main St")
     _widget_by_label(at.text_input, "City *").set_value("Fontana")
+    _widget_by_label(at.text_input, "State *").set_value("California")
     _widget_by_label(at.text_input, "Zip Code *").set_value("92335")
     _widget_by_label(at.text_input, "Primary Phone *").set_value("5551234567")
     _widget_by_label(at.text_input, "Cell Phone / Text Number").set_value("5551239999")
     _widget_by_label(at.text_input, "Email Address *").set_value("emma@example.com")
     _widget_by_label(at.text_input, "Emergency Contact Name *").set_value("John Driver")
     _widget_by_label(at.text_input, "Emergency Contact Phone *").set_value("5557654321")
-    _widget_by_label(at.selectbox, "State *").set_value("CA")
     _widget_by_label(at.selectbox, "Mobile Carrier / Provider").set_value("Verizon")
     _widget_by_label(
         at.checkbox,
@@ -51,6 +51,7 @@ def test_page_one_next_advances_without_ssn_exception(monkeypatch, tmp_path):
     assert not at.exception
     assert at.session_state["current_page"] == 2
     assert at.session_state["form_data"]["ssn"] == "123456789"
+    assert at.session_state["form_data"]["state"] == "CA"
     assert at.session_state["form_data"]["cell_phone"] == "5551239999"
     assert at.session_state["form_data"]["mobile_carrier"] == "Verizon"
     assert at.session_state["form_data"]["text_consent"] is True
