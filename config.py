@@ -36,7 +36,12 @@ COMPANY_PROFILES: dict[str, CompanyProfile] = {
     ),
     "side-xpress": CompanyProfile(
         slug="side-xpress",
-        name="SIDE XPRESS",
+        name="Xpress Trans, Inc",
+        address="2905 W. Lake St.",
+        city_state_zip="Melrose Park, IL 60160",
+        phone="708-356-4420",
+        fax="630-303-9721",
+        email="safety@xpresstransinc.com",
     ),
 }
 
