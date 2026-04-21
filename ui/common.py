@@ -167,6 +167,11 @@ def _sync_browser_autofill_via_js() -> None:
             'input:not([type])',
             'textarea'
         ].join(',');
+        const BUTTON_SELECTOR = 'button, [role="button"], input[type="submit"]';
+
+        function getBaselineValue(input) {
+            return input.getAttribute('value') ?? input.defaultValue ?? '';
+        }
 
         function rememberValue(input) {
             input.dataset.autofillSyncLastValue = input.value ?? '';
@@ -178,7 +183,7 @@ def _sync_browser_autofill_via_js() -> None:
             }
 
             input.dataset.autofillSyncBound = '1';
-            rememberValue(input);
+            input.dataset.autofillSyncLastValue = getBaselineValue(input);
 
             input.addEventListener('input', () => rememberValue(input));
             input.addEventListener('change', () => rememberValue(input));
@@ -200,21 +205,17 @@ def _sync_browser_autofill_via_js() -> None:
                 return;
             }
 
+            input.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+            input.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
             rememberValue(input);
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            input.dispatchEvent(new Event('change', { bubbles: true }));
         }
 
-        function scanForAutofill() {
+        function scanForAutofill(force = false) {
             parentDocument.querySelectorAll(INPUT_SELECTOR).forEach((input) => {
                 bindInput(input);
-                if (looksAutofilled(input)) {
-                    syncInput(input);
-                    return;
-                }
-
                 const isFocused = parentDocument.activeElement === input;
-                if (!isFocused) {
+                if (force || looksAutofilled(input) || !isFocused) {
                     syncInput(input);
                 }
             });
@@ -231,6 +232,16 @@ def _sync_browser_autofill_via_js() -> None:
         if (parentDocument.body) {
             observer.observe(parentDocument.body, { childList: true, subtree: true });
         }
+
+        parentDocument.addEventListener('pointerdown', (event) => {
+            if (event.target && event.target.closest(BUTTON_SELECTOR)) {
+                scanForAutofill(true);
+            }
+        }, true);
+
+        parentWindow.addEventListener('focus', () => {
+            parentWindow.setTimeout(scanForAutofill, 0);
+        }, true);
         </script>
         """,
         height=0,

@@ -11,7 +11,7 @@ from runtime_context import get_active_company_profile
 from services.draft_service import autosave_draft
 from state import next_page
 from ui.common import selectbox_with_placeholder, show_missing_fields, show_user_error
-from utils.formatting import format_ssn, normalize_digits
+from utils.formatting import normalize_digits
 
 
 SSN_WIDGET_KEY = "personal_ssn_display"
@@ -69,21 +69,16 @@ STATE_NAME_TO_CODE = {
 }
 
 
-def _format_ssn_input() -> None:
-    st.session_state[SSN_WIDGET_KEY] = format_ssn(st.session_state.get(SSN_WIDGET_KEY, ""))
-
-
 def _ensure_ssn_widget_state() -> None:
     stored_ssn = st.session_state.form_data.get("ssn", "")
-    formatted_stored_ssn = format_ssn(stored_ssn)
 
     if SSN_WIDGET_KEY not in st.session_state:
-        st.session_state[SSN_WIDGET_KEY] = formatted_stored_ssn
+        st.session_state[SSN_WIDGET_KEY] = stored_ssn
         return
 
     current_widget_value = st.session_state.get(SSN_WIDGET_KEY, "")
     if normalize_digits(current_widget_value) == normalize_digits(stored_ssn):
-        st.session_state[SSN_WIDGET_KEY] = formatted_stored_ssn
+        st.session_state[SSN_WIDGET_KEY] = stored_ssn
 
 
 def _normalize_state_input(value: str) -> str:
@@ -118,10 +113,8 @@ def render_personal_information_page() -> None:
         ssn_display = st.text_input(
             "Social Security Number *",
             key=SSN_WIDGET_KEY,
-            max_chars=11,
-            placeholder="000-00-0000",
-            help="Enter 9 digits. The field will format the dashes for you.",
-            on_change=_format_ssn_input,
+            placeholder="123-45-6789 or 123456789",
+            help="Enter the SSN with or without dashes. We'll normalize it for you.",
         )
 
     with col2:
@@ -242,7 +235,7 @@ def render_personal_information_page() -> None:
 
         if len(ssn_digits) != 9:
             show_user_error(
-                "Social Security Number must contain exactly 9 digits.",
+                "Social Security Number must contain exactly 9 digits after removing spaces or dashes.",
                 code="validation_ssn_length",
                 severity="warning",
                 extra={"ssn_digits_length": len(ssn_digits)},
