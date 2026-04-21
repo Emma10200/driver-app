@@ -342,6 +342,10 @@ def scroll_to_top_on_page_change(page: int) -> None:
     if st.session_state.get("last_rendered_page") == page:
         return
 
+    if page == 1:
+        st.session_state.last_rendered_page = page
+        return
+
     components.html(
         """
         <script>
