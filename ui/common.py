@@ -189,11 +189,46 @@ def scroll_to_top_on_page_change(page: int) -> None:
     components.html(
         """
         <script>
-        const mainSection = window.parent.document.querySelector('section.main');
-        if (mainSection) {
-            mainSection.scrollTo({ top: 0, behavior: 'auto' });
+        const parentWindow = window.parent;
+        const parentDocument = parentWindow.document;
+        const selectors = [
+            'section.main',
+            'main',
+            '[data-testid="stMain"]',
+            '[data-testid="stAppViewContainer"]',
+            '[data-testid="stAppViewBlockContainer"]'
+        ];
+
+        function resetScroll(target) {
+            if (!target) {
+                return;
+            }
+
+            if (typeof target.scrollTo === 'function') {
+                target.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+            }
+            target.scrollTop = 0;
+            target.scrollLeft = 0;
         }
-        window.parent.scrollTo({ top: 0, behavior: 'auto' });
+
+        function scrollEverythingToTop() {
+            selectors.forEach((selector) => {
+                parentDocument.querySelectorAll(selector).forEach(resetScroll);
+            });
+
+            resetScroll(parentDocument.documentElement);
+            resetScroll(parentDocument.body);
+            parentWindow.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+
+            const blockContainer = parentDocument.querySelector('[data-testid="stAppViewBlockContainer"]');
+            if (blockContainer && typeof blockContainer.scrollIntoView === 'function') {
+                blockContainer.scrollIntoView({ block: 'start', behavior: 'auto' });
+            }
+        }
+
+        [0, 40, 120, 240].forEach((delay) => {
+            parentWindow.setTimeout(scrollEverythingToTop, delay);
+        });
         </script>
         """,
         height=0,
