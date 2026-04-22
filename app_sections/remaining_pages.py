@@ -421,31 +421,69 @@ def render_remaining_page(page: int) -> bool:
         disq_391_15 = selectbox_with_placeholder(
             "Are you currently disqualified from driving a commercial motor vehicle?",
             ["No", "Yes"],
+            current_value=st.session_state.form_data.get("disq_391_15"),
+            help="Per 49 CFR 391.15: a current disqualification from operating a CMV for any reason.",
         )
         disq_suspended = selectbox_with_placeholder(
-            "Has your license, permit, or privilege to drive ever been suspended or revoked for any reason?",
+            "Has your license ever been suspended or revoked?",
             ["No", "Yes"],
+            current_value=st.session_state.form_data.get("disq_suspended"),
+            help="Has your license, permit, or privilege to drive ever been suspended or revoked for any reason?",
         )
         disq_denied = selectbox_with_placeholder(
-            "Have you ever been denied a license, permit, or privilege to operate a motor vehicle?",
+            "Have you ever been denied a license?",
             ["No", "Yes"],
+            current_value=st.session_state.form_data.get("disq_denied"),
+            help="Has your license, permit, or privilege to operate a motor vehicle ever been denied?",
         )
         disq_drug_test = selectbox_with_placeholder(
-            "Within the past two years, have you tested positive, or refused to test, on a pre-employment "
-            "drug or alcohol test by an employer to whom you applied for safety-sensitive transportation work?",
+            "In the past 2 years, have you tested positive or refused a pre-employment DOT drug/alcohol test?",
             ["No", "Yes"],
+            current_value=st.session_state.form_data.get("disq_drug_test"),
+            help=(
+                "Within the past two years, have you tested positive, or refused to test, on a "
+                "pre-employment drug or alcohol test by an employer to whom you applied for "
+                "safety-sensitive transportation work?"
+            ),
         )
+
+        DISQ_CONVICTION_OPTIONS = [
+            "Driving a CMV with a BAC of .04 or more",
+            "Driving under the influence of alcohol (state law)",
+            "Refusal to undergo drug and alcohol testing",
+            "Driving a CMV under the influence of a Schedule I controlled substance",
+            "Transportation/possession/unlawful use of controlled substances while driving for a motor carrier",
+            "Leaving the scene of an accident while operating a CMV",
+            "Any other felony involving the use of a CMV",
+        ]
         disq_convicted = selectbox_with_placeholder(
-            "In the past three (3) years, have you been convicted of any of the following offenses?\n"
-            "• Driving a CMV with a BAC of .04 or more\n"
-            "• Driving under the influence of alcohol as prescribed by state law\n"
-            "• Refusal to undergo drug and alcohol testing\n"
-            "• Driving a CMV under the influence of a Schedule I controlled substance\n"
-            "• Transportation, possession, or unlawful use of controlled substances while driving for a motor carrier\n"
-            "• Leaving the scene of an accident while operating a CMV\n"
-            "• Any other felony involving the use of a CMV",
+            "In the past 3 years, convicted of any DOT-disqualifying offense?",
             ["No", "Yes"],
+            current_value=st.session_state.form_data.get("disq_convicted"),
+            help=(
+                "Covers: driving a CMV with BAC .04+; DUI; refusal to test; CMV under "
+                "Schedule I controlled substance; transporting/possessing/using controlled "
+                "substances while driving; leaving the scene of a CMV accident; any other "
+                "felony involving a CMV."
+            ),
         )
+
+        disq_convicted_which: list[str] = []
+        disq_convicted_details = ""
+        if disq_convicted == "Yes":
+            st.markdown("**Please indicate which offense(s) apply.** Select all that apply.")
+            disq_convicted_which = st.multiselect(
+                "Which offense(s)?",
+                DISQ_CONVICTION_OPTIONS,
+                default=st.session_state.form_data.get("disq_convicted_which", []),
+                key="disq_convicted_which",
+            )
+            disq_convicted_details = st.text_area(
+                "Additional details (date, state, disposition)",
+                value=st.session_state.form_data.get("disq_convicted_details", ""),
+                key="disq_convicted_details_input",
+                help="Optional context for safety review.",
+            )
 
         st.markdown("---")
         st.markdown("#### Vehicle Accident Record")
@@ -529,6 +567,8 @@ def render_remaining_page(page: int) -> bool:
                     missing.append("Pre-employment drug/alcohol test question")
                 if not disq_convicted:
                     missing.append("DOT offense conviction question")
+                if disq_convicted == "Yes" and not disq_convicted_which:
+                    missing.append("Which DOT offense(s) apply")
                 if not has_accidents:
                     missing.append("Accident history question")
                 if not has_violations:
@@ -545,6 +585,8 @@ def render_remaining_page(page: int) -> bool:
                         "disq_denied": disq_denied,
                         "disq_drug_test": disq_drug_test,
                         "disq_convicted": disq_convicted,
+                        "disq_convicted_which": disq_convicted_which if disq_convicted == "Yes" else [],
+                        "disq_convicted_details": disq_convicted_details if disq_convicted == "Yes" else "",
                     }
                 )
                 next_page()

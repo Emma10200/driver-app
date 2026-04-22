@@ -202,6 +202,12 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
     pdf.field_row("License Denied:", _safe(form_data, "disq_denied"))
     pdf.field_row("Failed Pre-Employment Test:", _safe(form_data, "disq_drug_test"))
     pdf.field_row("Convicted of DOT Offenses:", _safe(form_data, "disq_convicted"))
+    convicted_which = form_data.get("disq_convicted_which") or []
+    if convicted_which:
+        pdf.field_row_wide("  Offense(s) disclosed:", "; ".join(convicted_which))
+    convicted_details = form_data.get("disq_convicted_details") or ""
+    if convicted_details:
+        pdf.field_row_wide("  Details:", convicted_details)
     pdf.ln(4)
 
     # --- Accident Record ---

@@ -149,6 +149,9 @@ def render_review_submit_page(submissions_dir: Path) -> None:
             "Suspended or revoked license history",
             st.session_state.form_data.get("disq_suspended"),
         )
+        convicted_which = st.session_state.form_data.get("disq_convicted_which") or []
+        if st.session_state.form_data.get("disq_convicted") == "Yes" and convicted_which:
+            summary_item("DOT offense(s) disclosed", "; ".join(convicted_which))
         summary_item("Supporting documents uploaded", len(st.session_state.get("uploaded_documents", [])), default="0")
 
     with st.expander("Disclosures & Acknowledgments"):
