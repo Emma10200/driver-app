@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import html
 import smtplib
 from email.message import EmailMessage
 from typing import Any
@@ -266,17 +267,39 @@ def send_resume_link_email(
         body = (
             f"Here is the resume link for your {company_name} driver application.\n\n"
             f"Open the application URL you were given, then append this to it:\n"
-            f"  {resume_url}\n\n"
+                        f"  <{resume_url}>\n\n"
             "Your progress is saved. You can return to this application from any device."
         )
     else:
         body = (
             f"Here is the resume link for your {company_name} driver application.\n\n"
             f"Click or paste this link to continue where you left off:\n"
-            f"  {resume_url}\n\n"
+                        f"  <{resume_url}>\n\n"
             "Your progress is saved. You can return to this application from any device."
         )
     message.set_content(body)
+
+    if not is_relative:
+        safe_url = html.escape(resume_url, quote=True)
+        safe_company_name = html.escape(company_name)
+        message.add_alternative(
+            f"""
+            <html>
+              <body>
+                <p>Here is the resume link for your {safe_company_name} driver application.</p>
+                <p>
+                  <a href=\"{safe_url}\">Resume your application</a>
+                </p>
+                <p>
+                  If the button above does not work, copy and paste this link into your browser:<br>
+                  <a href=\"{safe_url}\">{safe_url}</a>
+                </p>
+                <p>Your progress is saved. You can return to this application from any device.</p>
+              </body>
+            </html>
+            """,
+            subtype="html",
+        )
 
     try:
         _deliver_message(message, settings)

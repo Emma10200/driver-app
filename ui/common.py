@@ -573,7 +573,8 @@ def _render_save_draft_panel(panel_key: str) -> None:
             st.warning("Enter a valid email address.")
         else:
             company = get_active_company_profile()
-            base_url = (get_runtime_secret("APP_BASE_URL", "") or "").strip().rstrip("/")
+            base_url = (get_runtime_secret("APP_BASE_URL", "") or "").strip()
+            base_url = f"{base_url.rstrip('/')}/" if base_url else ""
             resume_url = (base_url + snippet) if base_url else snippet
             result = send_resume_link_email(
                 to_email=to_email,
