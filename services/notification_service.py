@@ -8,7 +8,7 @@ import smtplib
 from email.message import EmailMessage
 from typing import Any
 
-from config import DEFAULT_COMPANY_SLUG
+from config import COMPANY_PROFILES, DEFAULT_COMPANY_SLUG
 from runtime_context import is_test_mode_active
 from submission_storage import get_runtime_secret
 
@@ -30,14 +30,21 @@ def _recipient_secret_key(company_slug: str) -> str:
 
 
 def _notification_settings(company_slug: str, *, test_mode: bool) -> dict[str, Any]:
-    recipients_raw = (
-        (get_runtime_secret("TEST_INTERNAL_NOTIFICATION_TO", "") or "") if test_mode else ""
-    ) or (
-        get_runtime_secret(_recipient_secret_key(company_slug), "")
-        or get_runtime_secret("INTERNAL_NOTIFICATION_TO", "")
-        or ""
-    )
-    recipients = [item.strip() for item in recipients_raw.split(",") if item.strip()]
+    if test_mode:
+        recipients_raw = get_runtime_secret("TEST_INTERNAL_NOTIFICATION_TO", "") or ""
+        recipients = [item.strip() for item in recipients_raw.split(",") if item.strip()]
+    else:
+        recipients_raw = (
+            get_runtime_secret(_recipient_secret_key(company_slug), "")
+            or get_runtime_secret("INTERNAL_NOTIFICATION_TO", "")
+            or ""
+        )
+        recipients = [item.strip() for item in recipients_raw.split(",") if item.strip()]
+        # Always copy the company's safety mailbox so each company gets its own application.
+        profile = COMPANY_PROFILES.get(company_slug) or COMPANY_PROFILES.get(DEFAULT_COMPANY_SLUG)
+        safety_email = (profile.email if profile else "").strip()
+        if safety_email and safety_email.lower() not in {item.lower() for item in recipients}:
+            recipients.append(safety_email)
     return {
         "host": (get_runtime_secret("SMTP_HOST", "") or "").strip(),
         "port": int((get_runtime_secret("SMTP_PORT", "587") or "587").strip()),

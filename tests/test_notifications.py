@@ -5,6 +5,53 @@ from types import SimpleNamespace
 
 import app_sections.review_submit as review_submit
 import services.notification_service as notification_service
+from submission_storage import get_runtime_secret as _real_get_runtime_secret
+
+
+def _fake_secrets(values: dict[str, str]):
+    def _lookup(name, default=""):
+        return values.get(name, default)
+
+    return _lookup
+
+
+def test_notification_settings_auto_includes_company_safety_email(monkeypatch):
+    monkeypatch.setattr(
+        notification_service,
+        "get_runtime_secret",
+        _fake_secrets({
+            "SMTP_HOST": "smtp.example.com",
+            "SMTP_FROM_EMAIL": "alerts@example.com",
+            "INTERNAL_NOTIFICATION_TO": "ops@example.com",
+        }),
+    )
+
+    prestige = notification_service._notification_settings("prestige", test_mode=False)
+    assert prestige["recipients"] == ["ops@example.com", "safety@prestigecalifornia.com"]
+
+    xpress = notification_service._notification_settings("side-xpress", test_mode=False)
+    assert xpress["recipients"] == ["ops@example.com", "safety@xpresstransinc.com"]
+
+
+def test_notification_settings_test_mode_skips_safety_email(monkeypatch):
+    monkeypatch.setattr(
+        notification_service,
+        "get_runtime_secret",
+        _fake_secrets({
+            "SMTP_HOST": "smtp.example.com",
+            "SMTP_FROM_EMAIL": "alerts@example.com",
+            "INTERNAL_NOTIFICATION_TO": "ops@example.com",
+            "TEST_INTERNAL_NOTIFICATION_TO": "qa@example.com",
+        }),
+    )
+
+    settings = notification_service._notification_settings("prestige", test_mode=True)
+    assert settings["recipients"] == ["qa@example.com"]
+    assert "safety@prestigecalifornia.com" not in settings["recipients"]
+
+
+# Avoid unused-import warning when running selectively.
+_ = _real_get_runtime_secret
 
 
 class FakeSessionState(dict):
