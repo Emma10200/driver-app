@@ -59,8 +59,8 @@ def _render_company_picker() -> None:
     st.markdown(
         """
         <div style='text-align:center; padding: 1.5rem 0 0.5rem;'>
-            <h1 style='margin-bottom:0.25rem;'>🚛 Driver Application Portal</h1>
-            <p style='color:#555; font-size:1.05rem;'>Which company are you applying with?</p>
+            <h1 style='margin-bottom:0.25rem;'>Driver Application</h1>
+            <p style='color:#555; font-size:1.05rem;'>Select the company for this application.</p>
         </div>
         """,
         unsafe_allow_html=True,

@@ -206,11 +206,11 @@ def render_review_submit_page(submissions_dir: Path) -> None:
     with bcol2:
         render_save_draft_button(
             "p12_save_draft",
-            label="💾 Save Draft",
+            label="Save Draft",
             on_before_save=_prepare_review_draft_save,
         )
     with bcol3:
-        if st.button("✅ Submit Application", key="p12_submit", use_container_width=True, type="primary"):
+        if st.button("Submit Application", key="p12_submit", use_container_width=True, type="primary"):
             if not review_confirm:
                 show_user_error(
                     "Please confirm that you reviewed the application before submitting.",

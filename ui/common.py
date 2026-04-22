@@ -76,28 +76,30 @@ BASE_STYLES = """
     }
     .app-header {
         text-align: center;
-        padding: 1.15rem 1rem;
+        padding: 1rem 1rem 0.9rem;
         margin-bottom: 0.5rem;
-        border: 1px solid color-mix(in srgb, var(--primary-color) 35%, transparent);
-        border-radius: 14px;
-        border-bottom-width: 3px;
-        background: linear-gradient(
-            135deg,
-            color-mix(in srgb, var(--primary-color) 12%, transparent),
-            color-mix(in srgb, var(--primary-color) 4%, var(--background-color))
-        );
+        border: 1px solid color-mix(in srgb, var(--primary-color) 22%, transparent);
+        border-radius: 8px;
+        background: var(--secondary-background-color);
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
     }
     .app-header h1 {
         color: var(--text-color);
-        margin-bottom: 0.2rem;
+        margin-bottom: 0.15rem;
     }
     .app-header p {
         color: color-mix(in srgb, var(--text-color) 82%, transparent);
         margin: 0;
+        font-size: 0.92rem;
     }
     .app-header h3 {
-        color: var(--primary-color);
+        color: color-mix(in srgb, var(--text-color) 70%, transparent);
         margin-top: 0.55rem;
+        margin-bottom: 0;
+        font-size: 0.92rem;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
     }
     .eeo-notice {
         background: color-mix(in srgb, var(--primary-color) 8%, var(--secondary-background-color));
@@ -471,7 +473,7 @@ def _sync_browser_autofill_via_js() -> None:
 
 def render_save_draft_button(
     button_key: str,
-    label: str = "💾 Save Draft",
+    label: str = "Save Draft",
     *,
     on_before_save: Callable[[], bool] | None = None,
 ) -> None:
@@ -512,13 +514,13 @@ def _render_save_draft_panel(panel_key: str) -> None:
     if not snippet:
         return
 
-    st.success("Draft saved. Use the link below to come back later.")
+    st.success("Draft saved. Use the link below to return later.")
 
     components.html(
         f"""
         <div style="font-family: sans-serif; margin-bottom: 0.6rem;">
           <div style="font-size: 0.78rem; color: #444; margin-bottom: 0.25rem;">
-            Your resume link:
+            Return link:
           </div>
           <div style="display: flex; gap: 0.4rem; align-items: stretch;">
             <input id="drv-resume-url-{panel_key}" readonly
@@ -527,7 +529,7 @@ def _render_save_draft_panel(panel_key: str) -> None:
             <button id="drv-resume-copy-{panel_key}" type="button"
               style="padding: 0.55rem 0.9rem; font-size: 0.85rem;
                      border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer;">
-              📋 Copy
+              Copy link
             </button>
           </div>
           <div id="drv-resume-copy-msg-{panel_key}"
@@ -562,7 +564,7 @@ def _render_save_draft_panel(panel_key: str) -> None:
 
     prefilled = str(st.session_state.form_data.get("email") or "").strip()
     email_key = f"{panel_key}_email_input"
-    st.caption("Or email the link to yourself so you can pick it up later:")
+    st.caption("Or email the link to yourself for later use:")
     col_a, col_b = st.columns([3, 1])
     with col_a:
         to_email = st.text_input(
@@ -573,7 +575,7 @@ def _render_save_draft_panel(panel_key: str) -> None:
             label_visibility="collapsed",
         )
     with col_b:
-        send_clicked = st.button("✉ Send", key=f"{panel_key}_email_send", use_container_width=True)
+        send_clicked = st.button("Send Email", key=f"{panel_key}_email_send", use_container_width=True)
 
     if send_clicked:
         to_email = (to_email or "").strip()
@@ -658,7 +660,7 @@ def render_app_shell() -> None:
     <h1>{company.name}</h1>
     {f'<p>{" | ".join(location_parts)}</p>' if location_parts else ''}
     {f'<p>{" | ".join(contact_parts)}</p>' if contact_parts else ''}
-    <h3>Independent Contractor Driver Application</h3>
+    <h3>Driver Application</h3>
 </div>
 """,
         unsafe_allow_html=True,
@@ -687,6 +689,8 @@ age, marital status, veteran status, non-job related disability, or any other pr
 
 
 def render_version_footer() -> None:
+    if not (is_test_mode_active() or st.session_state.get("admin_tools_enabled")):
+        return
     st.markdown(
         f'<div class="app-version-footer">Build {_resolve_runtime_version()}</div>',
         unsafe_allow_html=True,
