@@ -443,7 +443,7 @@ def render_save_draft_button(button_key: str, label: str = "💾 Save Draft") ->
 
     result = autosave_draft()
     if result and result.get("ok"):
-        st.success(f"Draft saved. Resume later with code `{st.session_state.draft_id}`.")
+        st.success("Draft saved. Open the sidebar to copy your resume link or email it to yourself.")
         _open_sidebar_via_js()
     else:
         st.warning("The form is still open, but the secure draft save did not complete.")

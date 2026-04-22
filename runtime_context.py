@@ -137,6 +137,8 @@ def sync_runtime_context() -> None:
         pass
     # Otherwise leave session as default; app.py will render the picker.
 
+    _maybe_resume_draft_from_query()
+
     profile = get_company_profile(st.session_state.get("company_slug") or DEFAULT_COMPANY_SLUG)
     st.session_state.admin_tools_enabled = admin_tools_enabled()
 
@@ -145,3 +147,35 @@ def sync_runtime_context() -> None:
         form_data["company_slug"] = profile.slug
         form_data["company_name"] = profile.name
         form_data["test_mode"] = bool(st.session_state.get("test_mode"))
+
+
+DRAFT_RESUME_GUARD_KEY = "_draft_resume_attempted"
+
+
+def _maybe_resume_draft_from_query() -> None:
+    """If the URL carries ?draft=<id> and we haven't loaded it yet this
+    session, restore that draft into session state.
+
+    The guard key is intentionally preserved across reset_application_state
+    (see state.py) so the inner sync_runtime_context() call inside
+    load_draft_into_session does not recurse into another load.
+    """
+    draft_id = _query_param_value("draft").strip()
+    if not draft_id:
+        return
+
+    if st.session_state.get(DRAFT_RESUME_GUARD_KEY) == draft_id:
+        return
+
+    # Mark BEFORE loading so the inner sync_runtime_context sees the guard.
+    st.session_state[DRAFT_RESUME_GUARD_KEY] = draft_id
+
+    from services.draft_service import load_draft_into_session
+
+    try:
+        load_draft_into_session(draft_id)
+    except Exception:
+        st.session_state["draft_load_error"] = (
+            "We couldn't find that saved draft. You can start a new application "
+            "or try the link again later."
+        )
