@@ -163,25 +163,29 @@ def render_company_questions_page() -> None:
         )
 
         if has_experience:
-            ecol1, ecol2, ecol3 = st.columns(3)
-            with ecol1:
-                exp_type = st.text_input(
-                    f"{eq_type} — Equipment Detail",
-                    key=f"{key_prefix}_type",
-                    value=saved_type,
-                )
-            with ecol2:
-                exp_miles = st.text_input(
-                    f"{eq_type} — Total Miles",
-                    key=f"{key_prefix}_miles",
-                    value=saved_miles,
-                )
-            with ecol3:
-                exp_dates = st.text_input(
-                    f"{eq_type} — Date Range",
-                    key=f"{key_prefix}_dates",
-                    value=saved_dates,
-                )
+            with st.container(border=True):
+                ecol1, ecol2, ecol3 = st.columns(3)
+                with ecol1:
+                    exp_type = st.text_input(
+                        "Equipment Detail",
+                        key=f"{key_prefix}_type",
+                        value=saved_type,
+                        placeholder="e.g. 53' dry van",
+                    )
+                with ecol2:
+                    exp_miles = st.text_input(
+                        "Total Miles",
+                        key=f"{key_prefix}_miles",
+                        value=saved_miles,
+                        placeholder="e.g. 250,000",
+                    )
+                with ecol3:
+                    exp_dates = st.text_input(
+                        "Date Range",
+                        key=f"{key_prefix}_dates",
+                        value=saved_dates,
+                        placeholder="e.g. 2018 – present",
+                    )
         else:
             exp_type = ""
             exp_miles = ""

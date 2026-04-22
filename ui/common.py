@@ -562,6 +562,7 @@ def _render_save_draft_panel(panel_key: str) -> None:
 
     prefilled = str(st.session_state.form_data.get("email") or "").strip()
     email_key = f"{panel_key}_email_input"
+    st.caption("Or email the link to yourself so you can pick it up later:")
     col_a, col_b = st.columns([3, 1])
     with col_a:
         to_email = st.text_input(
