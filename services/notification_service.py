@@ -140,15 +140,6 @@ def send_internal_submission_notification(
             "message": "Notification email requires application PDF bytes, but none were available.",
         }
 
-    pdf_bytes = _protect_pdf(application_pdf, settings["attachment_password"])
-    applicant_last = str(form_data.get("last_name", "driver")).strip().lower().replace(" ", "-") or "driver"
-    timestamp = datetime.now().strftime("%Y%m%d")
-    filename = f"application_{applicant_last}_{timestamp}.pdf"
-    message.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=filename)
-    attachment_note = "Application PDF attachment: included" + (
-        " (password-protected)." if settings["attachment_password"] else "."
-    )
-
     message.set_content(
         "\n".join(
             [
@@ -161,12 +152,17 @@ def send_internal_submission_notification(
                 f"Submitted at: {form_data.get('final_submission_timestamp', 'Unknown')}",
                 f"Saved to: {submission_result.get('location_label', 'Unknown location')}",
                 f"Supporting document count: {len(uploaded_documents)}",
-                attachment_note,
                 "",
-                "This notification intentionally excludes attachments and sensitive SSN data.",
+                "This notification intentionally excludes supporting-document attachments and sensitive SSN data.",
             ]
         )
     )
+
+    pdf_bytes = _protect_pdf(application_pdf, settings["attachment_password"])
+    applicant_last = str(form_data.get("last_name", "driver")).strip().lower().replace(" ", "-") or "driver"
+    timestamp = datetime.now().strftime("%Y%m%d")
+    filename = f"application_{applicant_last}_{timestamp}.pdf"
+    message.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=filename)
 
     try:
         _deliver_message(message, settings)
