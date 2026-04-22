@@ -144,34 +144,55 @@ def render_company_questions_page() -> None:
     st.markdown("---")
     st.subheader("Driving Experience")
     st.markdown(
-        "For each class of equipment, enter type of equipment, start and end dates, "
-        "and approximate number of total miles. If no experience in a class, enter NONE."
+        "Check each equipment class you have experience with. For any class you check, "
+        "enter equipment detail, date range, and approximate total miles."
     )
 
-    experience_data: dict[str, dict[str, str]] = {}
+    experience_data: dict[str, dict[str, bool | str]] = {}
     for eq_type in EQUIPMENT_TYPES:
-        with st.expander(eq_type):
+        key_prefix = f"exp_{eq_type.lower().replace(' ', '_').replace('-', '_')}"
+        saved_type = st.session_state.form_data.get(f"{key_prefix}_type", "")
+        saved_miles = st.session_state.form_data.get(f"{key_prefix}_miles", "")
+        saved_dates = st.session_state.form_data.get(f"{key_prefix}_dates", "")
+        has_saved_experience = any([saved_type, saved_miles, saved_dates])
+
+        has_experience = st.checkbox(
+            eq_type,
+            key=f"{key_prefix}_enabled",
+            value=has_saved_experience,
+        )
+
+        if has_experience:
             ecol1, ecol2, ecol3 = st.columns(3)
-            key_prefix = f"exp_{eq_type.lower().replace(' ', '_').replace('-', '_')}"
             with ecol1:
                 exp_type = st.text_input(
-                    "Equipment Detail",
+                    f"{eq_type} — Equipment Detail",
                     key=f"{key_prefix}_type",
-                    value=st.session_state.form_data.get(f"{key_prefix}_type", ""),
+                    value=saved_type,
                 )
             with ecol2:
                 exp_miles = st.text_input(
-                    "Total Miles",
+                    f"{eq_type} — Total Miles",
                     key=f"{key_prefix}_miles",
-                    value=st.session_state.form_data.get(f"{key_prefix}_miles", ""),
+                    value=saved_miles,
                 )
             with ecol3:
                 exp_dates = st.text_input(
-                    "Date Range",
+                    f"{eq_type} — Date Range",
                     key=f"{key_prefix}_dates",
-                    value=st.session_state.form_data.get(f"{key_prefix}_dates", ""),
+                    value=saved_dates,
                 )
-            experience_data[key_prefix] = {"type": exp_type, "miles": exp_miles, "dates": exp_dates}
+        else:
+            exp_type = ""
+            exp_miles = ""
+            exp_dates = ""
+
+        experience_data[key_prefix] = {
+            "enabled": has_experience,
+            "type": exp_type,
+            "miles": exp_miles,
+            "dates": exp_dates,
+        }
 
     st.markdown("---")
     st.subheader("Additional Driving Info")
@@ -247,9 +268,9 @@ def render_company_questions_page() -> None:
             )
             st.session_state.form_data.pop("email_marketing_opt_in", None)
             for key_prefix, values in experience_data.items():
-                st.session_state.form_data[f"{key_prefix}_type"] = values["type"]
-                st.session_state.form_data[f"{key_prefix}_miles"] = values["miles"]
-                st.session_state.form_data[f"{key_prefix}_dates"] = values["dates"]
+                st.session_state.form_data[f"{key_prefix}_type"] = values["type"] if values["enabled"] else ""
+                st.session_state.form_data[f"{key_prefix}_miles"] = values["miles"] if values["enabled"] else ""
+                st.session_state.form_data[f"{key_prefix}_dates"] = values["dates"] if values["enabled"] else ""
             next_page()
             autosave_draft()
             st.rerun()
