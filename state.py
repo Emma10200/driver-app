@@ -12,6 +12,7 @@ SESSION_DEFAULTS: dict[str, Any] = {
     "current_page": 1,
     "last_rendered_page": None,
     "company_slug": "prestige",
+    "company_slug_locked": False,
     "admin_tools_enabled": False,
     "test_mode": False,
     "form_data": {},
