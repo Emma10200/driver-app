@@ -21,7 +21,9 @@ def _widget_by_label(collection, label: str):
 def _build_app(monkeypatch, tmp_path):
     monkeypatch.setenv("SUBMISSION_STORAGE_BACKEND", "local")
     monkeypatch.setattr(draft_service, "LOCAL_STORAGE_DIR", tmp_path)
-    return AppTest.from_file(str(APP_FILE), default_timeout=15)
+    app = AppTest.from_file(str(APP_FILE), default_timeout=15)
+    app.query_params["company"] = "prestige"
+    return app
 
 
 def test_page_one_next_advances_without_ssn_exception(monkeypatch, tmp_path):
@@ -33,7 +35,7 @@ def test_page_one_next_advances_without_ssn_exception(monkeypatch, tmp_path):
     _widget_by_label(at.text_input, "Social Security Number *").set_value("123456789")
     _widget_by_label(at.text_input, "Current Address *").set_value("123 Main St")
     _widget_by_label(at.text_input, "City *").set_value("Fontana")
-    _widget_by_label(at.text_input, "State *").set_value("California")
+    _widget_by_label(at.selectbox, "State *").set_value("CA")
     _widget_by_label(at.text_input, "Zip Code *").set_value("92335")
     _widget_by_label(at.text_input, "Primary Phone *").set_value("5551234567")
     _widget_by_label(at.text_input, "Cell Phone / Text Number").set_value("5551239999")
@@ -71,4 +73,4 @@ def test_page_seven_next_advances_to_fcra(monkeypatch, tmp_path):
 
     assert not at.exception
     assert at.session_state["current_page"] == 8
-    assert any("FCRA Disclosure" in node.value for node in at.subheader)
+    assert any("Background Check Disclosure" in node.value for node in at.subheader)

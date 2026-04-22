@@ -57,31 +57,6 @@ def render_company_questions_page() -> None:
             OFFICE_LOCATIONS,
             current_value=st.session_state.form_data.get("preferred_office") or st.session_state.form_data.get("applying_location"),
         )
-        twic_card = selectbox_with_placeholder(
-            "Do you have a current TWIC card?",
-            ["No", "Yes"],
-            current_value=st.session_state.form_data.get("twic_card"),
-        )
-        if twic_card == "Yes":
-            twic_expiration = st.date_input(
-                "TWIC Expiration Date",
-                value=st.session_state.form_data.get("twic_expiration", date.today()),
-            )
-        else:
-            twic_expiration = None
-        hazmat_endorsement = selectbox_with_placeholder(
-            "Do you have a current Hazmat (HM) endorsement?",
-            ["No", "Yes"],
-            current_value=st.session_state.form_data.get("hazmat_endorsement"),
-            help="Hazmat endorsement is checked frequently for our freight type.",
-        )
-        if hazmat_endorsement == "Yes":
-            hazmat_expiration = st.date_input(
-                "Hazmat Endorsement Expiration Date",
-                value=st.session_state.form_data.get("hazmat_expiration", date.today()),
-            )
-        else:
-            hazmat_expiration = None
         referral_source = selectbox_with_placeholder(
             "How did you hear about us?",
             REFERRAL_SOURCES,
@@ -247,10 +222,6 @@ def render_company_questions_page() -> None:
                     "worked_here_before": worked_here_before,
                     "preferred_office": preferred_office,
                     "applying_location": preferred_office,
-                    "twic_card": twic_card,
-                    "twic_expiration": twic_expiration,
-                    "hazmat_endorsement": hazmat_endorsement,
-                    "hazmat_expiration": hazmat_expiration,
                     "referral_source": referral_source,
                     "referral_name": referral_name,
                     "prev_dates": prev_dates,

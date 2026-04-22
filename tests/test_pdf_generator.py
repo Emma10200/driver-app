@@ -1,0 +1,188 @@
+from __future__ import annotations
+
+from io import BytesIO
+
+from pypdf import PdfReader
+
+import pdf_generator
+from runtime_context import get_company_profile
+
+
+def _extract_text(pdf_bytes: bytes) -> str:
+    return "".join(page.extract_text() or "" for page in PdfReader(BytesIO(pdf_bytes)).pages)
+
+
+def test_generate_application_pdf_includes_aligned_credentials_and_disclosures(monkeypatch):
+    monkeypatch.setattr(pdf_generator, "get_active_company_profile", lambda: get_company_profile("prestige"))
+
+    form_data = {
+        "first_name": "Emma",
+        "middle_name": "J",
+        "last_name": "Driver",
+        "dob": "1990-01-01",
+        "ssn": "123456789",
+        "address": "123 Main St",
+        "city": "Fontana",
+        "state": "CA",
+        "zip_code": "92335",
+        "country": "United States",
+        "primary_phone": "5551234567",
+        "cell_phone": "5551239999",
+        "mobile_carrier": "Other",
+        "mobile_carrier_other": "Visible Wireless",
+        "email": "emma@example.com",
+        "preferred_contact": "Either",
+        "best_time": "Afternoons",
+        "resided_3_years": "No",
+        "prev_address": "9 Old Rd",
+        "prev_city": "Ontario",
+        "prev_state": "CA",
+        "prev_zip": "91761",
+        "emergency_name": "John Driver",
+        "emergency_phone": "5557654321",
+        "emergency_relationship": "Brother",
+        "text_consent": True,
+        "position": "Owner Operator",
+        "preferred_office": "California Office",
+        "eligible_us": "Yes",
+        "read_english": "Yes",
+        "currently_employed": "No",
+        "last_employment_end": "2026-04-01",
+        "worked_here_before": "Yes",
+        "referral_source": "Driver Referral",
+        "referral_name": "Alex Driver",
+        "prev_dates": "2021-2022, leased on, moved out of state",
+        "relatives_here": "Yes",
+        "relatives_names": "Sam Driver",
+        "equipment_description": "Peterbilt 579",
+        "equipment_year": "2022",
+        "equipment_make": "Peterbilt",
+        "equipment_model": "579",
+        "equipment_color": "Blue",
+        "equipment_vin": "VIN123",
+        "equipment_weight": "18000",
+        "equipment_mileage": "250000",
+        "fifth_wheel_height": "47 in",
+        "safe_driving_awards": "Million Mile Award",
+        "known_other_name": "Yes",
+        "other_name": "Emma Smith",
+        "exp_straight_truck_type": "Box truck",
+        "exp_straight_truck_miles": "50000",
+        "exp_straight_truck_dates": "2018-2020",
+        "exp_tractor_and_semi_trailer_type": "53 dry van",
+        "exp_tractor_and_semi_trailer_miles": "300000",
+        "exp_tractor_and_semi_trailer_dates": "2020-present",
+        "twic_card": "Yes",
+        "twic_expiration": "2027-08-01",
+        "hazmat_endorsement": "Yes",
+        "hazmat_expiration": "2026-12-01",
+        "highest_grade": "High School",
+        "last_school": "Fontana High, Fontana, CA",
+        "attended_trucking_school": "Yes",
+        "ts_name": "Roadmaster",
+        "ts_city_state": "Fontana, CA",
+        "ts_start": "2019-01-01",
+        "ts_end": "2019-03-01",
+        "ts_graduated": "Yes",
+        "ts_fmcsa_subject": "Yes",
+        "ref1": "Jane Doe, Fontana, CA, 5551112222, Friend",
+        "ref2": "Mike Roe, Ontario, CA, 5553334444, Former Dispatcher",
+        "disq_391_15": "No",
+        "disq_suspended": "No",
+        "disq_denied": "No",
+        "disq_drug_test": "No",
+        "disq_convicted": "Yes",
+        "disq_convicted_which": ["Driving under the influence of alcohol (state law)"],
+        "disq_convicted_details": "2018, CA, completed program",
+        "fcra_acknowledge": True,
+        "fcra_timestamp": "2026-04-21T10:00:00",
+        "ca_applicable": True,
+        "ca_disclosure_acknowledge": True,
+        "ca_disclosure_timestamp": "2026-04-21T10:01:00",
+        "ca_copy": True,
+        "psp_acknowledge": True,
+        "psp_timestamp": "2026-04-21T10:02:00",
+        "clearinghouse_acknowledge": True,
+        "clearinghouse_timestamp": "2026-04-21T10:03:00",
+        "inv_consumer_report": True,
+        "sig_full_name": "Emma Driver",
+        "sig_date": "2026-04-21",
+        "sig_timestamp": "2026-04-21T10:04:00",
+        "drug_alcohol_cert": True,
+        "applicant_cert": True,
+    }
+    licenses = [
+        {
+            "number": "A1234567",
+            "state": "CA",
+            "class": "Class A",
+            "expiration": "2027-01-01",
+            "med_card_exp": "2026-09-01",
+            "is_cdl": "Yes",
+            "tanker": "Yes",
+            "hazmat": "Yes",
+            "hazmat_exp": "2026-12-01",
+            "doubles": "No",
+            "x_endorsement": "Yes",
+        }
+    ]
+    employers = [
+        {
+            "company": "ABC Logistics",
+            "address": "1 Fleet Way",
+            "city_state": "Ontario, CA 91761",
+            "phone": "5557778888",
+            "position": "Owner Operator",
+            "start": "2022-01-01",
+            "end": "2026-04-01",
+            "reason": "Better opportunity",
+            "terminated": "No",
+            "current": "No",
+            "contact_ok": "Yes",
+            "cmv": "Yes",
+            "fmcsa": "Yes",
+            "dot_testing": "Yes",
+            "areas": "CA/NV/AZ",
+            "miles": "2500",
+            "truck": "Peterbilt",
+            "trailer": "Van",
+            "trailer_len": "53 feet or more",
+        }
+    ]
+    accidents = [
+        {
+            "date": "2023-01-01",
+            "location": "Barstow, CA",
+            "fatalities": 0,
+            "injuries": 0,
+            "hazmat": "No",
+            "description": "Minor weather-related slide",
+        }
+    ]
+    violations = [
+        {
+            "date": "2024-02-02",
+            "location": "Needles, CA",
+            "charge": "Speeding",
+            "penalty": "Fine",
+        }
+    ]
+
+    pdf_bytes = pdf_generator.generate_application_pdf(form_data, employers, licenses, accidents, violations)
+    text = _extract_text(pdf_bytes)
+
+    for expected_text in [
+        "Visible Wireless",
+        "Best Time to Contact:",
+        "Referral Details:",
+        "Relative Names:",
+        "Known by Another Name:",
+        "Driving Experience",
+        "53 dry van",
+        "TWIC Card:",
+        "TWIC Expiration:",
+        "Disclosures & Authorizations",
+        "California Disclosure Acknowledged:",
+        "Applicant Certification Acknowledged:",
+    ]:
+        assert expected_text in text

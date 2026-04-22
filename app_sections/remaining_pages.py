@@ -25,6 +25,28 @@ def render_remaining_page(page: int) -> bool:
         st.subheader("Licenses & Endorsements")
         st.markdown("List all driver's licenses held in the past 3 years and current endorsements.")
 
+        st.markdown("#### Additional Credentials")
+        cred_col1, cred_col2 = st.columns(2)
+        with cred_col1:
+            twic_card = selectbox_with_placeholder(
+                "Do you have a current TWIC card?",
+                ["No", "Yes"],
+                current_value=st.session_state.form_data.get("twic_card"),
+                key="twic_card_page3",
+                help="TWIC is a transportation security credential rather than a CDL endorsement, but it belongs with your license credentials.",
+            )
+        with cred_col2:
+            if twic_card == "Yes":
+                twic_expiration = st.date_input(
+                    "TWIC Expiration Date",
+                    value=st.session_state.form_data.get("twic_expiration", date.today()),
+                    key="twic_expiration_page3",
+                )
+            else:
+                twic_expiration = None
+
+        st.markdown("---")
+
         num_licenses = st.number_input(
             "How many licenses do you want to add?",
             min_value=1,
@@ -153,6 +175,13 @@ def render_remaining_page(page: int) -> bool:
                     return
 
                 st.session_state.licenses = licenses_input
+                st.session_state.form_data["twic_card"] = twic_card
+                st.session_state.form_data["twic_expiration"] = twic_expiration
+                st.session_state.form_data["hazmat_endorsement"] = "Yes" if any(
+                    license_entry["hazmat"] == "Yes" for license_entry in licenses_input
+                ) else "No"
+                hazmat_expirations = [license_entry["hazmat_exp"] for license_entry in licenses_input if license_entry["hazmat_exp"]]
+                st.session_state.form_data["hazmat_expiration"] = hazmat_expirations[0] if hazmat_expirations else None
                 next_page()
                 autosave_draft()
                 st.rerun()

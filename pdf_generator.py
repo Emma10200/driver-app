@@ -5,6 +5,7 @@ from io import BytesIO
 
 from fpdf import FPDF
 
+from config import EQUIPMENT_TYPES
 from runtime_context import get_active_company_profile
 
 
@@ -73,6 +74,35 @@ def _safe(data, key, default=""):
     return str(val)
 
 
+def _bool_text(value, default=""):
+    if value is True:
+        return "Yes"
+    if value is False:
+        return "No"
+    if value in {"Yes", "No"}:
+        return value
+    return default
+
+
+def _selected_experience_rows(form_data):
+    rows = []
+    for eq_type in EQUIPMENT_TYPES:
+        key_prefix = f"exp_{eq_type.lower().replace(' ', '_').replace('-', '_')}"
+        exp_type = _safe(form_data, f"{key_prefix}_type")
+        exp_miles = _safe(form_data, f"{key_prefix}_miles")
+        exp_dates = _safe(form_data, f"{key_prefix}_dates")
+        if any([exp_type, exp_miles, exp_dates]):
+            rows.append(
+                {
+                    "label": eq_type,
+                    "detail": exp_type,
+                    "miles": exp_miles,
+                    "dates": exp_dates,
+                }
+            )
+    return rows
+
+
 def generate_application_pdf(form_data, employers, licenses, accidents, violations):
     """Generate the main application PDF."""
     company = get_active_company_profile()
@@ -97,9 +127,13 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
     pdf.field_row("City, State, Zip:", f"{_safe(form_data, 'city')}, {_safe(form_data, 'state')} {_safe(form_data, 'zip_code')}")
     pdf.field_row("Country:", _safe(form_data, "country", "United States"))
     pdf.field_row("Primary Phone:", _safe(form_data, "primary_phone"))
-    pdf.field_row("Cell Phone:", _safe(form_data, "cell_phone"))
+    pdf.field_row("Cell Phone / Text Number:", _safe(form_data, "cell_phone"))
+    mobile_carrier = _safe(form_data, "mobile_carrier_other") or _safe(form_data, "mobile_carrier")
+    pdf.field_row("Mobile Carrier / Provider:", mobile_carrier)
     pdf.field_row("Email:", _safe(form_data, "email"))
-    pdf.field_row("Preferred Contact:", _safe(form_data, "preferred_contact"))
+    pdf.field_row("Preferred Method of Contact:", _safe(form_data, "preferred_contact"))
+    pdf.field_row("Best Time to Contact:", _safe(form_data, "best_time"))
+    pdf.field_row("Text Message Consent:", _bool_text(form_data.get("text_consent")))
     pdf.field_row("Emergency Contact:", f"{_safe(form_data, 'emergency_name')} - {_safe(form_data, 'emergency_phone')} ({_safe(form_data, 'emergency_relationship')})")
 
     if _safe(form_data, "resided_3_years") == "No":
@@ -109,18 +143,27 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
 
     # --- Company Questions ---
     pdf.section_title("Company Questions")
-    pdf.field_row("Position Applied For:", _safe(form_data, "position"))
+    pdf.field_row("Position Applying For:", _safe(form_data, "position"))
     preferred_office = _safe(form_data, "preferred_office") or _safe(form_data, "applying_location")
     pdf.field_row("Preferred Office for Onboarding:", preferred_office)
-    pdf.field_row("Legally Eligible (US):", _safe(form_data, "eligible_us"))
-    pdf.field_row("Read/Write/Speak English:", _safe(form_data, "read_english"))
+    pdf.field_row("Legally Eligible to Provide Contracted Services in the United States:", _safe(form_data, "eligible_us"))
+    pdf.field_row("Read, Write, and Speak English:", _safe(form_data, "read_english"))
     pdf.field_row("Currently Employed/Contracted Elsewhere:", _safe(form_data, "currently_employed"))
     if _safe(form_data, "currently_employed") == "No":
         pdf.field_row("Last Employment/Contract End Date:", _safe(form_data, "last_employment_end"))
     pdf.field_row("Previously Contracted Here:", _safe(form_data, "worked_here_before"))
-    pdf.field_row("TWIC Card:", _safe(form_data, "twic_card"))
-    pdf.field_row("How Heard About Us:", _safe(form_data, "referral_source"))
-    pdf.field_row("Text Message Consent:", "Yes" if form_data.get("text_consent") else "No")
+    pdf.field_row("Referral Source:", _safe(form_data, "referral_source"))
+    referral_name = _safe(form_data, "referral_name")
+    if referral_name:
+        pdf.field_row("Referral Details:", referral_name)
+    pdf.field_row("Relatives Contracted Here:", _safe(form_data, "relatives_here"))
+    if _safe(form_data, "relatives_here") == "Yes":
+        pdf.field_row("Relative Names:", _safe(form_data, "relatives_names"))
+    if _safe(form_data, "worked_here_before") == "Yes":
+        pdf.field_row_wide("Previous Contract Details:", _safe(form_data, "prev_dates"))
+    pdf.field_row("Known by Another Name:", _safe(form_data, "known_other_name"))
+    if _safe(form_data, "known_other_name") == "Yes":
+        pdf.field_row("Other Name(s):", _safe(form_data, "other_name"))
     pdf.field_row("Safe Driving Awards:", _safe(form_data, "safe_driving_awards"))
     if _safe(form_data, "position") == "Owner Operator":
         pdf.field_row("Owner Op Equipment:", _safe(form_data, "equipment_description"))
@@ -132,8 +175,31 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
         pdf.field_row("  Fifth Wheel Height:", _safe(form_data, "fifth_wheel_height"))
     pdf.ln(4)
 
+    # --- Driving Experience ---
+    pdf.section_title("Driving Experience")
+    experience_rows = _selected_experience_rows(form_data)
+    if not experience_rows:
+        pdf.set_font("Helvetica", "", 9)
+        pdf.cell(0, 6, "No driving experience details provided", new_x="LMARGIN", new_y="NEXT")
+    else:
+        for row in experience_rows:
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.cell(0, 6, row["label"], new_x="LMARGIN", new_y="NEXT")
+            pdf.field_row("  Equipment Detail:", row["detail"])
+            pdf.field_row("  Total Miles:", row["miles"])
+            pdf.field_row("  Date Range:", row["dates"])
+            pdf.ln(1)
+    pdf.ln(3)
+
     # --- Licenses ---
     pdf.section_title("Licenses & Endorsements")
+    pdf.field_row("TWIC Card:", _safe(form_data, "twic_card"))
+    if _safe(form_data, "twic_card") == "Yes":
+        pdf.field_row("TWIC Expiration:", _safe(form_data, "twic_expiration"))
+    pdf.field_row("HazMat Endorsement:", _safe(form_data, "hazmat_endorsement"))
+    if _safe(form_data, "hazmat_endorsement") == "Yes":
+        pdf.field_row("HazMat Expiration:", _safe(form_data, "hazmat_expiration"))
+    pdf.ln(2)
     for i, lic in enumerate(licenses):
         pdf.set_font("Helvetica", "B", 9)
         pdf.cell(0, 6, f"License #{i+1}", new_x="LMARGIN", new_y="NEXT")
@@ -186,11 +252,13 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
     pdf.section_title("Education & Trucking School")
     pdf.field_row("Highest Grade:", _safe(form_data, "highest_grade"))
     pdf.field_row("Last School:", _safe(form_data, "last_school"))
+    pdf.field_row("Attended Trucking School:", _safe(form_data, "attended_trucking_school"))
     if _safe(form_data, "attended_trucking_school") == "Yes":
         pdf.field_row("Trucking School:", _safe(form_data, "ts_name"))
         pdf.field_row("  Location:", _safe(form_data, "ts_city_state"))
         pdf.field_row("  Dates:", f"{_safe(form_data, 'ts_start')} to {_safe(form_data, 'ts_end')}")
         pdf.field_row("  Graduated:", _safe(form_data, "ts_graduated"))
+        pdf.field_row("  FMCSA Subject:", _safe(form_data, "ts_fmcsa_subject"))
     pdf.field_row("Reference #1:", _safe(form_data, "ref1"))
     pdf.field_row("Reference #2:", _safe(form_data, "ref2"))
     pdf.ln(4)
@@ -238,6 +306,22 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
             pdf.field_row("  Penalty:", viol.get("penalty", ""))
     pdf.ln(4)
 
+    # --- Disclosures & Authorizations ---
+    pdf.section_title("Disclosures & Authorizations")
+    pdf.field_row("FCRA Acknowledged:", _bool_text(form_data.get("fcra_acknowledge")))
+    pdf.field_row("FCRA Timestamp:", _safe(form_data, "fcra_timestamp"))
+    pdf.field_row("California Disclosure Applies:", _bool_text(form_data.get("ca_applicable")))
+    if form_data.get("ca_applicable"):
+        pdf.field_row("California Disclosure Acknowledged:", _bool_text(form_data.get("ca_disclosure_acknowledge")))
+        pdf.field_row("California Timestamp:", _safe(form_data, "ca_disclosure_timestamp"))
+    pdf.field_row("Consumer Copy Requested:", _bool_text(form_data.get("ca_copy")))
+    pdf.field_row("PSP Acknowledged:", _bool_text(form_data.get("psp_acknowledge")))
+    pdf.field_row("PSP Timestamp:", _safe(form_data, "psp_timestamp"))
+    pdf.field_row("Clearinghouse Acknowledged:", _bool_text(form_data.get("clearinghouse_acknowledge")))
+    pdf.field_row("Clearinghouse Timestamp:", _safe(form_data, "clearinghouse_timestamp"))
+    pdf.field_row("Investigative Consumer Report:", _bool_text(form_data.get("inv_consumer_report")))
+    pdf.ln(4)
+
     # --- Signature Block ---
     pdf.section_title("Applicant Certification & Signature")
     pdf.set_font("Helvetica", "", 8)
@@ -251,7 +335,8 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
     pdf.field_row("Digital Signature:", _safe(form_data, "sig_full_name"))
     pdf.field_row("Signature Date:", _safe(form_data, "sig_date"))
     pdf.field_row("Timestamp:", _safe(form_data, "sig_timestamp"))
-    pdf.field_row("Drug/Alcohol Policy Certified:", "Yes" if form_data.get("drug_alcohol_cert") else "No")
+    pdf.field_row("Drug and Alcohol Policy Acknowledged:", _bool_text(form_data.get("drug_alcohol_cert")))
+    pdf.field_row("Applicant Certification Acknowledged:", _bool_text(form_data.get("applicant_cert")))
 
     # Output
     buf = BytesIO()
@@ -502,9 +587,9 @@ def generate_clearinghouse_pdf(form_data):
     pdf.cell(0, 8, "Applicant Responsibilities", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 9)
     pdf.multi_cell(0, 5,
-        f'The applicant must register with the FMCSA Clearinghouse at '
-        f'https://clearinghouse.fmcsa.dot.gov and grant electronic consent for the full query. '
-        f'A full query requires separate electronic consent through the Clearinghouse system.')
+        'The applicant must register with the FMCSA Clearinghouse at '
+        'https://clearinghouse.fmcsa.dot.gov and grant electronic consent for the full query. '
+        'A full query requires separate electronic consent through the Clearinghouse system.')
     pdf.ln(4)
 
     pdf.set_font("Helvetica", "B", 11)

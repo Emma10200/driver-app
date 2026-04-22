@@ -103,72 +103,79 @@ def render_review_submit_page(submissions_dir: Path) -> None:
             "Applicant",
             f"{st.session_state.form_data.get('first_name', '')} {st.session_state.form_data.get('last_name', '')}".strip(),
         )
-        summary_item("Date of birth", st.session_state.form_data.get("dob"))
+        summary_item("Date of Birth", st.session_state.form_data.get("dob"))
         summary_item(
             "Address",
             f"{st.session_state.form_data.get('address', '')}, {st.session_state.form_data.get('city', '')}, "
             f"{st.session_state.form_data.get('state', '')} {st.session_state.form_data.get('zip_code', '')}".strip(", "),
         )
-        summary_item("Primary phone", st.session_state.form_data.get("primary_phone"))
-        summary_item("Cell/text number", st.session_state.form_data.get("cell_phone"))
+        summary_item("Primary Phone", st.session_state.form_data.get("primary_phone"))
+        summary_item("Cell Phone / Text Number", st.session_state.form_data.get("cell_phone"))
         summary_item(
-            "Mobile carrier/provider",
+            "Mobile Carrier / Provider",
             st.session_state.form_data.get("mobile_carrier_other") or st.session_state.form_data.get("mobile_carrier"),
         )
-        summary_item("SMS consent", st.session_state.form_data.get("text_consent"))
+        summary_item("Text Message Consent", st.session_state.form_data.get("text_consent"))
         summary_item("Email", st.session_state.form_data.get("email"))
         summary_item(
-            "Emergency contact",
+            "Emergency Contact",
             f"{st.session_state.form_data.get('emergency_name', '')} / {st.session_state.form_data.get('emergency_phone', '')}",
         )
 
     with st.expander("Company Questions & Experience"):
-        summary_item("Position", st.session_state.form_data.get("position"))
+        summary_item("Position Applying For", st.session_state.form_data.get("position"))
         summary_item(
-            "Preferred office for onboarding",
+            "Preferred Office for Onboarding",
             st.session_state.form_data.get("preferred_office") or st.session_state.form_data.get("applying_location"),
         )
         summary_item(
-            "Currently employed/contracted elsewhere",
+            "Currently Employed/Contracted Elsewhere",
             st.session_state.form_data.get("currently_employed"),
         )
-        summary_item("Previously contracted here", st.session_state.form_data.get("worked_here_before"))
-        summary_item("TWIC card", st.session_state.form_data.get("twic_card"))
-        summary_item("Referral source", st.session_state.form_data.get("referral_source"))
-        summary_item("License entries", len(st.session_state.licenses), default="0")
-        summary_item("Employment history entries", len(st.session_state.employers), default="0")
+        summary_item("Previously Contracted Here", st.session_state.form_data.get("worked_here_before"))
+        summary_item("Referral Source", st.session_state.form_data.get("referral_source"))
+        summary_item("Employment History Entries", len(st.session_state.employers), default="0")
+
+    with st.expander("Licenses & Endorsements"):
+        summary_item("License Entries", len(st.session_state.licenses), default="0")
+        summary_item("TWIC Card", st.session_state.form_data.get("twic_card"))
+        if st.session_state.form_data.get("twic_card") == "Yes":
+            summary_item("TWIC Expiration", st.session_state.form_data.get("twic_expiration"))
+        summary_item("HazMat Endorsement", st.session_state.form_data.get("hazmat_endorsement"))
+        if st.session_state.form_data.get("hazmat_endorsement") == "Yes":
+            summary_item("HazMat Expiration", st.session_state.form_data.get("hazmat_expiration"))
 
     with st.expander("Education, Safety, and Records"):
-        summary_item("Highest grade completed", st.session_state.form_data.get("highest_grade"))
-        summary_item("Attended trucking school", st.session_state.form_data.get("attended_trucking_school"))
-        summary_item("Accidents reported", len(st.session_state.accidents), default="0")
-        summary_item("Violations reported", len(st.session_state.violations), default="0")
-        summary_item("Currently disqualified", st.session_state.form_data.get("disq_391_15"))
+        summary_item("Highest Grade Completed", st.session_state.form_data.get("highest_grade"))
+        summary_item("Attended Trucking School", st.session_state.form_data.get("attended_trucking_school"))
+        summary_item("Accidents Reported", len(st.session_state.accidents), default="0")
+        summary_item("Violations Reported", len(st.session_state.violations), default="0")
+        summary_item("Currently Disqualified", st.session_state.form_data.get("disq_391_15"))
         summary_item(
-            "Suspended or revoked license history",
+            "Suspended or Revoked License History",
             st.session_state.form_data.get("disq_suspended"),
         )
         convicted_which = st.session_state.form_data.get("disq_convicted_which") or []
         if st.session_state.form_data.get("disq_convicted") == "Yes" and convicted_which:
-            summary_item("DOT offense(s) disclosed", "; ".join(convicted_which))
-        summary_item("Supporting documents uploaded", len(st.session_state.get("uploaded_documents", [])), default="0")
+            summary_item("DOT Offense(s) Disclosed", "; ".join(convicted_which))
+        summary_item("Supporting Documents Uploaded", len(st.session_state.get("uploaded_documents", [])), default="0")
 
     with st.expander("Disclosures & Acknowledgments"):
-        summary_item("Drug & alcohol policy", st.session_state.form_data.get("drug_alcohol_cert"))
-        summary_item("Applicant certification", st.session_state.form_data.get("applicant_cert"))
-        summary_item("FCRA acknowledged", st.session_state.form_data.get("fcra_acknowledge"))
+        summary_item("Drug and Alcohol Policy", st.session_state.form_data.get("drug_alcohol_cert"))
+        summary_item("Applicant Certification", st.session_state.form_data.get("applicant_cert"))
+        summary_item("FCRA Acknowledged", st.session_state.form_data.get("fcra_acknowledge"))
         if st.session_state.form_data.get("ca_applicable"):
             summary_item(
-                "California disclosure acknowledged",
+                "California Disclosure Acknowledged",
                 st.session_state.form_data.get("ca_disclosure_acknowledge"),
             )
         else:
-            summary_item("California disclosure", "Not applicable")
-        summary_item("Consumer copy requested", st.session_state.form_data.get("ca_copy"))
-        summary_item("PSP acknowledged", st.session_state.form_data.get("psp_acknowledge"))
-        summary_item("Clearinghouse acknowledged", st.session_state.form_data.get("clearinghouse_acknowledge"))
+            summary_item("California Disclosure", "Not applicable")
+        summary_item("Consumer Copy Requested", st.session_state.form_data.get("ca_copy"))
+        summary_item("PSP Acknowledged", st.session_state.form_data.get("psp_acknowledge"))
+        summary_item("Clearinghouse Acknowledged", st.session_state.form_data.get("clearinghouse_acknowledge"))
         summary_item(
-            "Investigative consumer report acknowledged",
+            "Investigative Consumer Report Acknowledged",
             st.session_state.form_data.get("inv_consumer_report"),
         )
 
