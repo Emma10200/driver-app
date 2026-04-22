@@ -191,10 +191,57 @@ def summary_item(label: str, value: Any, default: str = "—") -> None:
     st.markdown(f"- **{label}:** {display_value(value, default)}")
 
 
+MISSING_FIELDS_STATE_KEY = "_missing_field_keys"
+MISSING_FIELDS_HEADER_KEY = "_missing_fields_header"
+MISSING_FIELDS_LABELS_KEY = "_missing_field_labels"
+
+
+def _missing_field_state() -> dict[str, Any]:
+    state = st.session_state.get(MISSING_FIELDS_STATE_KEY)
+    if not isinstance(state, dict):
+        state = {}
+        st.session_state[MISSING_FIELDS_STATE_KEY] = state
+    return state
+
+
+def record_missing_fields(
+    missing: list[tuple[str, str]],
+    header_text: str = "Please complete the required fields:",
+) -> None:
+    """Store keyed missing-field info so the next render can highlight inline.
+
+    Each entry is a (field_key, human_label) pair. The field_key matches the
+    key passed to missing_field_wrapper() on the widget.
+    """
+    if not missing:
+        clear_missing_fields()
+        return
+
+    st.session_state[MISSING_FIELDS_STATE_KEY] = {key: label for key, label in missing}
+    st.session_state[MISSING_FIELDS_HEADER_KEY] = header_text
+    st.session_state[MISSING_FIELDS_LABELS_KEY] = [label for _, label in missing]
+    log_application_error(
+        code="validation_missing_fields",
+        user_message=header_text,
+        technical_details=", ".join(label for _, label in missing),
+        severity="warning",
+        extra={"missing_fields": [label for _, label in missing]},
+    )
+
+
+def clear_missing_fields() -> None:
+    for key in (MISSING_FIELDS_STATE_KEY, MISSING_FIELDS_HEADER_KEY, MISSING_FIELDS_LABELS_KEY):
+        if key in st.session_state:
+            del st.session_state[key]
+
+
 def show_missing_fields(
     missing_fields: list[str],
     header_text: str = "Please complete the required fields:",
 ) -> None:
+    """Legacy helper: shows a top-of-page summary warning without keyed
+    inline highlighting. Prefer record_missing_fields() on pages migrated
+    to missing_field_wrapper(). Kept so unmigrated pages keep working."""
     if not missing_fields:
         return
 
@@ -207,6 +254,63 @@ def show_missing_fields(
         extra={"missing_fields": missing_fields},
     )
     st.warning(f"{header_text}\n\n{bullet_list}")
+
+
+def mark_missing(field_key: str) -> bool:
+    """Render an inline red "Please complete this field" note immediately
+    above a widget when the previous submission flagged field_key as missing.
+
+    Call this just before the widget:
+        mark_missing("first_name")
+        first_name = st.text_input("First Name *", ...)
+
+    Returns True when the field is currently flagged (mostly useful for tests).
+    The rendered marker carries data-missing-field=<key> so the banner's
+    scroll-into-view picks up the first one automatically.
+    """
+    if field_key not in _missing_field_state():
+        return False
+
+    st.markdown(
+        f'<div class="missing-field-note" data-missing-field="{field_key}">'
+        '⚠ Please complete this field'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    return True
+
+
+def render_missing_fields_banner() -> None:
+    """Render the summary banner at the top of the page for fields currently
+    flagged as missing. Also scrolls to the first highlighted field."""
+    labels = st.session_state.get(MISSING_FIELDS_LABELS_KEY) or []
+    if not labels:
+        return
+
+    header = st.session_state.get(MISSING_FIELDS_HEADER_KEY) or "Please complete the required fields:"
+    bullet_list = "\n".join(f"- {label}" for label in labels)
+    st.warning(f"{header}\n\n{bullet_list}")
+
+    components.html(
+        """
+        <script>
+        const parentWindow = window.parent;
+        const parentDocument = parentWindow.document;
+        function scrollToFirstMissing() {
+            const target = parentDocument.querySelector('[data-missing-field]');
+            if (target && typeof target.scrollIntoView === 'function') {
+                target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                return true;
+            }
+            return false;
+        }
+        [60, 180, 360].forEach((delay) => {
+            parentWindow.setTimeout(scrollToFirstMissing, delay);
+        });
+        </script>
+        """,
+        height=0,
+    )
 
 
 def show_user_error(
@@ -414,6 +518,8 @@ def render_app_shell() -> None:
             "Safe test mode is active. This session uses fake applicant data, stores records in a separate test namespace, "
             "and tags internal notification emails as [TEST]."
         )
+
+    render_missing_fields_banner()
 
 
 def render_eeo_notice() -> None:
