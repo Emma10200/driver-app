@@ -35,11 +35,13 @@ def _attempt_submission_notification() -> None:
         return
 
     try:
+        artifacts = st.session_state.submission_artifacts or {}
         notification_result = send_internal_submission_notification(
             form_data=st.session_state.form_data,
             submission_result={"location_label": saved_submission_dir},
             uploaded_documents=st.session_state.get("uploaded_documents", []),
-            application_pdf=(st.session_state.submission_artifacts or {}).get("application_pdf"),
+            application_pdf=artifacts.get("application_pdf"),
+            artifacts=artifacts,
         )
     except Exception as exc:  # noqa: BLE001 - never let notification break the success page
         st.session_state.submission_notification_status_code = "error"

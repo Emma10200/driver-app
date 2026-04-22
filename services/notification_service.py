@@ -72,6 +72,34 @@ def _protect_pdf(pdf_bytes: bytes, password: str) -> bytes:
     return out.getvalue()
 
 
+def _merge_pdfs(pdf_parts: list[bytes]) -> bytes:
+    """Combine multiple PDF byte blobs into a single PDF."""
+    pdf_parts = [part for part in pdf_parts if part]
+    if not pdf_parts:
+        return b""
+    if len(pdf_parts) == 1:
+        return pdf_parts[0]
+    if PdfReader is None or PdfWriter is None:
+        # pypdf unavailable; fall back to just the first PDF rather than failing.
+        return pdf_parts[0]
+
+    from io import BytesIO
+
+    writer = PdfWriter()
+    for part in pdf_parts:
+        try:
+            reader = PdfReader(BytesIO(part))
+            for page in reader.pages:
+                writer.add_page(page)
+        except Exception:
+            # Skip any unreadable PDF rather than blocking the whole email.
+            continue
+
+    out = BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
 def notifications_enabled(company_slug: str, *, test_mode: bool) -> bool:
     settings = _notification_settings(company_slug, test_mode=test_mode)
     return bool(settings["host"] and settings["from_email"] and settings["recipients"])
@@ -102,6 +130,7 @@ def send_internal_submission_notification(
     submission_result: dict[str, Any],
     uploaded_documents: list[dict[str, Any]] | None = None,
     application_pdf: bytes | None = None,
+    artifacts: dict[str, bytes | None] | None = None,
 ) -> dict[str, Any]:
     company_slug = str(form_data.get("company_slug") or DEFAULT_COMPANY_SLUG).strip() or DEFAULT_COMPANY_SLUG
     test_mode = bool(form_data.get("test_mode")) or is_test_mode_active()
@@ -134,11 +163,35 @@ def send_internal_submission_notification(
     if applicant_email:
         message["Reply-To"] = applicant_email
 
-    if not application_pdf:
+    if not application_pdf and not artifacts:
         return {
             "status": "error",
             "message": "Notification email requires application PDF bytes, but none were available.",
         }
+
+    # Build the merged PDF bundle: application + standalone disclosures in order.
+    artifacts = artifacts or {}
+    pdf_parts: list[bytes] = []
+    bundle_sections: list[str] = []
+    for label, key in [
+        ("Application", "application_pdf"),
+        ("FCRA Disclosure", "fcra_pdf"),
+        ("California Disclosure", "california_pdf"),
+        ("PSP Disclosure", "psp_pdf"),
+        ("Clearinghouse Release", "clearinghouse_pdf"),
+    ]:
+        part = artifacts.get(key)
+        if key == "application_pdf" and not part:
+            part = application_pdf
+        if part:
+            pdf_parts.append(part)
+            bundle_sections.append(label)
+
+    if not pdf_parts and application_pdf:
+        pdf_parts.append(application_pdf)
+        bundle_sections.append("Application")
+
+    bundle_sections_line = ", ".join(bundle_sections) if bundle_sections else "Application"
 
     message.set_content(
         "\n".join(
@@ -152,16 +205,18 @@ def send_internal_submission_notification(
                 f"Submitted at: {form_data.get('final_submission_timestamp', 'Unknown')}",
                 f"Saved to: {submission_result.get('location_label', 'Unknown location')}",
                 f"Supporting document count: {len(uploaded_documents)}",
+                f"Attached PDF includes: {bundle_sections_line}.",
                 "",
                 "This notification intentionally excludes supporting-document attachments and sensitive SSN data.",
             ]
         )
     )
 
-    pdf_bytes = _protect_pdf(application_pdf, settings["attachment_password"])
+    merged_pdf = _merge_pdfs(pdf_parts) or application_pdf or b""
+    pdf_bytes = _protect_pdf(merged_pdf, settings["attachment_password"])
     applicant_last = str(form_data.get("last_name", "driver")).strip().lower().replace(" ", "-") or "driver"
     timestamp = datetime.now().strftime("%Y%m%d")
-    filename = f"application_{applicant_last}_{timestamp}.pdf"
+    filename = f"driver_application_packet_{applicant_last}_{timestamp}.pdf"
     message.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=filename)
 
     try:

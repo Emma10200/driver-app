@@ -69,6 +69,19 @@ def render_company_questions_page() -> None:
             )
         else:
             twic_expiration = None
+        hazmat_endorsement = selectbox_with_placeholder(
+            "Do you have a current Hazmat (HM) endorsement?",
+            ["No", "Yes"],
+            current_value=st.session_state.form_data.get("hazmat_endorsement"),
+            help="Hazmat endorsement is checked frequently for our freight type.",
+        )
+        if hazmat_endorsement == "Yes":
+            hazmat_expiration = st.date_input(
+                "Hazmat Endorsement Expiration Date",
+                value=st.session_state.form_data.get("hazmat_expiration", date.today()),
+            )
+        else:
+            hazmat_expiration = None
         referral_source = selectbox_with_placeholder(
             "How did you hear about us?",
             REFERRAL_SOURCES,
@@ -211,6 +224,8 @@ def render_company_questions_page() -> None:
                     "applying_location": preferred_office,
                     "twic_card": twic_card,
                     "twic_expiration": twic_expiration,
+                    "hazmat_endorsement": hazmat_endorsement,
+                    "hazmat_expiration": hazmat_expiration,
                     "referral_source": referral_source,
                     "referral_name": referral_name,
                     "prev_dates": prev_dates,

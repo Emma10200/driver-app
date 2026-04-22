@@ -709,15 +709,28 @@ def render_remaining_page(page: int) -> bool:
 
     if page == 9:
         st.subheader("📄 California Disclosure Regarding Background Checks")
-        st.warning("**This disclosure applies if you live or work in California.**")
 
-        ca_applicable_default = st.session_state.form_data.get("ca_applicable", default_california_applicability())
-        ca_copy_default = st.session_state.form_data.get("ca_copy", False)
+        ca_default_applies = default_california_applicability()
+        applicability_options = ["Yes — I live or work in California", "No — I do not live or work in California"]
+        prior_applicable = st.session_state.form_data.get("ca_applicable")
+        if prior_applicable is True:
+            default_index = 0
+        elif prior_applicable is False:
+            default_index = 1
+        else:
+            default_index = 0 if ca_default_applies else 1
 
-        ca_applicable = st.checkbox(
-            "I live or work in California, so this California disclosure applies to me.",
-            value=ca_applicable_default,
+        st.markdown("This disclosure only applies to applicants who live or work in California.")
+        applicability_choice = st.radio(
+            "Does this California disclosure apply to you?",
+            applicability_options,
+            index=default_index,
+            key="ca_applicable_radio",
         )
+        ca_applicable = applicability_choice == applicability_options[0]
+
+        ca_disclosure_acknowledge = False
+        ca_copy = st.session_state.form_data.get("ca_copy", False)
 
         if ca_applicable:
             st.markdown(
@@ -739,16 +752,16 @@ def render_remaining_page(page: int) -> bool:
                 "I acknowledge that I have read and understood this California Disclosure Regarding Background Checks document. *",
                 value=st.session_state.form_data.get("ca_disclosure_acknowledge", False),
             )
-        else:
-            st.info("If you do not live or work in California, this California-specific disclosure is not required for this application.")
-            ca_disclosure_acknowledge = False
 
-        st.markdown("---")
-        st.subheader("Consumer Copy Request")
-        ca_copy = st.checkbox(
-            "If you live or work in California, Minnesota, or Oklahoma, check this box if you'd like to receive a copy of a consumer report if one is obtained.",
-            value=ca_copy_default,
-        )
+            st.markdown("---")
+            st.subheader("Consumer Copy Request")
+            ca_copy = st.checkbox(
+                "Check this box if you'd like to receive a copy of any consumer report obtained about you "
+                "(applies to applicants in California, Minnesota, or Oklahoma).",
+                value=ca_copy,
+            )
+        else:
+            st.info("This California-specific disclosure is not required based on your selection. Click Next to continue.")
 
         bcol1, bcol2, bcol3 = st.columns(3)
         with bcol1:
