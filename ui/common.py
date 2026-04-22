@@ -331,6 +331,71 @@ def show_user_error(
     st.warning(message)
 
 
+def _wire_back_button_shim(current_page: int) -> None:
+    """Map the phone/browser back gesture to the app's prev_page() flow.
+
+    Streamlit doesn't register its page changes in browser history, so the
+    default "back" gesture exits the app entirely. We push a synthetic
+    history entry for the current step and listen for popstate — when the
+    user swipes/clicks back, we click the in-page "← Back" button the
+    current step renders (key suffix "_back"), which calls prev_page()
+    and reruns.
+
+    We deliberately do NOT push history on step 1: there is no in-app
+    Back button there and we want the browser's back gesture to exit the
+    app normally rather than trapping the driver inside it.
+    """
+    if current_page <= 1:
+        return
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            const parentWindow = window.parent;
+            const parentDocument = parentWindow.document;
+            const pageLabel = "drv-page-{current_page}";
+
+            if (parentWindow.history.state && parentWindow.history.state.drvPage === pageLabel) {{
+                // Already tagged this step.
+            }} else {{
+                try {{
+                    parentWindow.history.pushState({{ drvPage: pageLabel }}, "", parentWindow.location.href);
+                }} catch (e) {{ /* ignore */ }}
+            }}
+
+            if (parentDocument.body && parentDocument.body.dataset.drvBackBound !== '1') {{
+                parentDocument.body.dataset.drvBackBound = '1';
+                parentWindow.addEventListener('popstate', () => {{
+                    const selectors = [
+                        'button[kind="secondary"]',
+                        'button[data-testid="baseButton-secondary"]',
+                        'button'
+                    ];
+                    for (const sel of selectors) {{
+                        const buttons = parentDocument.querySelectorAll(sel);
+                        for (const btn of buttons) {{
+                            const text = (btn.innerText || '').trim();
+                            if (text.startsWith('← Back')) {{
+                                btn.click();
+                                // Re-push so the next popstate is also caught.
+                                try {{
+                                    parentWindow.history.pushState(
+                                        {{ drvPage: pageLabel }}, "", parentWindow.location.href
+                                    );
+                                }} catch (e) {{ /* ignore */ }}
+                                return;
+                            }}
+                        }}
+                    }}
+                }});
+            }}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def _open_sidebar_via_js() -> None:
     components.html(
         """
