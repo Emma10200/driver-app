@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from config import MOBILE_CARRIERS, US_STATES
 from runtime_context import get_active_company_profile
@@ -21,7 +22,11 @@ from ui.common import (
 from utils.formatting import normalize_digits
 
 
-SSN_WIDGET_KEY = "personal_ssn_display"
+SSN_PART_KEYS = (
+    "personal_ssn_part_1",
+    "personal_ssn_part_2",
+    "personal_ssn_part_3",
+)
 STATE_NAME_TO_CODE = {
     "alabama": "AL",
     "alaska": "AK",
@@ -78,14 +83,121 @@ STATE_NAME_TO_CODE = {
 
 def _ensure_ssn_widget_state() -> None:
     stored_ssn = st.session_state.form_data.get("ssn", "")
+    ssn_digits = normalize_digits(stored_ssn)
+    expected_parts = (ssn_digits[:3], ssn_digits[3:5], ssn_digits[5:9])
 
-    if SSN_WIDGET_KEY not in st.session_state:
-        st.session_state[SSN_WIDGET_KEY] = stored_ssn
-        return
+    current_parts = tuple(normalize_digits(st.session_state.get(key, "")) for key in SSN_PART_KEYS)
+    if any(key not in st.session_state for key in SSN_PART_KEYS) or "".join(current_parts) == ssn_digits:
+        for key, part in zip(SSN_PART_KEYS, expected_parts):
+            st.session_state[key] = part
 
-    current_widget_value = st.session_state.get(SSN_WIDGET_KEY, "")
-    if normalize_digits(current_widget_value) == normalize_digits(stored_ssn):
-        st.session_state[SSN_WIDGET_KEY] = stored_ssn
+
+def _render_ssn_inputs() -> str:
+    st.markdown("<div style='margin-bottom:0.35rem; font-weight:600;'>Social Security Number *</div>", unsafe_allow_html=True)
+    col1, dash1, col2, dash2, col3 = st.columns([3, 0.35, 2, 0.35, 4])
+    with col1:
+        part1 = st.text_input(
+            "SSN First 3 Digits",
+            key=SSN_PART_KEYS[0],
+            max_chars=3,
+            placeholder="123",
+            label_visibility="collapsed",
+        )
+    with dash1:
+        st.markdown("<div style='text-align:center; padding-top:0.45rem; color:#666;'>-</div>", unsafe_allow_html=True)
+    with col2:
+        part2 = st.text_input(
+            "SSN Middle 2 Digits",
+            key=SSN_PART_KEYS[1],
+            max_chars=2,
+            placeholder="45",
+            label_visibility="collapsed",
+        )
+    with dash2:
+        st.markdown("<div style='text-align:center; padding-top:0.45rem; color:#666;'>-</div>", unsafe_allow_html=True)
+    with col3:
+        part3 = st.text_input(
+            "SSN Last 4 Digits",
+            key=SSN_PART_KEYS[2],
+            max_chars=4,
+            placeholder="6789",
+            label_visibility="collapsed",
+        )
+
+    st.caption("Enter digits only. The cursor will move to the next box automatically.")
+
+    components.html(
+        """
+        <script>
+        (function() {{
+          const parentDoc = window.parent.document;
+          const selectors = [
+            'input[aria-label="SSN First 3 Digits"]',
+            'input[aria-label="SSN Middle 2 Digits"]',
+            'input[aria-label="SSN Last 4 Digits"]'
+          ];
+          const maxLens = [3, 2, 4];
+          const inputs = selectors.map((selector) => parentDoc.querySelector(selector));
+          if (inputs.some((input) => !input)) {{
+            return;
+          }}
+
+          inputs.forEach((input, index) => {{
+            if (input.dataset.ssnAutotabBound === '1') {{
+              return;
+            }}
+            input.dataset.ssnAutotabBound = '1';
+
+            input.setAttribute('inputmode', 'numeric');
+            input.setAttribute('autocomplete', 'off');
+
+            input.addEventListener('input', () => {{
+              const digits = (input.value || '').replace(/\D/g, '');
+              if (digits !== input.value) {{
+                input.value = digits;
+                input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+              }}
+              if (digits.length >= maxLens[index] && index < inputs.length - 1) {{
+                inputs[index + 1].focus();
+                inputs[index + 1].select();
+              }}
+            }});
+
+            input.addEventListener('keydown', (event) => {{
+              if (event.key === 'Backspace' && !(input.value || '') && index > 0) {{
+                inputs[index - 1].focus();
+              }}
+            }});
+
+                        input.addEventListener('paste', (event) => {{
+                            const pasted = ((event.clipboardData || window.clipboardData).getData('text') || '').replace(/\D/g, '');
+                            if (!pasted) {{
+                                return;
+                            }}
+                            event.preventDefault();
+
+                            const fullDigits = (
+                                inputs.slice(0, index).map((item) => (item.value || '').replace(/\D/g, '')).join('') + pasted
+                            ).slice(0, 9);
+                            const parts = [fullDigits.slice(0, 3), fullDigits.slice(3, 5), fullDigits.slice(5, 9)];
+                            inputs.forEach((item, itemIndex) => {{
+                                item.value = parts[itemIndex] || '';
+                                item.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                            }});
+
+                            const nextIndex = parts.findIndex((part, partIndex) => part.length < maxLens[partIndex]);
+                            const targetIndex = nextIndex === -1 ? inputs.length - 1 : nextIndex;
+                            inputs[targetIndex].focus();
+                            inputs[targetIndex].select();
+                        }});
+          }});
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+    return f"{normalize_digits(part1)}{normalize_digits(part2)}{normalize_digits(part3)}"
 
 
 def _normalize_state_input(value: str) -> str:
@@ -121,12 +233,7 @@ def render_personal_information_page() -> None:
             max_value=date(2008, 1, 1),
         )
         mark_missing("ssn")
-        ssn_display = st.text_input(
-            "Social Security Number *",
-            key=SSN_WIDGET_KEY,
-            placeholder="123-45-6789 or 123456789",
-            help="Enter the SSN with or without dashes. We'll normalize it for you.",
-        )
+        ssn_digits = _render_ssn_inputs()
 
     with col2:
         mark_missing("address")
@@ -222,7 +329,6 @@ def render_personal_information_page() -> None:
     )
 
     if st.button("Next →", key="p1_next", use_container_width=True, type="primary"):
-        ssn_digits = normalize_digits(ssn_display)
         state = _normalize_state_input(state_input)
         missing: list[tuple[str, str]] = []
         if not first_name:
