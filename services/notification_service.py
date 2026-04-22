@@ -258,23 +258,23 @@ def send_resume_link_email(
 
     message = EmailMessage()
     subject_prefix = "[TEST] " if test_mode else ""
-    message["Subject"] = f"{subject_prefix}Your {company_name} driver application resume link"
+    message["Subject"] = f"{subject_prefix}{company_name} driver application — resume link"
     message["From"] = settings["from_email"]
     message["To"] = to_email.strip()
 
     if is_relative:
         body = (
-            f"Here is your resume link for the {company_name} driver application.\n\n"
+            f"Here is the resume link for your {company_name} driver application.\n\n"
             f"Open the application URL you were given, then append this to it:\n"
             f"  {resume_url}\n\n"
-            "Your progress is saved. You can come back to this application at any time."
+            "Your progress is saved. You can return to this application from any device."
         )
     else:
         body = (
-            f"Here is your resume link for the {company_name} driver application.\n\n"
+            f"Here is the resume link for your {company_name} driver application.\n\n"
             f"Click or paste this link to continue where you left off:\n"
             f"  {resume_url}\n\n"
-            "Your progress is saved. You can come back to this application at any time."
+            "Your progress is saved. You can return to this application from any device."
         )
     message.set_content(body)
 

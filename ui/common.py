@@ -16,8 +16,9 @@ from config import (
     PHASE_LABELS,
 )
 from runtime_context import get_active_company_profile, is_test_mode_active
-from services.draft_service import autosave_draft, render_draft_sidebar
+from services.draft_service import autosave_draft
 from services.error_log_service import log_application_error
+from services.test_mode_service import render_admin_test_tools
 
 
 BASE_STYLES = """
@@ -396,40 +397,6 @@ def _wire_back_button_shim(current_page: int) -> None:
     )
 
 
-def _open_sidebar_via_js() -> None:
-    components.html(
-        """
-        <script>
-        const parentWindow = window.parent;
-        const parentDocument = parentWindow.document;
-
-        function tryOpenSidebar() {
-            const selectors = [
-                'button[aria-label="Open sidebar"]',
-                '[data-testid="stSidebarCollapsedControl"] button',
-                '[data-testid="stSidebarCollapsedControl"]',
-                '[data-testid="collapsedControl"] button',
-                '[data-testid="collapsedControl"]'
-            ];
-            for (const sel of selectors) {
-                const el = parentDocument.querySelector(sel);
-                if (el) {
-                    el.click();
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        [0, 60, 140, 280, 500].forEach((delay) => {
-            parentWindow.setTimeout(tryOpenSidebar, delay);
-        });
-        </script>
-        """,
-        height=0,
-    )
-
-
 def _sync_browser_autofill_via_js() -> None:
     components.html(
         """
@@ -503,15 +470,123 @@ def _sync_browser_autofill_via_js() -> None:
 
 
 def render_save_draft_button(button_key: str, label: str = "💾 Save Draft") -> None:
-    if not st.button(label, key=button_key, use_container_width=True):
+    """Render the save-draft button plus inline post-save panel."""
+    active_key = st.session_state.get("_save_draft_panel_for_key")
+    if active_key and active_key != button_key:
+        st.session_state["_save_draft_panel_for_key"] = None
+
+    if st.button(label, key=button_key, use_container_width=True):
+        result = autosave_draft()
+        if result and result.get("ok"):
+            st.session_state["_save_draft_panel_for_key"] = button_key
+            st.session_state["_save_draft_panel_error"] = None
+        else:
+            st.session_state["_save_draft_panel_for_key"] = None
+            st.session_state["_save_draft_panel_error"] = (
+                "The form is still open, but the secure draft save did not complete."
+            )
+
+    active_key = st.session_state.get("_save_draft_panel_for_key")
+    error_msg = st.session_state.get("_save_draft_panel_error")
+
+    if active_key == button_key:
+        _render_save_draft_panel(panel_key=button_key)
+    elif error_msg and active_key is None:
+        st.warning(error_msg)
+
+
+def _render_save_draft_panel(panel_key: str) -> None:
+    """Inline post-save panel: copy resume link plus email form."""
+    from services.draft_service import build_resume_url_snippet
+    from services.notification_service import send_resume_link_email
+    from submission_storage import get_runtime_secret
+
+    snippet = build_resume_url_snippet()
+    if not snippet:
         return
 
-    result = autosave_draft()
-    if result and result.get("ok"):
-        st.success("Draft saved. Open the sidebar to copy your resume link or email it to yourself.")
-        _open_sidebar_via_js()
-    else:
-        st.warning("The form is still open, but the secure draft save did not complete.")
+    st.success("Draft saved. Use the link below to come back later.")
+
+    components.html(
+        f"""
+        <div style="font-family: sans-serif; margin-bottom: 0.6rem;">
+          <div style="font-size: 0.78rem; color: #444; margin-bottom: 0.25rem;">
+            Your resume link:
+          </div>
+          <div style="display: flex; gap: 0.4rem; align-items: stretch;">
+            <input id="drv-resume-url-{panel_key}" readonly
+              style="flex:1; padding: 0.55rem 0.6rem; font-size: 0.85rem;
+                     border: 1px solid #ccc; border-radius: 6px; background: #fafafa;" />
+            <button id="drv-resume-copy-{panel_key}" type="button"
+              style="padding: 0.55rem 0.9rem; font-size: 0.85rem;
+                     border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer;">
+              📋 Copy
+            </button>
+          </div>
+          <div id="drv-resume-copy-msg-{panel_key}"
+               style="font-size: 0.72rem; color: #3a8a49; margin-top: 0.2rem; min-height: 0.9rem;"></div>
+        </div>
+        <script>
+        (function() {{
+          const p = window.parent;
+          const loc = p.location;
+          const suffix = {snippet!r};
+          const fullUrl = loc.origin + loc.pathname + suffix;
+          const input = document.getElementById('drv-resume-url-{panel_key}');
+          const btn = document.getElementById('drv-resume-copy-{panel_key}');
+          const msg = document.getElementById('drv-resume-copy-msg-{panel_key}');
+          input.value = fullUrl;
+          btn.addEventListener('click', () => {{
+            input.select();
+            p.navigator.clipboard.writeText(fullUrl).then(() => {{
+              msg.textContent = 'Copied!';
+              setTimeout(() => msg.textContent = '', 2000);
+            }}).catch(() => {{
+              p.document.execCommand('copy');
+              msg.textContent = 'Copied!';
+              setTimeout(() => msg.textContent = '', 2000);
+            }});
+          }});
+        }})();
+        </script>
+        """,
+        height=110,
+    )
+
+    prefilled = str(st.session_state.form_data.get("email") or "").strip()
+    email_key = f"{panel_key}_email_input"
+    col_a, col_b = st.columns([3, 1])
+    with col_a:
+        to_email = st.text_input(
+            "Email link to",
+            value=prefilled,
+            key=email_key,
+            placeholder="you@example.com",
+            label_visibility="collapsed",
+        )
+    with col_b:
+        send_clicked = st.button("✉ Send", key=f"{panel_key}_email_send", use_container_width=True)
+
+    if send_clicked:
+        to_email = (to_email or "").strip()
+        if not to_email or "@" not in to_email:
+            st.warning("Enter a valid email address.")
+        else:
+            company = get_active_company_profile()
+            base_url = (get_runtime_secret("APP_BASE_URL", "") or "").strip().rstrip("/")
+            resume_url = (base_url + snippet) if base_url else snippet
+            result = send_resume_link_email(
+                to_email=to_email,
+                resume_url=resume_url,
+                company_name=company.name,
+                is_relative=not bool(base_url),
+            )
+            if result.get("status") == "sent":
+                st.success(f"Link sent to {to_email}.")
+            elif result.get("status") == "disabled":
+                st.info("Email is not configured on this deployment. Copy the link above instead.")
+            else:
+                st.warning("We couldn't send the email right now. Please copy the link above.")
 
 
 def default_california_applicability() -> bool:
@@ -564,7 +639,9 @@ def render_app_shell() -> None:
             f"<style>:root {{ --primary-color: {brand_color}; }}</style>",
             unsafe_allow_html=True,
         )
-    render_draft_sidebar()
+    if st.session_state.get("admin_tools_enabled"):
+        with st.sidebar:
+            render_admin_test_tools()
     _sync_browser_autofill_via_js()
     st.markdown(
         f"""
