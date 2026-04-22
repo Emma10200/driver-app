@@ -52,6 +52,16 @@ def prev_page() -> None:
     st.session_state.current_page -= 1
 
 
+PRESERVED_KEYS_ON_RESET: tuple[str, ...] = ("_draft_resume_attempted",)
+
+
 def reset_application_state() -> None:
+    preserved: dict[str, Any] = {
+        key: st.session_state[key]
+        for key in PRESERVED_KEYS_ON_RESET
+        if key in st.session_state
+    }
     for key in list(st.session_state.keys()):
         del st.session_state[key]
+    for key, value in preserved.items():
+        st.session_state[key] = value

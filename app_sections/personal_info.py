@@ -10,7 +10,14 @@ from config import MOBILE_CARRIERS, US_STATES
 from runtime_context import get_active_company_profile
 from services.draft_service import autosave_draft
 from state import next_page
-from ui.common import render_eeo_notice, selectbox_with_placeholder, show_missing_fields, show_user_error
+from ui.common import (
+    clear_missing_fields,
+    mark_missing,
+    record_missing_fields,
+    render_eeo_notice,
+    selectbox_with_placeholder,
+    show_user_error,
+)
 from utils.formatting import normalize_digits
 
 
@@ -102,8 +109,10 @@ def render_personal_information_page() -> None:
 
     col1, col2 = st.columns(2)
     with col1:
+        mark_missing("first_name")
         first_name = st.text_input("First Name *", value=st.session_state.form_data.get("first_name", ""))
         middle_name = st.text_input("Middle Name", value=st.session_state.form_data.get("middle_name", ""))
+        mark_missing("last_name")
         last_name = st.text_input("Last Name *", value=st.session_state.form_data.get("last_name", ""))
         dob = st.date_input(
             "Date of Birth *",
@@ -111,6 +120,7 @@ def render_personal_information_page() -> None:
             min_value=date(1940, 1, 1),
             max_value=date(2008, 1, 1),
         )
+        mark_missing("ssn")
         ssn_display = st.text_input(
             "Social Security Number *",
             key=SSN_WIDGET_KEY,
@@ -119,13 +129,17 @@ def render_personal_information_page() -> None:
         )
 
     with col2:
+        mark_missing("address")
         address = st.text_input("Current Address *", value=st.session_state.form_data.get("address", ""))
+        mark_missing("city")
         city = st.text_input("City *", value=st.session_state.form_data.get("city", ""))
+        mark_missing("state")
         state_input = st.text_input(
             "State *",
             value=st.session_state.form_data.get("state", ""),
             help="Enter the 2-letter abbreviation or full state name.",
         )
+        mark_missing("zip_code")
         zip_code = st.text_input("Zip Code *", value=st.session_state.form_data.get("zip_code", ""))
         country = st.text_input("Country", value=st.session_state.form_data.get("country", "United States"))
 
@@ -133,7 +147,9 @@ def render_personal_information_page() -> None:
 
     col3, col4 = st.columns(2)
     with col3:
+        mark_missing("primary_phone")
         primary_phone = st.text_input("Primary Phone *", value=st.session_state.form_data.get("primary_phone", ""))
+        mark_missing("email")
         email = st.text_input("Email Address *", value=st.session_state.form_data.get("email", ""))
         preferred_contact = selectbox_with_placeholder(
             "Preferred Method of Contact",
@@ -183,9 +199,11 @@ def render_personal_information_page() -> None:
 
     st.markdown("---")
 
+    mark_missing("emergency_name")
     emergency_name = st.text_input("Emergency Contact Name *", value=st.session_state.form_data.get("emergency_name", ""))
     ecol1, ecol2 = st.columns(2)
     with ecol1:
+        mark_missing("emergency_phone")
         emergency_phone = st.text_input(
             "Emergency Contact Phone *",
             value=st.session_state.form_data.get("emergency_phone", ""),
@@ -206,33 +224,36 @@ def render_personal_information_page() -> None:
     if st.button("Next →", key="p1_next", use_container_width=True, type="primary"):
         ssn_digits = normalize_digits(ssn_display)
         state = _normalize_state_input(state_input)
-        missing: list[str] = []
+        missing: list[tuple[str, str]] = []
         if not first_name:
-            missing.append("First Name")
+            missing.append(("first_name", "First Name"))
         if not last_name:
-            missing.append("Last Name")
+            missing.append(("last_name", "Last Name"))
         if not ssn_digits:
-            missing.append("Social Security Number")
+            missing.append(("ssn", "Social Security Number"))
         if not address:
-            missing.append("Current Address")
+            missing.append(("address", "Current Address"))
         if not city:
-            missing.append("City")
+            missing.append(("city", "City"))
         if not state:
-            missing.append("State")
+            missing.append(("state", "State"))
         if not zip_code:
-            missing.append("Zip Code")
+            missing.append(("zip_code", "Zip Code"))
         if not primary_phone:
-            missing.append("Primary Phone")
+            missing.append(("primary_phone", "Primary Phone"))
         if not email:
-            missing.append("Email Address")
+            missing.append(("email", "Email Address"))
         if not emergency_name:
-            missing.append("Emergency Contact Name")
+            missing.append(("emergency_name", "Emergency Contact Name"))
         if not emergency_phone:
-            missing.append("Emergency Contact Phone")
+            missing.append(("emergency_phone", "Emergency Contact Phone"))
 
         if missing:
-            show_missing_fields(missing, "The following required fields are missing:")
+            record_missing_fields(missing, "The following required fields are missing:")
+            st.rerun()
             return
+
+        clear_missing_fields()
 
         if len(ssn_digits) != 9:
             show_user_error(

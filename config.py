@@ -21,6 +21,7 @@ class CompanyProfile:
     phone: str = ""
     fax: str = ""
     email: str = ""
+    brand_color: str = "#3E6FA3"
 
 
 DEFAULT_COMPANY_SLUG = "prestige"
@@ -33,6 +34,7 @@ COMPANY_PROFILES: dict[str, CompanyProfile] = {
         phone=COMPANY_PHONE,
         fax=COMPANY_FAX,
         email=COMPANY_EMAIL,
+        brand_color="#3E6FA3",
     ),
     "side-xpress": CompanyProfile(
         slug="side-xpress",
@@ -42,6 +44,7 @@ COMPANY_PROFILES: dict[str, CompanyProfile] = {
         phone="708-356-4420",
         fax="630-303-9721",
         email="safety@xpresstransinc.com",
+        brand_color="#3F8356",
     ),
 }
 

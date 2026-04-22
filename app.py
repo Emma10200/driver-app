@@ -26,6 +26,7 @@ from runtime_context import (
 from services.error_log_service import log_application_error
 from state import init_session_state
 from ui.common import (
+    _wire_back_button_shim,
     render_app_shell,
     render_progress_bar,
     scroll_to_top_on_page_change,
@@ -99,6 +100,7 @@ if not company_slug_explicitly_provided() and not st.session_state.get("company_
 render_app_shell()
 page = render_progress_bar()
 scroll_to_top_on_page_change(page)
+_wire_back_button_shim(page)
 
 try:
     if st.session_state.submitted:

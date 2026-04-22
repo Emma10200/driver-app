@@ -22,10 +22,41 @@ from services.error_log_service import log_application_error
 
 BASE_STYLES = """
 <style>
+    /* Prevent iOS Safari from auto-zooming when a field is focused. */
+    div[data-testid="stTextInput"] input,
+    div[data-testid="stTextArea"] textarea,
+    div[data-testid="stDateInput"] input,
+    div[data-testid="stNumberInput"] input,
+    div[data-testid="stSelectbox"] div[role="combobox"],
+    div[data-testid="stMultiSelect"] div[role="combobox"] {
+        font-size: 16px !important;
+    }
+    /* Touch-friendly primary buttons on mobile. */
+    .stButton > button {
+        min-height: 2.75rem;
+    }
+    /* Hide Streamlit framework chrome that looks out of place in a
+       branded portal. The header is intentionally left visible so the
+       sidebar collapse control continues to work. */
+    #MainMenu { visibility: hidden; }
+    footer { visibility: hidden; }
     /* Red asterisk on required labels */
     div[data-testid="stTextInput"] label p:has(~ *),
     div[data-testid="stSelectbox"] label p:has(~ *) {
         font-weight: 600;
+    }
+    .missing-field-wrapper {
+        border: 2px solid #ff4b4b;
+        background: rgba(255, 75, 75, 0.06);
+        border-radius: 8px;
+        padding: 0.35rem 0.5rem 0.15rem;
+        margin-bottom: 0.35rem;
+    }
+    .missing-field-note {
+        color: #ff4b4b;
+        font-weight: 600;
+        font-size: 0.78rem;
+        margin: 0.2rem 0 0.15rem;
     }
     .missing-field {
         background: rgba(255, 75, 75, 0.1);
@@ -160,10 +191,57 @@ def summary_item(label: str, value: Any, default: str = "—") -> None:
     st.markdown(f"- **{label}:** {display_value(value, default)}")
 
 
+MISSING_FIELDS_STATE_KEY = "_missing_field_keys"
+MISSING_FIELDS_HEADER_KEY = "_missing_fields_header"
+MISSING_FIELDS_LABELS_KEY = "_missing_field_labels"
+
+
+def _missing_field_state() -> dict[str, Any]:
+    state = st.session_state.get(MISSING_FIELDS_STATE_KEY)
+    if not isinstance(state, dict):
+        state = {}
+        st.session_state[MISSING_FIELDS_STATE_KEY] = state
+    return state
+
+
+def record_missing_fields(
+    missing: list[tuple[str, str]],
+    header_text: str = "Please complete the required fields:",
+) -> None:
+    """Store keyed missing-field info so the next render can highlight inline.
+
+    Each entry is a (field_key, human_label) pair. The field_key matches the
+    key passed to missing_field_wrapper() on the widget.
+    """
+    if not missing:
+        clear_missing_fields()
+        return
+
+    st.session_state[MISSING_FIELDS_STATE_KEY] = {key: label for key, label in missing}
+    st.session_state[MISSING_FIELDS_HEADER_KEY] = header_text
+    st.session_state[MISSING_FIELDS_LABELS_KEY] = [label for _, label in missing]
+    log_application_error(
+        code="validation_missing_fields",
+        user_message=header_text,
+        technical_details=", ".join(label for _, label in missing),
+        severity="warning",
+        extra={"missing_fields": [label for _, label in missing]},
+    )
+
+
+def clear_missing_fields() -> None:
+    for key in (MISSING_FIELDS_STATE_KEY, MISSING_FIELDS_HEADER_KEY, MISSING_FIELDS_LABELS_KEY):
+        if key in st.session_state:
+            del st.session_state[key]
+
+
 def show_missing_fields(
     missing_fields: list[str],
     header_text: str = "Please complete the required fields:",
 ) -> None:
+    """Legacy helper: shows a top-of-page summary warning without keyed
+    inline highlighting. Prefer record_missing_fields() on pages migrated
+    to missing_field_wrapper(). Kept so unmigrated pages keep working."""
     if not missing_fields:
         return
 
@@ -176,6 +254,63 @@ def show_missing_fields(
         extra={"missing_fields": missing_fields},
     )
     st.warning(f"{header_text}\n\n{bullet_list}")
+
+
+def mark_missing(field_key: str) -> bool:
+    """Render an inline red "Please complete this field" note immediately
+    above a widget when the previous submission flagged field_key as missing.
+
+    Call this just before the widget:
+        mark_missing("first_name")
+        first_name = st.text_input("First Name *", ...)
+
+    Returns True when the field is currently flagged (mostly useful for tests).
+    The rendered marker carries data-missing-field=<key> so the banner's
+    scroll-into-view picks up the first one automatically.
+    """
+    if field_key not in _missing_field_state():
+        return False
+
+    st.markdown(
+        f'<div class="missing-field-note" data-missing-field="{field_key}">'
+        '⚠ Please complete this field'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    return True
+
+
+def render_missing_fields_banner() -> None:
+    """Render the summary banner at the top of the page for fields currently
+    flagged as missing. Also scrolls to the first highlighted field."""
+    labels = st.session_state.get(MISSING_FIELDS_LABELS_KEY) or []
+    if not labels:
+        return
+
+    header = st.session_state.get(MISSING_FIELDS_HEADER_KEY) or "Please complete the required fields:"
+    bullet_list = "\n".join(f"- {label}" for label in labels)
+    st.warning(f"{header}\n\n{bullet_list}")
+
+    components.html(
+        """
+        <script>
+        const parentWindow = window.parent;
+        const parentDocument = parentWindow.document;
+        function scrollToFirstMissing() {
+            const target = parentDocument.querySelector('[data-missing-field]');
+            if (target && typeof target.scrollIntoView === 'function') {
+                target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                return true;
+            }
+            return false;
+        }
+        [60, 180, 360].forEach((delay) => {
+            parentWindow.setTimeout(scrollToFirstMissing, delay);
+        });
+        </script>
+        """,
+        height=0,
+    )
 
 
 def show_user_error(
@@ -194,6 +329,71 @@ def show_user_error(
         extra=extra,
     )
     st.warning(message)
+
+
+def _wire_back_button_shim(current_page: int) -> None:
+    """Map the phone/browser back gesture to the app's prev_page() flow.
+
+    Streamlit doesn't register its page changes in browser history, so the
+    default "back" gesture exits the app entirely. We push a synthetic
+    history entry for the current step and listen for popstate — when the
+    user swipes/clicks back, we click the in-page "← Back" button the
+    current step renders (key suffix "_back"), which calls prev_page()
+    and reruns.
+
+    We deliberately do NOT push history on step 1: there is no in-app
+    Back button there and we want the browser's back gesture to exit the
+    app normally rather than trapping the driver inside it.
+    """
+    if current_page <= 1:
+        return
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            const parentWindow = window.parent;
+            const parentDocument = parentWindow.document;
+            const pageLabel = "drv-page-{current_page}";
+
+            if (parentWindow.history.state && parentWindow.history.state.drvPage === pageLabel) {{
+                // Already tagged this step.
+            }} else {{
+                try {{
+                    parentWindow.history.pushState({{ drvPage: pageLabel }}, "", parentWindow.location.href);
+                }} catch (e) {{ /* ignore */ }}
+            }}
+
+            if (parentDocument.body && parentDocument.body.dataset.drvBackBound !== '1') {{
+                parentDocument.body.dataset.drvBackBound = '1';
+                parentWindow.addEventListener('popstate', () => {{
+                    const selectors = [
+                        'button[kind="secondary"]',
+                        'button[data-testid="baseButton-secondary"]',
+                        'button'
+                    ];
+                    for (const sel of selectors) {{
+                        const buttons = parentDocument.querySelectorAll(sel);
+                        for (const btn of buttons) {{
+                            const text = (btn.innerText || '').trim();
+                            if (text.startsWith('← Back')) {{
+                                btn.click();
+                                // Re-push so the next popstate is also caught.
+                                try {{
+                                    parentWindow.history.pushState(
+                                        {{ drvPage: pageLabel }}, "", parentWindow.location.href
+                                    );
+                                }} catch (e) {{ /* ignore */ }}
+                                return;
+                            }}
+                        }}
+                    }}
+                }});
+            }}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
 
 
 def _open_sidebar_via_js() -> None:
@@ -308,7 +508,7 @@ def render_save_draft_button(button_key: str, label: str = "💾 Save Draft") ->
 
     result = autosave_draft()
     if result and result.get("ok"):
-        st.success(f"Draft saved. Resume later with code `{st.session_state.draft_id}`.")
+        st.success("Draft saved. Open the sidebar to copy your resume link or email it to yourself.")
         _open_sidebar_via_js()
     else:
         st.warning("The form is still open, but the secure draft save did not complete.")
@@ -358,6 +558,12 @@ def render_app_shell() -> None:
         contact_parts.append(f"Email: {company.email}")
 
     st.markdown(BASE_STYLES, unsafe_allow_html=True)
+    brand_color = (company.brand_color or "").strip()
+    if brand_color:
+        st.markdown(
+            f"<style>:root {{ --primary-color: {brand_color}; }}</style>",
+            unsafe_allow_html=True,
+        )
     render_draft_sidebar()
     _sync_browser_autofill_via_js()
     st.markdown(
@@ -377,6 +583,8 @@ def render_app_shell() -> None:
             "Safe test mode is active. This session uses fake applicant data, stores records in a separate test namespace, "
             "and tags internal notification emails as [TEST]."
         )
+
+    render_missing_fields_banner()
 
 
 def render_eeo_notice() -> None:

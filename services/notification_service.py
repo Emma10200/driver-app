@@ -231,3 +231,56 @@ def send_internal_submission_notification(
         "status": "sent",
         "message": f"Internal notification sent to {', '.join(settings['recipients'])}.",
     }
+
+
+def send_resume_link_email(
+    *,
+    to_email: str,
+    resume_url: str,
+    company_name: str,
+    is_relative: bool = False,
+) -> dict[str, Any]:
+    """Email the applicant a link to resume their saved draft application.
+
+    When is_relative is True, the deployment didn't configure APP_BASE_URL
+    and resume_url is just the ?company=...&draft=... suffix; we include
+    instructions to paste it after the app URL they already know.
+    """
+    company_slug = DEFAULT_COMPANY_SLUG
+    test_mode = is_test_mode_active()
+
+    if not notifications_enabled(company_slug, test_mode=test_mode):
+        return {"status": "disabled", "message": "Email is not configured on this deployment."}
+
+    settings = _notification_settings(company_slug, test_mode=test_mode)
+    if not settings["from_email"]:
+        return {"status": "disabled", "message": "No from-email configured."}
+
+    message = EmailMessage()
+    subject_prefix = "[TEST] " if test_mode else ""
+    message["Subject"] = f"{subject_prefix}Your {company_name} driver application resume link"
+    message["From"] = settings["from_email"]
+    message["To"] = to_email.strip()
+
+    if is_relative:
+        body = (
+            f"Here is your resume link for the {company_name} driver application.\n\n"
+            f"Open the application URL you were given, then append this to it:\n"
+            f"  {resume_url}\n\n"
+            "Your progress is saved. You can come back to this application at any time."
+        )
+    else:
+        body = (
+            f"Here is your resume link for the {company_name} driver application.\n\n"
+            f"Click or paste this link to continue where you left off:\n"
+            f"  {resume_url}\n\n"
+            "Your progress is saved. You can come back to this application at any time."
+        )
+    message.set_content(body)
+
+    try:
+        _deliver_message(message, settings)
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+    return {"status": "sent", "message": f"Resume link emailed to {to_email}."}
