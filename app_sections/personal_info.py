@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import streamlit as st
 
@@ -100,6 +100,50 @@ def _normalize_state_input(value: str) -> str:
     return STATE_NAME_TO_CODE.get(cleaned.lower(), "")
 
 
+def _coerce_date(value: object, default: date) -> date:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.fromisoformat(value).date()
+        except ValueError:
+            return default
+    return default
+
+
+def _existing_previous_addresses() -> list[dict[str, object]]:
+    stored = st.session_state.form_data.get("previous_addresses")
+    if isinstance(stored, list) and stored:
+        entries: list[dict[str, object]] = []
+        for entry in stored:
+            if not isinstance(entry, dict):
+                continue
+            entries.append(
+                {
+                    "address": str(entry.get("address", "") or ""),
+                    "city": str(entry.get("city", "") or ""),
+                    "state": str(entry.get("state", "") or ""),
+                    "zip_code": str(entry.get("zip_code", "") or ""),
+                    "from_date": _coerce_date(entry.get("from_date"), date.today()),
+                    "to_date": _coerce_date(entry.get("to_date"), date.today()),
+                }
+            )
+        if entries:
+            return entries
+
+    legacy = {
+        "address": str(st.session_state.form_data.get("prev_address", "") or ""),
+        "city": str(st.session_state.form_data.get("prev_city", "") or ""),
+        "state": str(st.session_state.form_data.get("prev_state", "") or ""),
+        "zip_code": str(st.session_state.form_data.get("prev_zip", "") or ""),
+        "from_date": date.today(),
+        "to_date": date.today(),
+    }
+    if any([legacy["address"], legacy["city"], legacy["state"], legacy["zip_code"]]):
+        return [legacy]
+    return []
+
+
 def render_personal_information_page() -> None:
     _ensure_ssn_widget_state()
     company = get_active_company_profile()
@@ -116,7 +160,7 @@ def render_personal_information_page() -> None:
         last_name = st.text_input("Last Name *", value=st.session_state.form_data.get("last_name", ""))
         dob = st.date_input(
             "Date of Birth *",
-            value=st.session_state.form_data.get("dob", date(1990, 1, 1)),
+            value=_coerce_date(st.session_state.form_data.get("dob"), date(1990, 1, 1)),
             min_value=date(1940, 1, 1),
             max_value=date(2008, 1, 1),
         )
@@ -181,21 +225,63 @@ def render_personal_information_page() -> None:
             current_value=st.session_state.form_data.get("resided_3_years"),
         )
 
-    prev_address = prev_city = prev_state = prev_zip = ""
+    previous_addresses: list[dict[str, object]] = []
     if resided_3_years == "No":
-        st.markdown("**Previous Address (if less than 3 years at current):**")
-        pcol1, pcol2 = st.columns(2)
-        with pcol1:
-            prev_address = st.text_input("Previous Address", value=st.session_state.form_data.get("prev_address", ""))
-            prev_city = st.text_input("Previous City", value=st.session_state.form_data.get("prev_city", ""))
-        with pcol2:
-            prev_state = selectbox_with_placeholder(
-                "Previous State",
-                US_STATES,
-                current_value=st.session_state.form_data.get("prev_state"),
-                key="prev_state_sel",
-            )
-            prev_zip = st.text_input("Previous Zip", value=st.session_state.form_data.get("prev_zip", ""))
+        existing_previous_addresses = _existing_previous_addresses()
+        previous_address_count = st.number_input(
+            "How many previous addresses should we capture for the last 3 years?",
+            min_value=1,
+            max_value=5,
+            value=max(1, len(existing_previous_addresses) or 1),
+            help="Add enough prior addresses to cover the full 3-year residence history.",
+        )
+        for index in range(int(previous_address_count)):
+            existing = existing_previous_addresses[index] if index < len(existing_previous_addresses) else {}
+            with st.expander(f"Previous Address #{index + 1}", expanded=(index == 0)):
+                pcol1, pcol2 = st.columns(2)
+                with pcol1:
+                    prev_address = st.text_input(
+                        "Address",
+                        key=f"prev_address_{index}",
+                        value=str(existing.get("address", "") or ""),
+                    )
+                    prev_city = st.text_input(
+                        "City",
+                        key=f"prev_city_{index}",
+                        value=str(existing.get("city", "") or ""),
+                    )
+                    prev_state = selectbox_with_placeholder(
+                        "State",
+                        US_STATES,
+                        current_value=str(existing.get("state", "") or ""),
+                        key=f"prev_state_{index}",
+                    )
+                with pcol2:
+                    prev_zip = st.text_input(
+                        "Zip Code",
+                        key=f"prev_zip_{index}",
+                        value=str(existing.get("zip_code", "") or ""),
+                    )
+                    prev_from_date = st.date_input(
+                        "Dates Lived There — From",
+                        key=f"prev_from_{index}",
+                        value=_coerce_date(existing.get("from_date"), date.today()),
+                    )
+                    prev_to_date = st.date_input(
+                        "Dates Lived There — To",
+                        key=f"prev_to_{index}",
+                        value=_coerce_date(existing.get("to_date"), date.today()),
+                    )
+                previous_addresses.append(
+                    {
+                        "address": prev_address,
+                        "city": prev_city,
+                        "state": prev_state,
+                        "zip_code": prev_zip,
+                        "from_date": prev_from_date,
+                        "to_date": prev_to_date,
+                    }
+                )
 
     st.markdown("---")
 
@@ -211,11 +297,17 @@ def render_personal_information_page() -> None:
             "Relationship",
             value=st.session_state.form_data.get("emergency_relationship", ""),
         )
+    emergency_address = st.text_input(
+        "Emergency Contact Address",
+        value=st.session_state.form_data.get("emergency_address", ""),
+    )
 
     st.markdown("---")
     text_consent = st.checkbox(
-        f"I consent to receive text messages from {company.name} "
-        "regarding my application and contracting status. I may opt out at any time by texting STOP.",
+        f"I agree to receive text messages from {company.name} that may be sent using an automatic telephone dialing system "
+        "and may include recruiting or advertising messages related to my application, contracting status, or future opportunities. "
+        "Consent is not a condition of being hired, contracted, or leased on. Message and data rates may apply. "
+        "Reply STOP at any time to opt out.",
         value=st.session_state.form_data.get("text_consent", False),
     )
 
@@ -241,6 +333,16 @@ def render_personal_information_page() -> None:
             missing.append(("primary_phone", "Primary Phone"))
         if not email:
             missing.append(("email", "Email Address"))
+        if resided_3_years == "No":
+            for index, entry in enumerate(previous_addresses, start=1):
+                if not entry.get("address"):
+                    missing.append(("address", f"Previous Address #{index} address"))
+                if not entry.get("city"):
+                    missing.append(("city", f"Previous Address #{index} city"))
+                if not entry.get("state"):
+                    missing.append(("state", f"Previous Address #{index} state"))
+                if not entry.get("zip_code"):
+                    missing.append(("zip_code", f"Previous Address #{index} zip code"))
 
         if missing:
             record_missing_fields(missing, "The following required fields are missing:")
@@ -267,6 +369,7 @@ def render_personal_information_page() -> None:
             )
             return
 
+        legacy_previous = previous_addresses[0] if previous_addresses else {}
         st.session_state.form_data.update(
             {
                 "first_name": first_name,
@@ -287,13 +390,15 @@ def render_personal_information_page() -> None:
                 "preferred_contact": preferred_contact,
                 "best_time": best_time,
                 "resided_3_years": resided_3_years,
-                "prev_address": prev_address,
-                "prev_city": prev_city,
-                "prev_state": prev_state if resided_3_years == "No" else "",
-                "prev_zip": prev_zip,
+                "previous_addresses": previous_addresses if resided_3_years == "No" else [],
+                "prev_address": str(legacy_previous.get("address", "") or "") if resided_3_years == "No" else "",
+                "prev_city": str(legacy_previous.get("city", "") or "") if resided_3_years == "No" else "",
+                "prev_state": str(legacy_previous.get("state", "") or "") if resided_3_years == "No" else "",
+                "prev_zip": str(legacy_previous.get("zip_code", "") or "") if resided_3_years == "No" else "",
                 "emergency_name": emergency_name,
                 "emergency_phone": emergency_phone,
                 "emergency_relationship": emergency_relationship,
+                "emergency_address": emergency_address,
                 "text_consent": text_consent,
             }
         )

@@ -214,7 +214,7 @@ def send_internal_submission_notification(
     )
 
     merged_pdf = _merge_pdfs(pdf_parts) or application_pdf or b""
-    pdf_bytes = _protect_pdf(merged_pdf, settings["attachment_password"])
+    pdf_bytes = _protect_pdf(merged_pdf, settings.get("attachment_password", ""))
     applicant_last = str(form_data.get("last_name", "driver")).strip().lower().replace(" ", "-") or "driver"
     timestamp = datetime.now().strftime("%Y%m%d")
     filename = f"driver_application_packet_{applicant_last}_{timestamp}.pdf"

@@ -2,17 +2,36 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import streamlit as st
 
-from config import EQUIPMENT_TYPES, OFFICE_LOCATIONS, REFERRAL_SOURCES
+from config import (
+    DRIVING_EQUIPMENT_OPTIONS,
+    EQUIPMENT_TYPES,
+    OFFICE_LOCATIONS,
+    POSITION_TYPES,
+    REFERRAL_SOURCES,
+    TRAILER_LENGTHS,
+    TRUCK_TYPES,
+)
 from services.draft_service import autosave_draft
 from state import next_page, prev_page
 from ui.common import render_save_draft_button, selectbox_with_placeholder, show_missing_fields
 
 
 OWNER_OPERATOR_POSITION = "Owner Operator"
+
+
+def _coerce_date(value: object, default: date) -> date:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.fromisoformat(value).date()
+        except ValueError:
+            return default
+    return default
 
 
 def render_company_questions_page() -> None:
@@ -25,9 +44,11 @@ def render_company_questions_page() -> None:
 
     col1, col2 = st.columns(2)
     with col1:
-        st.text_input(
-            "Position applying for",
-            value=OWNER_OPERATOR_POSITION,
+        current_position = st.session_state.form_data.get("position") or OWNER_OPERATOR_POSITION
+        st.selectbox(
+            "Position applying for *",
+            POSITION_TYPES,
+            index=POSITION_TYPES.index(current_position) if current_position in POSITION_TYPES else 0,
             disabled=True,
             help="This portal is for Owner Operators only.",
         )
@@ -66,7 +87,7 @@ def render_company_questions_page() -> None:
     if currently_employed == "No":
         last_employment_end = st.date_input(
             "What date did your last employment/contract end?",
-            value=st.session_state.form_data.get("last_employment_end", date.today()),
+            value=_coerce_date(st.session_state.form_data.get("last_employment_end"), date.today()),
         )
     else:
         last_employment_end = None
@@ -129,7 +150,25 @@ def render_company_questions_page() -> None:
         saved_type = st.session_state.form_data.get(f"{key_prefix}_type", "")
         saved_miles = st.session_state.form_data.get(f"{key_prefix}_miles", "")
         saved_dates = st.session_state.form_data.get(f"{key_prefix}_dates", "")
-        has_saved_experience = any([saved_type, saved_miles, saved_dates])
+        saved_truck_type = st.session_state.form_data.get(f"{key_prefix}_truck_type", "")
+        saved_truck_type_other = st.session_state.form_data.get(f"{key_prefix}_truck_type_other", "")
+        saved_equipment_type = st.session_state.form_data.get(f"{key_prefix}_equipment_type", "")
+        saved_equipment_type_other = st.session_state.form_data.get(f"{key_prefix}_equipment_type_other", "")
+        saved_trailer_length = st.session_state.form_data.get(f"{key_prefix}_trailer_length", "")
+        saved_notes = st.session_state.form_data.get(f"{key_prefix}_notes", "")
+        has_saved_experience = any(
+            [
+                saved_type,
+                saved_miles,
+                saved_dates,
+                saved_truck_type,
+                saved_truck_type_other,
+                saved_equipment_type,
+                saved_equipment_type_other,
+                saved_trailer_length,
+                saved_notes,
+            ]
+        )
 
         has_experience = st.checkbox(
             eq_type,
@@ -141,36 +180,89 @@ def render_company_questions_page() -> None:
             with st.container(border=True):
                 ecol1, ecol2, ecol3 = st.columns(3)
                 with ecol1:
-                    exp_type = st.text_input(
-                        "Equipment Detail",
-                        key=f"{key_prefix}_type",
-                        value=saved_type,
-                        placeholder="e.g. 53' dry van",
+                    exp_truck_type = selectbox_with_placeholder(
+                        "Truck Type",
+                        TRUCK_TYPES,
+                        current_value=saved_truck_type if saved_truck_type in TRUCK_TYPES else None,
+                        key=f"{key_prefix}_truck_type",
                     )
+                    exp_truck_type_other = ""
+                    if exp_truck_type == "Other":
+                        exp_truck_type_other = st.text_input(
+                            "Other Truck Type",
+                            key=f"{key_prefix}_truck_type_other",
+                            value=saved_truck_type_other,
+                        )
                 with ecol2:
+                    current_equipment_type = saved_equipment_type if saved_equipment_type in DRIVING_EQUIPMENT_OPTIONS else (
+                        "Other" if saved_type and not saved_equipment_type else None
+                    )
+                    exp_equipment_type = selectbox_with_placeholder(
+                        "Equipment / Trailer Type",
+                        DRIVING_EQUIPMENT_OPTIONS,
+                        current_value=current_equipment_type,
+                        key=f"{key_prefix}_equipment_type",
+                    )
+                    exp_equipment_type_other = ""
+                    if exp_equipment_type == "Other":
+                        exp_equipment_type_other = st.text_input(
+                            "Other Equipment / Trailer Type",
+                            key=f"{key_prefix}_equipment_type_other",
+                            value=saved_equipment_type_other or (saved_type if not saved_equipment_type else ""),
+                        )
+                with ecol3:
+                    exp_trailer_length = selectbox_with_placeholder(
+                        "Trailer Length (if applicable)",
+                        TRAILER_LENGTHS,
+                        current_value=saved_trailer_length,
+                        key=f"{key_prefix}_trailer_length",
+                    )
+
+                dcol1, dcol2, dcol3 = st.columns(3)
+                with dcol1:
                     exp_miles = st.text_input(
                         "Total Miles",
                         key=f"{key_prefix}_miles",
                         value=saved_miles,
                         placeholder="e.g. 250,000",
                     )
-                with ecol3:
+                with dcol2:
                     exp_dates = st.text_input(
                         "Date Range",
                         key=f"{key_prefix}_dates",
                         value=saved_dates,
                         placeholder="e.g. 2018 – present",
                     )
+                with dcol3:
+                    exp_notes = st.text_input(
+                        "Additional Notes",
+                        key=f"{key_prefix}_notes",
+                        value=saved_notes,
+                        placeholder="Optional extra detail",
+                    )
         else:
-            exp_type = ""
+            exp_truck_type = ""
+            exp_truck_type_other = ""
+            exp_equipment_type = ""
+            exp_equipment_type_other = ""
+            exp_trailer_length = ""
             exp_miles = ""
             exp_dates = ""
+            exp_notes = ""
+
+        detail_value = exp_equipment_type_other if exp_equipment_type == "Other" else exp_equipment_type
 
         experience_data[key_prefix] = {
             "enabled": has_experience,
-            "type": exp_type,
+            "type": detail_value,
+            "truck_type": exp_truck_type,
+            "truck_type_other": exp_truck_type_other,
+            "equipment_type": exp_equipment_type,
+            "equipment_type_other": exp_equipment_type_other,
+            "trailer_length": exp_trailer_length,
             "miles": exp_miles,
             "dates": exp_dates,
+            "notes": exp_notes,
         }
 
     st.markdown("---")
@@ -244,8 +336,14 @@ def render_company_questions_page() -> None:
             st.session_state.form_data.pop("email_marketing_opt_in", None)
             for key_prefix, values in experience_data.items():
                 st.session_state.form_data[f"{key_prefix}_type"] = values["type"] if values["enabled"] else ""
+                st.session_state.form_data[f"{key_prefix}_truck_type"] = values["truck_type"] if values["enabled"] else ""
+                st.session_state.form_data[f"{key_prefix}_truck_type_other"] = values["truck_type_other"] if values["enabled"] else ""
+                st.session_state.form_data[f"{key_prefix}_equipment_type"] = values["equipment_type"] if values["enabled"] else ""
+                st.session_state.form_data[f"{key_prefix}_equipment_type_other"] = values["equipment_type_other"] if values["enabled"] else ""
+                st.session_state.form_data[f"{key_prefix}_trailer_length"] = values["trailer_length"] if values["enabled"] else ""
                 st.session_state.form_data[f"{key_prefix}_miles"] = values["miles"] if values["enabled"] else ""
                 st.session_state.form_data[f"{key_prefix}_dates"] = values["dates"] if values["enabled"] else ""
+                st.session_state.form_data[f"{key_prefix}_notes"] = values["notes"] if values["enabled"] else ""
             next_page()
             autosave_draft()
             st.rerun()

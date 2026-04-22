@@ -81,6 +81,7 @@ def test_send_internal_submission_notification_uses_tls_and_reply_to(monkeypatch
         },
         submission_result={"location_label": "driver-applications/submissions/test"},
         uploaded_documents=[{"file_name": "license.pdf"}],
+        application_pdf=b"%PDF-1.4\n% test packet\n",
     )
 
     assert result["status"] == "sent"
@@ -88,7 +89,9 @@ def test_send_internal_submission_notification_uses_tls_and_reply_to(monkeypatch
     assert [call[0] for call in smtp_instance.calls] == ["ehlo", "starttls", "ehlo", "login", "send_message"]
     assert smtp_instance.sent_message is not None
     assert smtp_instance.sent_message["Reply-To"] == "emma@example.com"
-    assert "Supporting document count: 1" in smtp_instance.sent_message.get_content()
+    text_part = smtp_instance.sent_message.get_body(preferencelist=("plain",))
+    assert text_part is not None
+    assert "Supporting document count: 1" in text_part.get_content()
 
 
 def test_attempt_submission_notification_retries_after_error(monkeypatch):
@@ -96,6 +99,7 @@ def test_attempt_submission_notification_retries_after_error(monkeypatch):
         form_data={"first_name": "Emma", "last_name": "Driver"},
         uploaded_documents=[],
         saved_submission_dir="driver-applications/submissions/test",
+        submission_artifacts={"application_pdf": b"%PDF-1.4\n% test packet\n"},
         submission_notification_sent=False,
         submission_notification_status_code=None,
         submission_notification_status=None,
@@ -176,6 +180,7 @@ def test_send_internal_submission_notification_in_test_mode_uses_fallback_recipi
         },
         submission_result={"location_label": "driver-applications/companies/prestige/test-mode/submissions/test"},
         uploaded_documents=[],
+        application_pdf=b"%PDF-1.4\n% test packet\n",
     )
 
     assert result["status"] == "sent"

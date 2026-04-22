@@ -88,19 +88,65 @@ def _selected_experience_rows(form_data):
     rows = []
     for eq_type in EQUIPMENT_TYPES:
         key_prefix = f"exp_{eq_type.lower().replace(' ', '_').replace('-', '_')}"
-        exp_type = _safe(form_data, f"{key_prefix}_type")
+        truck_type = _safe(form_data, f"{key_prefix}_truck_type_other") or _safe(form_data, f"{key_prefix}_truck_type")
+        exp_type = _safe(form_data, f"{key_prefix}_equipment_type_other") or _safe(form_data, f"{key_prefix}_equipment_type") or _safe(form_data, f"{key_prefix}_type")
+        trailer_length = _safe(form_data, f"{key_prefix}_trailer_length")
         exp_miles = _safe(form_data, f"{key_prefix}_miles")
         exp_dates = _safe(form_data, f"{key_prefix}_dates")
-        if any([exp_type, exp_miles, exp_dates]):
+        exp_notes = _safe(form_data, f"{key_prefix}_notes")
+        if any([truck_type, exp_type, trailer_length, exp_miles, exp_dates, exp_notes]):
             rows.append(
                 {
                     "label": eq_type,
+                    "truck_type": truck_type,
                     "detail": exp_type,
+                    "trailer_length": trailer_length,
                     "miles": exp_miles,
                     "dates": exp_dates,
+                    "notes": exp_notes,
                 }
             )
     return rows
+
+
+def _previous_addresses(form_data):
+    stored = form_data.get("previous_addresses")
+    if isinstance(stored, list) and stored:
+        return [entry for entry in stored if isinstance(entry, dict)]
+    legacy = {
+        "address": _safe(form_data, "prev_address"),
+        "city": _safe(form_data, "prev_city"),
+        "state": _safe(form_data, "prev_state"),
+        "zip_code": _safe(form_data, "prev_zip"),
+        "from_date": "",
+        "to_date": "",
+    }
+    if any([legacy["address"], legacy["city"], legacy["state"], legacy["zip_code"]]):
+        return [legacy]
+    return []
+
+
+def _references(form_data):
+    stored = form_data.get("references")
+    if isinstance(stored, list) and stored:
+        return [entry for entry in stored if isinstance(entry, dict)]
+    refs = []
+    for key in ("ref1", "ref2"):
+        raw = _safe(form_data, key)
+        if raw:
+            refs.append({"name": raw, "phone": "", "relationship": "", "city": "", "state": ""})
+    return refs
+
+
+def _mvr_rows(form_data):
+    return [
+        ("Driving During Suspension/Revocation:", _safe(form_data, "mvr_suspension_conviction")),
+        ("Driving Without Valid License:", _safe(form_data, "mvr_no_valid_license")),
+        ("Alcohol/Controlled Substance Offense:", _safe(form_data, "mvr_alcohol_controlled_substance")),
+        ("Illegal Substance While On Duty:", _safe(form_data, "mvr_illegal_substance_on_duty")),
+        ("Reckless/Careless Driving:", _safe(form_data, "mvr_reckless_driving")),
+        ("Any DOT Positive/Refusal:", _safe(form_data, "mvr_any_dot_test_positive")),
+    ]
 
 
 def generate_application_pdf(form_data, employers, licenses, accidents, violations):
@@ -135,9 +181,16 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
     pdf.field_row("Best Time to Contact:", _safe(form_data, "best_time"))
     pdf.field_row("Text Message Consent:", _bool_text(form_data.get("text_consent")))
     pdf.field_row("Emergency Contact:", f"{_safe(form_data, 'emergency_name')} - {_safe(form_data, 'emergency_phone')} ({_safe(form_data, 'emergency_relationship')})")
+    pdf.field_row("Emergency Contact Address:", _safe(form_data, "emergency_address"))
 
     if _safe(form_data, "resided_3_years") == "No":
-        pdf.field_row("Previous Address:", f"{_safe(form_data, 'prev_address')}, {_safe(form_data, 'prev_city')}, {_safe(form_data, 'prev_state')} {_safe(form_data, 'prev_zip')}")
+        for index, previous_address in enumerate(_previous_addresses(form_data), start=1):
+            date_range = " to ".join(part for part in [_safe(previous_address, "from_date"), _safe(previous_address, "to_date")] if part)
+            suffix = f" ({date_range})" if date_range else ""
+            pdf.field_row(
+                f"Previous Address #{index}:",
+                f"{_safe(previous_address, 'address')}, {_safe(previous_address, 'city')}, {_safe(previous_address, 'state')} {_safe(previous_address, 'zip_code')}{suffix}",
+            )
 
     pdf.ln(4)
 
@@ -185,9 +238,13 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
         for row in experience_rows:
             pdf.set_font("Helvetica", "B", 9)
             pdf.cell(0, 6, row["label"], new_x="LMARGIN", new_y="NEXT")
+            pdf.field_row("  Truck Type:", row["truck_type"])
             pdf.field_row("  Equipment Detail:", row["detail"])
+            pdf.field_row("  Trailer Length:", row["trailer_length"])
             pdf.field_row("  Total Miles:", row["miles"])
             pdf.field_row("  Date Range:", row["dates"])
+            if row["notes"]:
+                pdf.field_row("  Notes:", row["notes"])
             pdf.ln(1)
     pdf.ln(3)
 
@@ -204,8 +261,11 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
         pdf.set_font("Helvetica", "B", 9)
         pdf.cell(0, 6, f"License #{i+1}", new_x="LMARGIN", new_y="NEXT")
         pdf.field_row("  License Number:", lic.get("number", ""))
+        pdf.field_row("  Licensing Authority:", lic.get("authority", ""))
         pdf.field_row("  State:", lic.get("state", ""))
+        pdf.field_row("  Country:", lic.get("country", ""))
         pdf.field_row("  Class:", lic.get("class", ""))
+        pdf.field_row("  Current License:", lic.get("current_license", ""))
         pdf.field_row("  Expiration:", _safe(lic, "expiration"))
         pdf.field_row("  Med Card Exp:", _safe(lic, "med_card_exp"))
         pdf.field_row("  CDL:", lic.get("is_cdl", ""))
@@ -215,6 +275,7 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
             pdf.field_row("  HAZMAT Exp:", _safe(lic, "hazmat_exp"))
         pdf.field_row("  Doubles/Triples:", lic.get("doubles", ""))
         pdf.field_row("  X Endorsement:", lic.get("x_endorsement", ""))
+        pdf.field_row("  Other Endorsement:", lic.get("other_endorsement", ""))
         pdf.ln(2)
     pdf.ln(2)
 
@@ -229,11 +290,13 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
         pdf.cell(0, 7, f"{i+1}. {company_name}", new_x="LMARGIN", new_y="NEXT")
         pdf.set_text_color(0, 0, 0)
         pdf.field_row("  Address:", f"{emp.get('address', '')}, {emp.get('city_state', '')}")
+        pdf.field_row("  Country:", emp.get("country", ""))
         pdf.field_row("  Phone:", emp.get("phone", ""))
         pdf.field_row("  Position:", emp.get("position", ""))
         pdf.field_row("  Start Date:", _safe(emp, "start"))
         pdf.field_row("  End Date:", _safe(emp, "end"))
         pdf.field_row("  Reason for Leaving:", emp.get("reason", ""))
+        pdf.field_row("  Pay Range:", emp.get("pay_range", ""))
         pdf.field_row("  Terminated/Discharged:", emp.get("terminated", ""))
         pdf.field_row("  Current:", emp.get("current", ""))
         pdf.field_row("  May Contact:", emp.get("contact_ok", ""))
@@ -259,8 +322,20 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
         pdf.field_row("  Dates:", f"{_safe(form_data, 'ts_start')} to {_safe(form_data, 'ts_end')}")
         pdf.field_row("  Graduated:", _safe(form_data, "ts_graduated"))
         pdf.field_row("  FMCSA Subject:", _safe(form_data, "ts_fmcsa_subject"))
-    pdf.field_row("Reference #1:", _safe(form_data, "ref1"))
-    pdf.field_row("Reference #2:", _safe(form_data, "ref2"))
+    for index, reference in enumerate(_references(form_data), start=1):
+        pdf.field_row(
+            f"Reference #{index}:",
+            ", ".join(
+                part
+                for part in [
+                    _safe(reference, "name"),
+                    ", ".join(part for part in [_safe(reference, "city"), _safe(reference, "state")] if part),
+                    _safe(reference, "phone"),
+                    _safe(reference, "relationship"),
+                ]
+                if part
+            ),
+        )
     pdf.ln(4)
 
     # --- FMCSR Disqualifications ---
@@ -276,6 +351,11 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
     convicted_details = form_data.get("disq_convicted_details") or ""
     if convicted_details:
         pdf.field_row_wide("  Details:", convicted_details)
+    pdf.ln(4)
+
+    pdf.section_title("Motor Vehicle Record")
+    for label, value in _mvr_rows(form_data):
+        pdf.field_row(label, value)
     pdf.ln(4)
 
     # --- Accident Record ---
@@ -303,7 +383,14 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
             pdf.field_row(f"  Violation #{i+1} Date:", _safe(viol, "date"))
             pdf.field_row("  Location:", viol.get("location", ""))
             pdf.field_row("  Charge:", viol.get("charge", ""))
+            pdf.field_row("  In Commercial Vehicle:", viol.get("in_commercial_vehicle", ""))
+            pdf.field_row("  Fined:", viol.get("fined", ""))
+            pdf.field_row("  License Suspended:", viol.get("license_suspended", ""))
+            pdf.field_row("  License Revoked:", viol.get("license_revoked", ""))
+            pdf.field_row("  Fine Amount:", viol.get("fine_amount", ""))
             pdf.field_row("  Penalty:", viol.get("penalty", ""))
+            if viol.get("comments"):
+                pdf.field_row_wide("  Comments:", viol.get("comments", ""))
     pdf.ln(4)
 
     # --- Disclosures & Authorizations ---

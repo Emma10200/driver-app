@@ -34,7 +34,7 @@ def _attempt_submission_notification() -> None:
         return
 
     try:
-        artifacts = st.session_state.submission_artifacts or {}
+        artifacts = st.session_state.get("submission_artifacts") or {}
         notification_result = send_internal_submission_notification(
             form_data=st.session_state.form_data,
             submission_result={"location_label": saved_submission_dir},
@@ -117,10 +117,12 @@ def render_review_submit_page(submissions_dir: Path) -> None:
         )
         summary_item("Text Message Consent", st.session_state.form_data.get("text_consent"))
         summary_item("Email", st.session_state.form_data.get("email"))
+        summary_item("Previous Address History Entries", len(st.session_state.form_data.get("previous_addresses", [])), default="0")
         summary_item(
             "Emergency Contact",
             f"{st.session_state.form_data.get('emergency_name', '')} / {st.session_state.form_data.get('emergency_phone', '')}",
         )
+        summary_item("Emergency Contact Address", st.session_state.form_data.get("emergency_address"))
 
     with st.expander("Company Questions & Experience"):
         summary_item("Position Applying For", st.session_state.form_data.get("position"))
@@ -148,6 +150,7 @@ def render_review_submit_page(submissions_dir: Path) -> None:
     with st.expander("Education, Safety, and Records"):
         summary_item("Highest Grade Completed", st.session_state.form_data.get("highest_grade"))
         summary_item("Attended Trucking School", st.session_state.form_data.get("attended_trucking_school"))
+        summary_item("Personal References", len(st.session_state.form_data.get("references", [])), default="0")
         summary_item("Accidents Reported", len(st.session_state.accidents), default="0")
         summary_item("Violations Reported", len(st.session_state.violations), default="0")
         summary_item("Currently Disqualified", st.session_state.form_data.get("disq_391_15"))
@@ -155,6 +158,12 @@ def render_review_submit_page(submissions_dir: Path) -> None:
             "Suspended or Revoked License History",
             st.session_state.form_data.get("disq_suspended"),
         )
+        summary_item("MVR: Suspension/Revocation Conviction", st.session_state.form_data.get("mvr_suspension_conviction"))
+        summary_item("MVR: Invalid License Conviction", st.session_state.form_data.get("mvr_no_valid_license"))
+        summary_item("MVR: Alcohol/Controlled Substance Offense", st.session_state.form_data.get("mvr_alcohol_controlled_substance"))
+        summary_item("MVR: Illegal Substance on Duty", st.session_state.form_data.get("mvr_illegal_substance_on_duty"))
+        summary_item("MVR: Reckless/Careless Driving", st.session_state.form_data.get("mvr_reckless_driving"))
+        summary_item("MVR: Any DOT Positive/Refusal", st.session_state.form_data.get("mvr_any_dot_test_positive"))
         convicted_which = st.session_state.form_data.get("disq_convicted_which") or []
         if st.session_state.form_data.get("disq_convicted") == "Yes" and convicted_which:
             summary_item("DOT Offense(s) Disclosed", "; ".join(convicted_which))

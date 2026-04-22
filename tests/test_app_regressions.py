@@ -42,10 +42,11 @@ def test_page_one_next_advances_without_ssn_exception(monkeypatch, tmp_path):
     _widget_by_label(at.text_input, "Email Address *").set_value("emma@example.com")
     _widget_by_label(at.text_input, "Emergency Contact Name").set_value("John Driver")
     _widget_by_label(at.text_input, "Emergency Contact Phone").set_value("5557654321")
+    _widget_by_label(at.text_input, "Emergency Contact Address").set_value("123 Family Rd")
     _widget_by_label(at.selectbox, "Mobile Carrier / Provider").set_value("Verizon")
     _widget_by_label(
         at.checkbox,
-        "I consent to receive text messages from PRESTIGE TRANSPORTATION INC. regarding my application and contracting status. I may opt out at any time by texting STOP.",
+        "I agree to receive text messages from PRESTIGE TRANSPORTATION INC. that may be sent using an automatic telephone dialing system and may include recruiting or advertising messages related to my application, contracting status, or future opportunities. Consent is not a condition of being hired, contracted, or leased on. Message and data rates may apply. Reply STOP at any time to opt out.",
     ).check()
 
     _widget_by_label(at.button, "Next →").click().run(timeout=15)
@@ -56,6 +57,7 @@ def test_page_one_next_advances_without_ssn_exception(monkeypatch, tmp_path):
     assert at.session_state["form_data"]["state"] == "CA"
     assert at.session_state["form_data"]["cell_phone"] == "5551239999"
     assert at.session_state["form_data"]["mobile_carrier"] == "Verizon"
+    assert at.session_state["form_data"]["emergency_address"] == "123 Family Rd"
     assert at.session_state["form_data"]["text_consent"] is True
     assert any(node.value == "Company Questions & Driving Experience" for node in at.subheader)
 

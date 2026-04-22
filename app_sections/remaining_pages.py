@@ -7,15 +7,95 @@ from datetime import date, datetime
 import streamlit as st
 
 from config import (
+    AREAS_DRIVEN_OPTIONS,
+    LICENSE_COUNTRIES,
     LICENSE_CLASSES,
     TRAILER_LENGTHS,
     TRAILER_TYPES,
+    TRUCK_TYPES,
     US_STATES,
 )
 from runtime_context import get_active_company_profile
 from services.draft_service import autosave_draft
 from state import next_page, prev_page
 from ui.common import default_california_applicability, render_save_draft_button, selectbox_with_placeholder, show_missing_fields, show_user_error
+
+
+def _blank_reference() -> dict[str, str]:
+    return {"name": "", "phone": "", "relationship": "", "city": "", "state": ""}
+
+
+def _coerce_date(value: object, default: date) -> date:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.fromisoformat(value).date()
+        except ValueError:
+            return default
+    return default
+
+
+def _coerce_reference_entries() -> list[dict[str, str]]:
+    stored = st.session_state.form_data.get("references")
+    entries: list[dict[str, str]] = []
+    if isinstance(stored, list):
+        for entry in stored:
+            if not isinstance(entry, dict):
+                continue
+            entries.append(
+                {
+                    "name": str(entry.get("name", "") or ""),
+                    "phone": str(entry.get("phone", "") or ""),
+                    "relationship": str(entry.get("relationship", "") or ""),
+                    "city": str(entry.get("city", "") or ""),
+                    "state": str(entry.get("state", "") or ""),
+                }
+            )
+    if entries:
+        while len(entries) < 2:
+            entries.append(_blank_reference())
+        return entries[:2]
+
+    def parse_legacy(raw: str) -> dict[str, str]:
+        text = str(raw or "").strip()
+        if not text:
+            return _blank_reference()
+        if "|" in text:
+            parts = [part.strip() for part in text.split("|")]
+            while len(parts) < 3:
+                parts.append("")
+            return {
+                "name": parts[0],
+                "phone": parts[1],
+                "relationship": parts[2],
+                "city": "",
+                "state": "",
+            }
+        parts = [part.strip() for part in text.split(",")]
+        while len(parts) < 5:
+            parts.append("")
+        return {
+            "name": parts[0],
+            "city": parts[1],
+            "state": parts[2],
+            "phone": parts[3],
+            "relationship": parts[4],
+        }
+
+    entries = [
+        parse_legacy(str(st.session_state.form_data.get("ref1", "") or "")),
+        parse_legacy(str(st.session_state.form_data.get("ref2", "") or "")),
+    ]
+    while len(entries) < 2:
+        entries.append(_blank_reference())
+    return entries[:2]
+
+
+def _format_reference_summary(reference: dict[str, str]) -> str:
+    city_state = ", ".join(part for part in [reference.get("city", ""), reference.get("state", "")] if part)
+    parts = [reference.get("name", ""), city_state, reference.get("phone", ""), reference.get("relationship", "")]
+    return ", ".join(part for part in parts if part)
 
 
 def render_remaining_page(page: int) -> bool:
@@ -39,7 +119,7 @@ def render_remaining_page(page: int) -> bool:
             if twic_card == "Yes":
                 twic_expiration = st.date_input(
                     "TWIC Expiration Date",
-                    value=st.session_state.form_data.get("twic_expiration", date.today()),
+                    value=_coerce_date(st.session_state.form_data.get("twic_expiration"), date.today()),
                     key="twic_expiration_page3",
                 )
             else:
@@ -61,11 +141,23 @@ def render_remaining_page(page: int) -> bool:
             lcol1, lcol2, lcol3 = st.columns(3)
             with lcol1:
                 lic_number = st.text_input("License Number", key=f"lic_num_{i}", value=existing.get("number", ""))
+                lic_authority = st.text_input(
+                    "Licensing Authority",
+                    key=f"lic_authority_{i}",
+                    value=existing.get("authority", ""),
+                )
                 lic_state = selectbox_with_placeholder(
                     "Licensing State",
                     US_STATES,
                     current_value=existing.get("state"),
                     key=f"lic_state_{i}",
+                )
+            with lcol2:
+                lic_country = selectbox_with_placeholder(
+                    "Country",
+                    LICENSE_COUNTRIES,
+                    current_value=existing.get("country"),
+                    key=f"lic_country_{i}",
                 )
                 lic_class = selectbox_with_placeholder(
                     "License Class",
@@ -73,16 +165,22 @@ def render_remaining_page(page: int) -> bool:
                     current_value=existing.get("class"),
                     key=f"lic_class_{i}",
                 )
-            with lcol2:
+                current_license = selectbox_with_placeholder(
+                    "Current License?",
+                    ["Yes", "No"],
+                    current_value=existing.get("current_license"),
+                    key=f"lic_current_{i}",
+                )
+            with lcol3:
                 lic_expiration = st.date_input(
                     "License Expiration",
                     key=f"lic_exp_{i}",
-                    value=existing.get("expiration", date.today()),
+                    value=_coerce_date(existing.get("expiration"), date.today()),
                 )
                 med_card_exp = st.date_input(
                     "DOT Medical Card Expiration",
                     key=f"med_exp_{i}",
-                    value=existing.get("med_card_exp", date.today()),
+                    value=_coerce_date(existing.get("med_card_exp"), date.today()),
                 )
                 is_cdl = selectbox_with_placeholder(
                     "Commercial Driver License?",
@@ -90,7 +188,9 @@ def render_remaining_page(page: int) -> bool:
                     current_value=existing.get("is_cdl"),
                     key=f"is_cdl_{i}",
                 )
-            with lcol3:
+
+            ecol1, ecol2, ecol3 = st.columns(3)
+            with ecol1:
                 tanker_end = selectbox_with_placeholder(
                     "Tanker Endorsement?",
                     ["No", "Yes"],
@@ -107,11 +207,12 @@ def render_remaining_page(page: int) -> bool:
                     st.date_input(
                         "HAZMAT Expiration Date",
                         key=f"hazmat_exp_{i}",
-                        value=existing.get("hazmat_exp", date.today()),
+                        value=_coerce_date(existing.get("hazmat_exp"), date.today()),
                     )
                     if hazmat_end == "Yes"
                     else None
                 )
+            with ecol2:
                 doubles_end = selectbox_with_placeholder(
                     "Doubles/Triples Endorsement?",
                     ["No", "Yes"],
@@ -124,12 +225,21 @@ def render_remaining_page(page: int) -> bool:
                     current_value=existing.get("x_endorsement"),
                     key=f"x_end_{i}",
                 )
+            with ecol3:
+                other_endorsement = st.text_input(
+                    "Other Endorsement (if any)",
+                    key=f"other_end_{i}",
+                    value=existing.get("other_endorsement", ""),
+                )
 
             licenses_input.append(
                 {
                     "number": lic_number,
+                    "authority": lic_authority,
                     "state": lic_state,
+                    "country": lic_country,
                     "class": lic_class,
+                    "current_license": current_license,
                     "expiration": lic_expiration,
                     "med_card_exp": med_card_exp,
                     "is_cdl": is_cdl,
@@ -138,6 +248,7 @@ def render_remaining_page(page: int) -> bool:
                     "hazmat_exp": hazmat_exp,
                     "doubles": doubles_end,
                     "x_endorsement": x_end,
+                    "other_endorsement": other_endorsement,
                 }
             )
             st.markdown("---")
@@ -155,10 +266,16 @@ def render_remaining_page(page: int) -> bool:
                 for index, license_entry in enumerate(licenses_input, start=1):
                     if not license_entry["number"]:
                         missing.append(f"License #{index} number")
+                    if not license_entry["authority"]:
+                        missing.append(f"License #{index} licensing authority")
                     if not license_entry["state"]:
                         missing.append(f"License #{index} state")
+                    if not license_entry["country"]:
+                        missing.append(f"License #{index} country")
                     if not license_entry["class"]:
                         missing.append(f"License #{index} class")
+                    if not license_entry["current_license"]:
+                        missing.append(f"License #{index} current license question")
                     if not license_entry["is_cdl"]:
                         missing.append(f"License #{index} CDL question")
                     if not license_entry["tanker"]:
@@ -212,12 +329,18 @@ def render_remaining_page(page: int) -> bool:
                     emp_company = st.text_input("Company Name *", key=f"emp_company_{i}", value=existing.get("company", ""))
                     emp_address = st.text_input("Address", key=f"emp_addr_{i}", value=existing.get("address", ""))
                     emp_city_state = st.text_input("City, State, Zip", key=f"emp_csz_{i}", value=existing.get("city_state", ""))
+                    emp_country = st.text_input("Country", key=f"emp_country_{i}", value=existing.get("country", "United States"))
                     emp_phone = st.text_input("Phone", key=f"emp_phone_{i}", value=existing.get("phone", ""))
                     emp_position = st.text_input("Position Held", key=f"emp_pos_{i}", value=existing.get("position", ""))
                 with ecol2:
-                    emp_start = st.date_input("Start Date", key=f"emp_start_{i}", value=existing.get("start", date(2020, 1, 1)))
-                    emp_end = st.date_input("End Date", key=f"emp_end_{i}", value=existing.get("end", date.today()))
+                    emp_start = st.date_input("Start Date", key=f"emp_start_{i}", value=_coerce_date(existing.get("start"), date(2020, 1, 1)))
+                    emp_end = st.date_input("End Date", key=f"emp_end_{i}", value=_coerce_date(existing.get("end"), date.today()))
                     emp_reason = st.text_input("Reason for Leaving", key=f"emp_reason_{i}", value=existing.get("reason", ""))
+                    emp_pay_range = st.text_input(
+                        "Pay Range (cents/mile or $/hr)",
+                        key=f"emp_pay_{i}",
+                        value=existing.get("pay_range", ""),
+                    )
                     emp_terminated = selectbox_with_placeholder(
                         "Were you terminated/discharged/laid off?",
                         ["No", "Yes"],
@@ -262,10 +385,40 @@ def render_remaining_page(page: int) -> bool:
                 if emp_cmv == "Yes":
                     mcol1, mcol2, mcol3 = st.columns(3)
                     with mcol1:
-                        emp_areas = st.text_input("Areas Driven", key=f"emp_areas_{i}", value=existing.get("areas", ""))
+                        default_areas = existing.get("areas_type") or (
+                            existing.get("areas") if existing.get("areas") in AREAS_DRIVEN_OPTIONS else None
+                        )
+                        emp_areas_type = selectbox_with_placeholder(
+                            "Areas Driven",
+                            AREAS_DRIVEN_OPTIONS,
+                            current_value=default_areas,
+                            key=f"emp_areas_type_{i}",
+                        )
+                        emp_areas_other = ""
+                        if emp_areas_type == "Other":
+                            emp_areas_other = st.text_input(
+                                "Other Areas Driven",
+                                key=f"emp_areas_other_{i}",
+                                value=existing.get("areas_other", existing.get("areas", "")),
+                            )
                         emp_miles = st.text_input("Miles Driven Weekly", key=f"emp_miles_{i}", value=existing.get("miles", ""))
                     with mcol2:
-                        emp_truck = st.text_input("Most Common Truck Driven", key=f"emp_truck_{i}", value=existing.get("truck", ""))
+                        default_truck = existing.get("truck_type") or (
+                            existing.get("truck") if existing.get("truck") in TRUCK_TYPES else None
+                        )
+                        emp_truck_type = selectbox_with_placeholder(
+                            "Most Common Truck Driven",
+                            TRUCK_TYPES,
+                            current_value=default_truck,
+                            key=f"emp_truck_type_{i}",
+                        )
+                        emp_truck_other = ""
+                        if emp_truck_type == "Other":
+                            emp_truck_other = st.text_input(
+                                "Other Truck Type",
+                                key=f"emp_truck_other_{i}",
+                                value=existing.get("truck_other", existing.get("truck", "")),
+                            )
                         emp_trailer = selectbox_with_placeholder(
                             "Most Common Trailer",
                             TRAILER_TYPES,
@@ -280,26 +433,35 @@ def render_remaining_page(page: int) -> bool:
                             key=f"emp_tlen_{i}",
                         )
                 else:
-                    emp_areas = emp_miles = emp_truck = emp_trailer = emp_trailer_len = ""
+                    emp_areas_type = emp_areas_other = emp_miles = emp_truck_type = emp_truck_other = emp_trailer = emp_trailer_len = ""
+
+                emp_areas = emp_areas_other if emp_areas_type == "Other" else emp_areas_type
+                emp_truck = emp_truck_other if emp_truck_type == "Other" else emp_truck_type
 
                 employers_input.append(
                     {
                         "company": emp_company,
                         "address": emp_address,
                         "city_state": emp_city_state,
+                        "country": emp_country,
                         "phone": emp_phone,
                         "position": emp_position,
                         "start": emp_start,
                         "end": emp_end,
                         "reason": emp_reason,
+                        "pay_range": emp_pay_range,
                         "terminated": emp_terminated,
                         "current": emp_current,
                         "contact_ok": emp_contact_ok,
                         "cmv": emp_cmv,
                         "fmcsa": emp_fmcsa,
                         "dot_testing": emp_dot_testing,
+                        "areas_type": emp_areas_type,
+                        "areas_other": emp_areas_other,
                         "areas": emp_areas,
                         "miles": emp_miles,
+                        "truck_type": emp_truck_type,
+                        "truck_other": emp_truck_other,
                         "truck": emp_truck,
                         "trailer": emp_trailer,
                         "trailer_len": emp_trailer_len,
@@ -331,6 +493,14 @@ def render_remaining_page(page: int) -> bool:
                         missing.append(f"Employer #{index} FMCSA question")
                     if not employer["dot_testing"]:
                         missing.append(f"Employer #{index} DOT testing question")
+                    if employer["cmv"] == "Yes" and not employer["areas_type"]:
+                        missing.append(f"Employer #{index} areas driven")
+                    if employer["cmv"] == "Yes" and employer["areas_type"] == "Other" and not employer["areas_other"]:
+                        missing.append(f"Employer #{index} other areas driven")
+                    if employer["cmv"] == "Yes" and not employer["truck_type"]:
+                        missing.append(f"Employer #{index} truck type")
+                    if employer["cmv"] == "Yes" and employer["truck_type"] == "Other" and not employer["truck_other"]:
+                        missing.append(f"Employer #{index} other truck type")
                     if employer["cmv"] == "Yes" and not employer["trailer"]:
                         missing.append(f"Employer #{index} most common trailer")
                     if employer["cmv"] == "Yes" and not employer["trailer_len"]:
@@ -372,9 +542,9 @@ def render_remaining_page(page: int) -> bool:
             with tcol1:
                 ts_name = st.text_input("School Name", value=st.session_state.form_data.get("ts_name", ""))
                 ts_city_state = st.text_input("City, State", value=st.session_state.form_data.get("ts_city_state", ""))
-                ts_start = st.date_input("Start Date", key="ts_start", value=st.session_state.form_data.get("ts_start", date(2020, 1, 1)))
+                ts_start = st.date_input("Start Date", key="ts_start", value=_coerce_date(st.session_state.form_data.get("ts_start"), date(2020, 1, 1)))
             with tcol2:
-                ts_end = st.date_input("End Date", key="ts_end", value=st.session_state.form_data.get("ts_end", date(2020, 6, 1)))
+                ts_end = st.date_input("End Date", key="ts_end", value=_coerce_date(st.session_state.form_data.get("ts_end"), date(2020, 6, 1)))
                 ts_graduated = selectbox_with_placeholder(
                     "Did you graduate?",
                     ["Yes", "No"],
@@ -394,9 +564,50 @@ def render_remaining_page(page: int) -> bool:
 
         st.markdown("---")
         st.subheader("Personal References")
-        st.markdown("List name, address, city, state, phone number, and relationship.")
-        ref1 = st.text_input("Reference #1", value=st.session_state.form_data.get("ref1", ""))
-        ref2 = st.text_input("Reference #2", value=st.session_state.form_data.get("ref2", ""))
+        st.markdown("Please provide at least two personal references.")
+        existing_references = _coerce_reference_entries()
+        references: list[dict[str, str]] = []
+        for index in range(2):
+            existing = existing_references[index] if index < len(existing_references) else _blank_reference()
+            with st.expander(f"Reference #{index + 1}", expanded=True):
+                rcol1, rcol2 = st.columns(2)
+                with rcol1:
+                    ref_name = st.text_input(
+                        "Name *",
+                        key=f"ref_name_{index}",
+                        value=existing.get("name", ""),
+                    )
+                    ref_phone = st.text_input(
+                        "Phone *",
+                        key=f"ref_phone_{index}",
+                        value=existing.get("phone", ""),
+                    )
+                with rcol2:
+                    ref_relationship = st.text_input(
+                        "Relationship *",
+                        key=f"ref_relationship_{index}",
+                        value=existing.get("relationship", ""),
+                    )
+                    ref_city = st.text_input(
+                        "City",
+                        key=f"ref_city_{index}",
+                        value=existing.get("city", ""),
+                    )
+                    ref_state = selectbox_with_placeholder(
+                        "State",
+                        US_STATES,
+                        current_value=existing.get("state"),
+                        key=f"ref_state_{index}",
+                    )
+            references.append(
+                {
+                    "name": ref_name,
+                    "phone": ref_phone,
+                    "relationship": ref_relationship,
+                    "city": ref_city,
+                    "state": ref_state,
+                }
+            )
 
         bcol1, bcol2, bcol3 = st.columns(3)
         with bcol1:
@@ -416,10 +627,20 @@ def render_remaining_page(page: int) -> bool:
                     missing.append("Did you graduate? question")
                 if attended_trucking_school == "Yes" and not ts_fmcsa_subject:
                     missing.append("FMCSA trucking school question")
+                for index, reference in enumerate(references, start=1):
+                    if not reference["name"]:
+                        missing.append(f"Reference #{index} name")
+                    if not reference["phone"]:
+                        missing.append(f"Reference #{index} phone")
+                    if not reference["relationship"]:
+                        missing.append(f"Reference #{index} relationship")
 
                 if missing:
                     show_missing_fields(missing, "Please complete the required education fields:")
                     return
+
+                ref1 = _format_reference_summary(references[0])
+                ref2 = _format_reference_summary(references[1])
 
                 st.session_state.form_data.update(
                     {
@@ -432,6 +653,7 @@ def render_remaining_page(page: int) -> bool:
                         "ts_end": ts_end,
                         "ts_graduated": ts_graduated,
                         "ts_fmcsa_subject": ts_fmcsa_subject,
+                        "references": references,
                         "ref1": ref1,
                         "ref2": ref2,
                     }
@@ -515,24 +737,70 @@ def render_remaining_page(page: int) -> bool:
             )
 
         st.markdown("---")
+        st.markdown("#### Motor Vehicle Record (MVR)")
+        st.caption("These questions help match the standard carrier qualification file review.")
+
+        mvr_suspension_conviction = selectbox_with_placeholder(
+            "Have you ever been convicted of driving during license suspension/revocation, driving without a valid license, or are related charges pending?",
+            ["No", "Yes"],
+            current_value=st.session_state.form_data.get("mvr_suspension_conviction"),
+        )
+        mvr_no_valid_license = selectbox_with_placeholder(
+            "Have you ever been convicted of driving without a valid or current license, or are related charges pending?",
+            ["No", "Yes"],
+            current_value=st.session_state.form_data.get("mvr_no_valid_license"),
+        )
+        mvr_alcohol_controlled_substance = selectbox_with_placeholder(
+            "Have you ever been convicted of an alcohol or controlled substance offense while operating a motor vehicle, or are related charges pending?",
+            ["No", "Yes"],
+            current_value=st.session_state.form_data.get("mvr_alcohol_controlled_substance"),
+        )
+        mvr_illegal_substance_on_duty = selectbox_with_placeholder(
+            "Have you ever been convicted of possession, sale, or transfer of an illegal substance while on duty, or are related charges pending?",
+            ["No", "Yes"],
+            current_value=st.session_state.form_data.get("mvr_illegal_substance_on_duty"),
+        )
+        mvr_reckless_driving = selectbox_with_placeholder(
+            "Have you ever been convicted of reckless driving, careless driving, or careless operation of a motor vehicle, or are related charges pending?",
+            ["No", "Yes"],
+            current_value=st.session_state.form_data.get("mvr_reckless_driving"),
+        )
+        mvr_any_dot_test_positive = selectbox_with_placeholder(
+            "Have you ever tested positive, or refused to test, on any DOT-mandated drug or alcohol test?",
+            ["No", "Yes"],
+            current_value=st.session_state.form_data.get("mvr_any_dot_test_positive"),
+        )
+
+        st.markdown("---")
         st.markdown("#### Vehicle Accident Record")
         st.caption("Please list any accidents or incidents from the last 5 years, even if you were not at fault. If you've had none, just select 'No'.")
 
-        has_accidents = selectbox_with_placeholder("Any accidents to report?", ["No", "Yes"], key="has_acc")
+        has_accidents = selectbox_with_placeholder(
+            "Any accidents to report?",
+            ["No", "Yes"],
+            current_value="Yes" if st.session_state.accidents else "No",
+            key="has_acc",
+        )
         if has_accidents == "Yes":
-            num_accidents = st.number_input("Number of accidents", min_value=1, max_value=10, value=1)
+            num_accidents = st.number_input(
+                "Number of accidents",
+                min_value=1,
+                max_value=10,
+                value=max(1, len(st.session_state.accidents) if st.session_state.accidents else 1),
+            )
             accidents_input = []
             for i in range(int(num_accidents)):
+                existing = st.session_state.accidents[i] if i < len(st.session_state.accidents) else {}
                 with st.expander(f"Accident #{i+1}"):
                     acol1, acol2 = st.columns(2)
                     with acol1:
-                        acc_date = st.date_input("Date of Accident", key=f"acc_date_{i}")
-                        acc_location = st.text_input("Location", key=f"acc_loc_{i}")
-                        acc_fatalities = st.number_input("Fatalities", min_value=0, key=f"acc_fat_{i}")
+                        acc_date = st.date_input("Date of Accident", key=f"acc_date_{i}", value=_coerce_date(existing.get("date"), date.today()))
+                        acc_location = st.text_input("Location", key=f"acc_loc_{i}", value=existing.get("location", ""))
+                        acc_fatalities = st.number_input("Fatalities", min_value=0, key=f"acc_fat_{i}", value=int(existing.get("fatalities", 0) or 0))
                     with acol2:
-                        acc_injuries = st.number_input("Injuries", min_value=0, key=f"acc_inj_{i}")
-                        acc_hazmat = st.selectbox("Hazmat Spill?", ["No", "Yes"], key=f"acc_haz_{i}")
-                        acc_description = st.text_area("Description", key=f"acc_desc_{i}")
+                        acc_injuries = st.number_input("Injuries", min_value=0, key=f"acc_inj_{i}", value=int(existing.get("injuries", 0) or 0))
+                        acc_hazmat = st.selectbox("Hazmat Spill?", ["No", "Yes"], key=f"acc_haz_{i}", index=0 if existing.get("hazmat", "No") == "No" else 1)
+                        acc_description = st.text_area("Description", key=f"acc_desc_{i}", value=existing.get("description", ""))
                     accidents_input.append(
                         {
                             "date": acc_date,
@@ -551,27 +819,88 @@ def render_remaining_page(page: int) -> bool:
         st.markdown("#### Traffic Convictions / Violations")
         st.caption("Please list any moving violations or traffic convictions from the past 3 years. If you've had none, just select 'No'.")
 
-        has_violations = selectbox_with_placeholder("Any violations to report?", ["No", "Yes"], key="has_viol")
+        has_violations = selectbox_with_placeholder(
+            "Any violations to report?",
+            ["No", "Yes"],
+            current_value="Yes" if st.session_state.violations else "No",
+            key="has_viol",
+        )
         if has_violations == "Yes":
-            num_violations = st.number_input("Number of violations", min_value=1, max_value=10, value=1)
+            num_violations = st.number_input(
+                "Number of violations",
+                min_value=1,
+                max_value=10,
+                value=max(1, len(st.session_state.violations) if st.session_state.violations else 1),
+            )
             violations_input = []
             for i in range(int(num_violations)):
+                existing = st.session_state.violations[i] if i < len(st.session_state.violations) else {}
                 with st.expander(f"Violation #{i+1}"):
-                    vcol1, vcol2 = st.columns(2)
+                    vcol1, vcol2, vcol3 = st.columns(3)
                     with vcol1:
-                        viol_date = st.date_input("Date", key=f"viol_date_{i}")
-                        viol_location = st.text_input("Location", key=f"viol_loc_{i}")
+                        viol_date = st.date_input("Date", key=f"viol_date_{i}", value=_coerce_date(existing.get("date"), date.today()))
+                        viol_location = st.text_input("Violation State / Province", key=f"viol_loc_{i}", value=existing.get("location", ""))
                     with vcol2:
-                        viol_charge = st.text_input("Charge", key=f"viol_charge_{i}")
-                        viol_penalty = st.text_input("Penalty", key=f"viol_pen_{i}")
+                        viol_charge = st.text_input("Charge / Description", key=f"viol_charge_{i}", value=existing.get("charge", ""))
+                        viol_in_commercial_vehicle = selectbox_with_placeholder(
+                            "In Commercial Vehicle?",
+                            ["Yes", "No"],
+                            current_value=existing.get("in_commercial_vehicle"),
+                            key=f"viol_cmv_{i}",
+                        )
                     violations_input.append(
-                        {
-                            "date": viol_date,
-                            "location": viol_location,
-                            "charge": viol_charge,
-                            "penalty": viol_penalty,
-                        }
+                        {}
                     )
+                    with vcol3:
+                        viol_fined = selectbox_with_placeholder(
+                            "Fined?",
+                            ["Yes", "No"],
+                            current_value=existing.get("fined"),
+                            key=f"viol_fined_{i}",
+                        )
+                        viol_fine_amount = st.text_input(
+                            "Fine Amount",
+                            key=f"viol_fine_amount_{i}",
+                            value=existing.get("fine_amount", ""),
+                        )
+                    wcol1, wcol2, wcol3 = st.columns(3)
+                    with wcol1:
+                        viol_license_suspended = selectbox_with_placeholder(
+                            "License Suspended?",
+                            ["Yes", "No"],
+                            current_value=existing.get("license_suspended"),
+                            key=f"viol_suspended_{i}",
+                        )
+                    with wcol2:
+                        viol_license_revoked = selectbox_with_placeholder(
+                            "License Revoked?",
+                            ["Yes", "No"],
+                            current_value=existing.get("license_revoked"),
+                            key=f"viol_revoked_{i}",
+                        )
+                    with wcol3:
+                        viol_penalty = st.text_input(
+                            "Other Penalty / Outcome",
+                            key=f"viol_pen_{i}",
+                            value=existing.get("penalty", ""),
+                        )
+                    viol_comments = st.text_area(
+                        "Comments",
+                        key=f"viol_comments_{i}",
+                        value=existing.get("comments", ""),
+                    )
+                    violations_input[-1] = {
+                        "date": viol_date,
+                        "location": viol_location,
+                        "charge": viol_charge,
+                        "in_commercial_vehicle": viol_in_commercial_vehicle,
+                        "fined": viol_fined,
+                        "license_suspended": viol_license_suspended,
+                        "license_revoked": viol_license_revoked,
+                        "fine_amount": viol_fine_amount,
+                        "penalty": viol_penalty or viol_fine_amount,
+                        "comments": viol_comments,
+                    }
             st.session_state.violations = violations_input
         else:
             st.session_state.violations = []
@@ -598,6 +927,18 @@ def render_remaining_page(page: int) -> bool:
                     missing.append("DOT offense conviction question")
                 if disq_convicted == "Yes" and not disq_convicted_which:
                     missing.append("Which DOT offense(s) apply")
+                if not mvr_suspension_conviction:
+                    missing.append("MVR suspension/revocation question")
+                if not mvr_no_valid_license:
+                    missing.append("MVR valid license question")
+                if not mvr_alcohol_controlled_substance:
+                    missing.append("MVR alcohol/controlled substance question")
+                if not mvr_illegal_substance_on_duty:
+                    missing.append("MVR illegal substance on duty question")
+                if not mvr_reckless_driving:
+                    missing.append("MVR reckless/careless driving question")
+                if not mvr_any_dot_test_positive:
+                    missing.append("MVR any DOT drug/alcohol test question")
                 if not has_accidents:
                     missing.append("Accident history question")
                 if not has_violations:
@@ -616,6 +957,12 @@ def render_remaining_page(page: int) -> bool:
                         "disq_convicted": disq_convicted,
                         "disq_convicted_which": disq_convicted_which if disq_convicted == "Yes" else [],
                         "disq_convicted_details": disq_convicted_details if disq_convicted == "Yes" else "",
+                        "mvr_suspension_conviction": mvr_suspension_conviction,
+                        "mvr_no_valid_license": mvr_no_valid_license,
+                        "mvr_alcohol_controlled_substance": mvr_alcohol_controlled_substance,
+                        "mvr_illegal_substance_on_duty": mvr_illegal_substance_on_duty,
+                        "mvr_reckless_driving": mvr_reckless_driving,
+                        "mvr_any_dot_test_positive": mvr_any_dot_test_positive,
                     }
                 )
                 next_page()

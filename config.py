@@ -80,6 +80,7 @@ TRAILER_TYPES = [
     "Flatbed",
     "Reefer",
     "Tanker",
+    "Container",
     "Other",
 ]
 
@@ -106,6 +107,40 @@ US_STATES = [
 # Position types (independent contractor language)
 POSITION_TYPES = [
     "Owner Operator",
+]
+
+LICENSE_COUNTRIES = ["US", "Canada", "Mexico"]
+
+AREAS_DRIVEN_OPTIONS = [
+    "OTR",
+    "Regional",
+    "Local",
+    "Dedicated",
+    "Other",
+]
+
+TRUCK_TYPES = [
+    "Straight Truck",
+    "Day Cab",
+    "Sleeper",
+    "Tractor-Trailer",
+    "Box Truck",
+    "Container Chassis",
+    "Flatbed Tractor",
+    "Other",
+]
+
+DRIVING_EQUIPMENT_OPTIONS = [
+    "Dry Van",
+    "Reefer",
+    "Tanker",
+    "Flatbed",
+    "Container",
+    "Chassis",
+    "Box",
+    "Straight Trailer",
+    "Double Trailer",
+    "Other",
 ]
 
 OFFICE_LOCATIONS = [
