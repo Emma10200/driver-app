@@ -15,13 +15,12 @@ from pdf_generator import (
 )
 from runtime_context import get_active_company_profile, get_storage_namespace, is_test_mode_active
 from services.document_service import render_supporting_documents_section, sync_pending_uploads
-from services.draft_service import autosave_draft
 from services.error_log_service import log_application_error
 from services.notification_service import send_internal_submission_notification
 from services.submission_service import build_submission_artifacts, save_submission_bundle
 from state import prev_page, reset_application_state
 from submission_storage import get_submission_destination_summary
-from ui.common import show_missing_fields, show_user_error, summary_item
+from ui.common import render_save_draft_button, show_missing_fields, show_user_error, summary_item
 
 
 def _attempt_submission_notification() -> None:
@@ -188,24 +187,28 @@ def render_review_submit_page(submissions_dir: Path) -> None:
         value=st.session_state.form_data.get("review_confirm", False),
     )
 
+    def _prepare_review_draft_save() -> bool:
+        st.session_state.form_data["review_confirm"] = review_confirm
+        upload_result = sync_pending_uploads()
+        if not upload_result.get("ok"):
+            show_missing_fields(
+                upload_result.get("errors", []),
+                "Please fix the document upload issues before saving your draft:",
+            )
+            return False
+        return True
+
     bcol1, bcol2, bcol3 = st.columns(3)
     with bcol1:
         if st.button("← Back", key="p12_back", use_container_width=True):
             prev_page()
             st.rerun()
     with bcol2:
-        if st.button("💾 Save Draft Securely", key="p12_save_draft", use_container_width=True):
-            st.session_state.form_data["review_confirm"] = review_confirm
-            upload_result = sync_pending_uploads()
-            if not upload_result.get("ok"):
-                show_missing_fields(upload_result.get("errors", []), "Please fix the document upload issues before saving your draft:")
-                return
-
-            draft_result = autosave_draft()
-            if draft_result and draft_result.get("ok"):
-                st.success(f"Draft saved. Resume later with code `{st.session_state.draft_id}`.")
-            else:
-                st.warning("The form is still open, but the secure draft save did not complete.")
+        render_save_draft_button(
+            "p12_save_draft",
+            label="💾 Save Draft",
+            on_before_save=_prepare_review_draft_save,
+        )
     with bcol3:
         if st.button("✅ Submit Application", key="p12_submit", use_container_width=True, type="primary"):
             if not review_confirm:

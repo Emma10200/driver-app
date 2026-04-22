@@ -7,7 +7,7 @@ import subprocess
 from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -469,13 +469,20 @@ def _sync_browser_autofill_via_js() -> None:
     )
 
 
-def render_save_draft_button(button_key: str, label: str = "💾 Save Draft") -> None:
+def render_save_draft_button(
+    button_key: str,
+    label: str = "💾 Save Draft",
+    *,
+    on_before_save: Callable[[], bool] | None = None,
+) -> None:
     """Render the save-draft button plus inline post-save panel."""
     active_key = st.session_state.get("_save_draft_panel_for_key")
     if active_key and active_key != button_key:
         st.session_state["_save_draft_panel_for_key"] = None
 
     if st.button(label, key=button_key, use_container_width=True):
+        if on_before_save and not on_before_save():
+            return
         result = autosave_draft()
         if result and result.get("ok"):
             st.session_state["_save_draft_panel_for_key"] = button_key
