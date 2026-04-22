@@ -564,27 +564,27 @@ def render_remaining_page(page: int) -> bool:
 
         st.markdown("---")
         st.subheader("Personal References")
-        st.markdown("Please provide at least two personal references.")
+        st.markdown("Personal references are optional. Add up to two if you'd like.")
         existing_references = _coerce_reference_entries()
         references: list[dict[str, str]] = []
         for index in range(2):
             existing = existing_references[index] if index < len(existing_references) else _blank_reference()
-            with st.expander(f"Reference #{index + 1}", expanded=True):
+            with st.expander(f"Reference #{index + 1} (optional)", expanded=False):
                 rcol1, rcol2 = st.columns(2)
                 with rcol1:
                     ref_name = st.text_input(
-                        "Name *",
+                        "Name",
                         key=f"ref_name_{index}",
                         value=existing.get("name", ""),
                     )
                     ref_phone = st.text_input(
-                        "Phone *",
+                        "Phone",
                         key=f"ref_phone_{index}",
                         value=existing.get("phone", ""),
                     )
                 with rcol2:
                     ref_relationship = st.text_input(
-                        "Relationship *",
+                        "Relationship",
                         key=f"ref_relationship_{index}",
                         value=existing.get("relationship", ""),
                     )
@@ -627,13 +627,6 @@ def render_remaining_page(page: int) -> bool:
                     missing.append("Did you graduate? question")
                 if attended_trucking_school == "Yes" and not ts_fmcsa_subject:
                     missing.append("FMCSA trucking school question")
-                for index, reference in enumerate(references, start=1):
-                    if not reference["name"]:
-                        missing.append(f"Reference #{index} name")
-                    if not reference["phone"]:
-                        missing.append(f"Reference #{index} phone")
-                    if not reference["relationship"]:
-                        missing.append(f"Reference #{index} relationship")
 
                 if missing:
                     show_missing_fields(missing, "Please complete the required education fields:")
