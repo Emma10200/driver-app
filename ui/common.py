@@ -22,10 +22,41 @@ from services.error_log_service import log_application_error
 
 BASE_STYLES = """
 <style>
+    /* Prevent iOS Safari from auto-zooming when a field is focused. */
+    div[data-testid="stTextInput"] input,
+    div[data-testid="stTextArea"] textarea,
+    div[data-testid="stDateInput"] input,
+    div[data-testid="stNumberInput"] input,
+    div[data-testid="stSelectbox"] div[role="combobox"],
+    div[data-testid="stMultiSelect"] div[role="combobox"] {
+        font-size: 16px !important;
+    }
+    /* Touch-friendly primary buttons on mobile. */
+    .stButton > button {
+        min-height: 2.75rem;
+    }
+    /* Hide Streamlit framework chrome that looks out of place in a
+       branded portal. The header is intentionally left visible so the
+       sidebar collapse control continues to work. */
+    #MainMenu { visibility: hidden; }
+    footer { visibility: hidden; }
     /* Red asterisk on required labels */
     div[data-testid="stTextInput"] label p:has(~ *),
     div[data-testid="stSelectbox"] label p:has(~ *) {
         font-weight: 600;
+    }
+    .missing-field-wrapper {
+        border: 2px solid #ff4b4b;
+        background: rgba(255, 75, 75, 0.06);
+        border-radius: 8px;
+        padding: 0.35rem 0.5rem 0.15rem;
+        margin-bottom: 0.35rem;
+    }
+    .missing-field-note {
+        color: #ff4b4b;
+        font-weight: 600;
+        font-size: 0.78rem;
+        margin: 0.2rem 0 0.15rem;
     }
     .missing-field {
         background: rgba(255, 75, 75, 0.1);
@@ -358,6 +389,12 @@ def render_app_shell() -> None:
         contact_parts.append(f"Email: {company.email}")
 
     st.markdown(BASE_STYLES, unsafe_allow_html=True)
+    brand_color = (company.brand_color or "").strip()
+    if brand_color:
+        st.markdown(
+            f"<style>:root {{ --primary-color: {brand_color}; }}</style>",
+            unsafe_allow_html=True,
+        )
     render_draft_sidebar()
     _sync_browser_autofill_via_js()
     st.markdown(
