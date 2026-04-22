@@ -34,6 +34,9 @@ def normalize_company_slug(value: str | None) -> str:
         "sidexpress": "side-xpress",
         "sideexpress": "side-xpress",
         "side-xpress-inc": "side-xpress",
+        "xpress": "side-xpress",
+        "xpress-trans": "side-xpress",
+        "xpresstrans": "side-xpress",
     }
     slug = aliases.get(slug, slug)
     return slug if slug in COMPANY_PROFILES else DEFAULT_COMPANY_SLUG
@@ -50,6 +53,9 @@ def _try_resolve_known_slug(value: str | None) -> str | None:
         "sidexpress": "side-xpress",
         "sideexpress": "side-xpress",
         "side-xpress-inc": "side-xpress",
+        "xpress": "side-xpress",
+        "xpress-trans": "side-xpress",
+        "xpresstrans": "side-xpress",
     }
     candidate = aliases.get(raw, raw)
     return candidate if candidate in COMPANY_PROFILES else None
