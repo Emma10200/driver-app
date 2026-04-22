@@ -103,7 +103,6 @@ def _normalize_state_input(value: str) -> str:
 def render_personal_information_page() -> None:
     _ensure_ssn_widget_state()
     company = get_active_company_profile()
-    current_state_value = _normalize_state_input(st.session_state.form_data.get("state", ""))
 
     render_eeo_notice()
     st.subheader("Personal Information")
@@ -135,11 +134,10 @@ def render_personal_information_page() -> None:
         mark_missing("city")
         city = st.text_input("City *", value=st.session_state.form_data.get("city", ""))
         mark_missing("state")
-        state_input = selectbox_with_placeholder(
+        state_input = st.text_input(
             "State *",
-            US_STATES,
-            current_value=current_state_value,
-            help="Select the 2-letter state abbreviation.",
+            value=st.session_state.form_data.get("state", ""),
+            help="Enter the 2-letter abbreviation or full state name.",
         )
         mark_missing("zip_code")
         zip_code = st.text_input("Zip Code *", value=st.session_state.form_data.get("zip_code", ""))
@@ -235,7 +233,7 @@ def render_personal_information_page() -> None:
             missing.append(("address", "Current Address"))
         if not city:
             missing.append(("city", "City"))
-        if not state:
+        if not state and not str(state_input or "").strip():
             missing.append(("state", "State"))
         if not zip_code:
             missing.append(("zip_code", "Zip Code"))
@@ -257,6 +255,15 @@ def render_personal_information_page() -> None:
                 code="validation_ssn_length",
                 severity="warning",
                 extra={"ssn_digits_length": len(ssn_digits)},
+            )
+            return
+
+        if not state:
+            show_user_error(
+                "Please enter a valid U.S. state abbreviation or full state name.",
+                code="validation_state_invalid",
+                severity="warning",
+                extra={"state_input": state_input},
             )
             return
 

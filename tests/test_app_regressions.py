@@ -35,7 +35,7 @@ def test_page_one_next_advances_without_ssn_exception(monkeypatch, tmp_path):
     _widget_by_label(at.text_input, "Social Security Number *").set_value("123456789")
     _widget_by_label(at.text_input, "Current Address *").set_value("123 Main St")
     _widget_by_label(at.text_input, "City *").set_value("Fontana")
-    _widget_by_label(at.selectbox, "State *").set_value("CA")
+    _widget_by_label(at.text_input, "State *").set_value("California")
     _widget_by_label(at.text_input, "Zip Code *").set_value("92335")
     _widget_by_label(at.text_input, "Primary Phone *").set_value("5551234567")
     _widget_by_label(at.text_input, "Cell Phone / Text Number").set_value("5551239999")
