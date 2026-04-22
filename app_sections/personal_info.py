@@ -201,13 +201,11 @@ def render_personal_information_page() -> None:
 
     st.markdown("---")
 
-    mark_missing("emergency_name")
-    emergency_name = st.text_input("Emergency Contact Name *", value=st.session_state.form_data.get("emergency_name", ""))
+    emergency_name = st.text_input("Emergency Contact Name", value=st.session_state.form_data.get("emergency_name", ""))
     ecol1, ecol2 = st.columns(2)
     with ecol1:
-        mark_missing("emergency_phone")
         emergency_phone = st.text_input(
-            "Emergency Contact Phone *",
+            "Emergency Contact Phone",
             value=st.session_state.form_data.get("emergency_phone", ""),
         )
     with ecol2:
@@ -245,10 +243,6 @@ def render_personal_information_page() -> None:
             missing.append(("primary_phone", "Primary Phone"))
         if not email:
             missing.append(("email", "Email Address"))
-        if not emergency_name:
-            missing.append(("emergency_name", "Emergency Contact Name"))
-        if not emergency_phone:
-            missing.append(("emergency_phone", "Emergency Contact Phone"))
 
         if missing:
             record_missing_fields(missing, "The following required fields are missing:")
