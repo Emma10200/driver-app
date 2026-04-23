@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date, datetime
 from pathlib import Path
 
+import html
+
 import streamlit as st
 
 from pdf_generator import (
@@ -437,7 +439,8 @@ def _render_submission_complete_body(submissions_dir: Path) -> None:
         st.subheader("Saved Supporting Documents")
         for document in st.session_state.get("uploaded_documents", []):
             size_kb = max(1, int(document.get("size_bytes", 0) / 1024))
-            st.markdown(f"- `{document.get('file_name', 'document')}` ({size_kb} KB)")
+            safe_file_name = html.escape(document.get('file_name', 'document').replace("`", "_"))
+            st.markdown(f"- `{safe_file_name}` ({size_kb} KB)")
 
     st.markdown("---")
     with st.expander("Need to start a new application?"):
