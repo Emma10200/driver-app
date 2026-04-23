@@ -1,0 +1,66 @@
+diff --git a/tests/test_security.py b/tests/test_security.py
+index ff367f2..74506b8 100644
+--- a/tests/test_security.py
++++ b/tests/test_security.py
+@@ -72,3 +72,31 @@ def test_company_picker_escaping(monkeypatch):
+     assert picker_markdown is not None
+     assert payload not in picker_markdown
+     assert escaped_payload in picker_markdown
++
++def test_brand_color_escaping(monkeypatch):
++    captured_markdown = []
++    st.markdown.side_effect = lambda content, unsafe_allow_html=False: captured_markdown.append(content)
++
++    payload = "</style><script>alert('xss')</script>"
++
++    fake_company = SimpleNamespace(
++        name="test",
++        address="test",
++        city_state_zip="test",
++        phone="test",
++        email="test",
++        brand_color=payload,
++        slug="test-slug"
++    )
++
++    monkeypatch.setattr(common, "get_active_company_profile", lambda: fake_company)
++    monkeypatch.setattr(common, "is_test_mode_active", lambda: False)
++    monkeypatch.setattr(common, "_sync_browser_autofill_via_js", lambda: None)
++    monkeypatch.setattr(common, "render_missing_fields_banner", lambda: None)
++    monkeypatch.setattr(common, "st", st)
++
++    common.render_app_shell()
++
++    # Check that the invalid brand color was skipped
++    injected = any(payload in markdown for markdown in captured_markdown)
++    assert not injected, "Brand color XSS payload was injected into markdown!"
+diff --git a/ui/common.py b/ui/common.py
+index 9b2312b..000a8d2 100644
+--- a/ui/common.py
++++ b/ui/common.py
+@@ -4,6 +4,7 @@ from __future__ import annotations
+
+ import html
+ import os
++import re
+ import subprocess
+ from datetime import date, datetime
+ from functools import lru_cache
+@@ -650,10 +651,13 @@ def render_app_shell() -> None:
+     st.markdown(BASE_STYLES, unsafe_allow_html=True)
+     brand_color = (company.brand_color or "").strip()
+     if brand_color:
+-        st.markdown(
+-            f"<style>:root {{ --primary-color: {brand_color}; }}</style>",
+-            unsafe_allow_html=True,
+-        )
++        # Validate brand_color to prevent XSS via HTML injection
++        # Allows hex codes, rgb/rgba, hsl/hsla, and basic color names
++        if re.match(r"^(#[0-9a-fA-F]{3,8}|rgba?\([\d\s,\.%]+\)|hsla?\([\d\s,\.%]+\)|[a-zA-Z]+)$", brand_color):
++            st.markdown(
++                f"<style>:root {{ --primary-color: {brand_color}; }}</style>",
++                unsafe_allow_html=True,
++            )
+     if st.session_state.get("admin_tools_enabled"):
+         with st.sidebar:
+             render_admin_test_tools()

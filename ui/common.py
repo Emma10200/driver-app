@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import os
+import re
 import subprocess
 from datetime import date, datetime
 from functools import lru_cache
@@ -650,10 +651,13 @@ def render_app_shell() -> None:
     st.markdown(BASE_STYLES, unsafe_allow_html=True)
     brand_color = (company.brand_color or "").strip()
     if brand_color:
-        st.markdown(
-            f"<style>:root {{ --primary-color: {brand_color}; }}</style>",
-            unsafe_allow_html=True,
-        )
+        # Validate brand_color to prevent XSS via HTML injection
+        # Allows hex codes, rgb/rgba, hsl/hsla, and basic color names
+        if re.match(r"^(#[0-9a-fA-F]{3,8}|rgba?\([\d\s,\.%]+\)|hsla?\([\d\s,\.%]+\)|[a-zA-Z]+)$", brand_color):
+            st.markdown(
+                f"<style>:root {{ --primary-color: {brand_color}; }}</style>",
+                unsafe_allow_html=True,
+            )
     if st.session_state.get("admin_tools_enabled"):
         with st.sidebar:
             render_admin_test_tools()

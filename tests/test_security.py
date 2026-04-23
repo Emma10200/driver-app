@@ -72,3 +72,31 @@ def test_company_picker_escaping(monkeypatch):
     assert picker_markdown is not None
     assert payload not in picker_markdown
     assert escaped_payload in picker_markdown
+
+def test_brand_color_escaping(monkeypatch):
+    captured_markdown = []
+    st.markdown.side_effect = lambda content, unsafe_allow_html=False: captured_markdown.append(content)
+
+    payload = "</style><script>alert('xss')</script>"
+
+    fake_company = SimpleNamespace(
+        name="test",
+        address="test",
+        city_state_zip="test",
+        phone="test",
+        email="test",
+        brand_color=payload,
+        slug="test-slug"
+    )
+
+    monkeypatch.setattr(common, "get_active_company_profile", lambda: fake_company)
+    monkeypatch.setattr(common, "is_test_mode_active", lambda: False)
+    monkeypatch.setattr(common, "_sync_browser_autofill_via_js", lambda: None)
+    monkeypatch.setattr(common, "render_missing_fields_banner", lambda: None)
+    monkeypatch.setattr(common, "st", st)
+
+    common.render_app_shell()
+
+    # Check that the invalid brand color was skipped
+    injected = any(payload in markdown for markdown in captured_markdown)
+    assert not injected, "Brand color XSS payload was injected into markdown!"
