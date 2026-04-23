@@ -1,14 +1,3 @@
-import sys
-from unittest.mock import MagicMock
-
-# Mock dependencies of app_sections.remaining_pages
-sys.modules['streamlit'] = MagicMock()
-sys.modules['config'] = MagicMock()
-sys.modules['runtime_context'] = MagicMock()
-sys.modules['services.draft_service'] = MagicMock()
-sys.modules['state'] = MagicMock()
-sys.modules['ui.common'] = MagicMock()
-
 from datetime import date, datetime
 import pytest
 from app_sections.remaining_pages import _coerce_date
