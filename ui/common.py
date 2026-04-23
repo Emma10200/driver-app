@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import os
 import subprocess
 from datetime import date, datetime
@@ -636,12 +637,15 @@ def selectbox_with_placeholder(
 
 def render_app_shell() -> None:
     company = get_active_company_profile()
-    location_parts = [part for part in [company.address, company.city_state_zip] if part]
+    company_name = html.escape(company.name)
+    location_parts = [
+        html.escape(part) for part in [company.address, company.city_state_zip] if part
+    ]
     contact_parts: list[str] = []
     if company.phone:
-        contact_parts.append(f"Phone: {company.phone}")
+        contact_parts.append(f"Phone: {html.escape(company.phone)}")
     if company.email:
-        contact_parts.append(f"Email: {company.email}")
+        contact_parts.append(f"Email: {html.escape(company.email)}")
 
     st.markdown(BASE_STYLES, unsafe_allow_html=True)
     brand_color = (company.brand_color or "").strip()
@@ -657,7 +661,7 @@ def render_app_shell() -> None:
     st.markdown(
         f"""
 <div class="app-header">
-    <h1>{company.name}</h1>
+    <h1>{company_name}</h1>
     {f'<p>{" | ".join(location_parts)}</p>' if location_parts else ''}
     {f'<p>{" | ".join(contact_parts)}</p>' if contact_parts else ''}
     <h3>Driver Application</h3>
