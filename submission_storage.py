@@ -10,14 +10,17 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
 try:
     from dotenv import load_dotenv
 except ModuleNotFoundError:  # pragma: no cover - optional on hosted environments
+
     def load_dotenv(*_args, **_kwargs):
         return False
+
 
 try:
     import streamlit as st
@@ -40,7 +43,9 @@ UPLOADS_DIRNAME = "uploads"
 
 
 def _join_relative_prefix(*parts: str | None) -> str:
-    return "/".join(str(part).strip("/") for part in parts if str(part or "").strip("/"))
+    return "/".join(
+        str(part).strip("/") for part in parts if str(part or "").strip("/")
+    )
 
 
 def _slugify(value: str) -> str:
@@ -102,15 +107,21 @@ def get_runtime_secret(name: str, default: str | None = None) -> str | None:
 
 
 def _get_backend() -> str:
-    backend = (_get_secret("SUBMISSION_STORAGE_BACKEND", "auto") or "auto").strip().lower()
+    backend = (
+        (_get_secret("SUBMISSION_STORAGE_BACKEND", "auto") or "auto").strip().lower()
+    )
     return backend if backend in VALID_BACKENDS else "auto"
 
 
 def _get_supabase_settings() -> dict[str, str]:
     return {
         "url": (_get_secret("SUPABASE_URL", "") or "").strip(),
-        "key": (_get_secret("SUPABASE_SERVICE_KEY") or _get_secret("SUPABASE_KEY", "") or "").strip(),
-        "bucket": (_get_secret("SUPABASE_BUCKET", DEFAULT_BUCKET) or DEFAULT_BUCKET).strip(),
+        "key": (
+            _get_secret("SUPABASE_SERVICE_KEY") or _get_secret("SUPABASE_KEY", "") or ""
+        ).strip(),
+        "bucket": (
+            _get_secret("SUPABASE_BUCKET", DEFAULT_BUCKET) or DEFAULT_BUCKET
+        ).strip(),
         "table": (_get_secret("SUPABASE_TABLE", "") or "").strip(),
     }
 
@@ -123,7 +134,9 @@ def _supabase_enabled() -> bool:
 def _build_supabase_headers() -> dict[str, str]:
     settings = _get_supabase_settings()
     if not settings["url"] or not settings["key"]:
-        raise RuntimeError("Supabase storage is selected but SUPABASE_URL / SUPABASE_SERVICE_KEY is missing.")
+        raise RuntimeError(
+            "Supabase storage is selected but SUPABASE_URL / SUPABASE_SERVICE_KEY is missing."
+        )
 
     return {
         "apikey": settings["key"],
@@ -149,6 +162,30 @@ def _save_file_map_locally(
     }
 
 
+def _upload_single_file_to_supabase(
+    base_url: str,
+    bucket: str,
+    remote_prefix: str,
+    file_name: str,
+    content: bytes,
+    content_type: str,
+    headers: dict[str, str],
+) -> None:
+    remote_path = f"{remote_prefix}/{file_name}".strip("/")
+    upload_url = f"{base_url}/storage/v1/object/{bucket}/{quote(remote_path)}"
+    response = requests.post(
+        upload_url,
+        headers={
+            **headers,
+            "Content-Type": content_type,
+            "x-upsert": "true",
+        },
+        data=io.BytesIO(content).getvalue(),
+        timeout=60,
+    )
+    response.raise_for_status()
+
+
 def _save_file_map_to_supabase(
     relative_prefix: str,
     file_map: dict[str, tuple[bytes, str]],
@@ -158,20 +195,22 @@ def _save_file_map_to_supabase(
     bucket = settings["bucket"] or DEFAULT_BUCKET
     headers = _build_supabase_headers()
 
-    for file_name, (content, content_type) in file_map.items():
-        remote_path = f"{relative_prefix}/{file_name}".strip("/")
-        upload_url = f"{base_url}/storage/v1/object/{bucket}/{quote(remote_path)}"
-        response = requests.post(
-            upload_url,
-            headers={
-                **headers,
-                "Content-Type": content_type,
-                "x-upsert": "true",
-            },
-            data=io.BytesIO(content).getvalue(),
-            timeout=60,
-        )
-        response.raise_for_status()
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [
+            executor.submit(
+                _upload_single_file_to_supabase,
+                base_url,
+                bucket,
+                relative_prefix,
+                file_name,
+                content,
+                content_type,
+                headers,
+            )
+            for file_name, (content, content_type) in file_map.items()
+        ]
+        for future in as_completed(futures):
+            future.result()  # This will raise any exception caught during upload
 
     return {
         "backend": "supabase",
@@ -201,7 +240,9 @@ def _save_file_map(
     if backend == "supabase":
         return _save_file_map_to_supabase(supabase_relative_prefix, file_map)
 
-    local_result = _save_file_map_locally(local_base_dir, local_relative_prefix, file_map)
+    local_result = _save_file_map_locally(
+        local_base_dir, local_relative_prefix, file_map
+    )
     supabase_result = _save_file_map_to_supabase(supabase_relative_prefix, file_map)
     warnings = []
     warnings.extend(local_result.get("warnings", []))
@@ -228,7 +269,9 @@ def _read_supabase_bytes(relative_path: str) -> bytes:
     download_url = f"{settings['url'].rstrip('/')}/storage/v1/object/{bucket}/{quote(relative_path)}"
     response = requests.get(download_url, headers=headers, timeout=60)
     if response.status_code == 404:
-        raise FileNotFoundError(f"No Supabase file found at `{bucket}/{relative_path}`.")
+        raise FileNotFoundError(
+            f"No Supabase file found at `{bucket}/{relative_path}`."
+        )
     response.raise_for_status()
     return response.content
 
@@ -237,10 +280,14 @@ def _draft_relative_prefix(draft_id: str, storage_namespace: str = "") -> str:
     return _join_relative_prefix(storage_namespace, DRAFTS_DIRNAME, draft_id)
 
 
-def get_submission_destination_summary(local_base_dir: Path, storage_namespace: str = "") -> str:
+def get_submission_destination_summary(
+    local_base_dir: Path, storage_namespace: str = ""
+) -> str:
     backend = _get_backend()
     settings = _get_supabase_settings()
-    local_target = local_base_dir / storage_namespace if storage_namespace else local_base_dir
+    local_target = (
+        local_base_dir / storage_namespace if storage_namespace else local_base_dir
+    )
     bucket_target = _join_relative_prefix(settings["bucket"], storage_namespace)
 
     if backend == "local":
@@ -255,9 +302,13 @@ def get_submission_destination_summary(local_base_dir: Path, storage_namespace: 
 
 
 def _build_submission_key(form_data: dict[str, Any]) -> tuple[str, str]:
-    submission_timestamp = form_data.get("final_submission_timestamp", datetime.now().isoformat())
+    submission_timestamp = form_data.get(
+        "final_submission_timestamp", datetime.now().isoformat()
+    )
     timestamp = datetime.fromisoformat(submission_timestamp).strftime("%Y%m%d_%H%M%S")
-    applicant_name = f"{form_data.get('last_name', 'driver')}_{form_data.get('first_name', '')}"
+    applicant_name = (
+        f"{form_data.get('last_name', 'driver')}_{form_data.get('first_name', '')}"
+    )
     submission_key = f"{timestamp}_{_slugify(applicant_name)}"
     return submission_timestamp, submission_key
 
@@ -283,7 +334,9 @@ def _build_payload(
     }
 
 
-def _build_file_map(payload: dict[str, Any], artifacts: dict[str, bytes]) -> dict[str, tuple[bytes, str]]:
+def _build_file_map(
+    payload: dict[str, Any], artifacts: dict[str, bytes]
+) -> dict[str, tuple[bytes, str]]:
     file_map = {
         "submission.json": (
             json.dumps(payload, indent=2, default=_json_default).encode("utf-8"),
@@ -307,7 +360,11 @@ def _save_locally(
     file_map: dict[str, tuple[bytes, str]],
     storage_namespace: str = "",
 ) -> dict[str, Any]:
-    submission_dir = local_base_dir / storage_namespace / submission_key if storage_namespace else local_base_dir / submission_key
+    submission_dir = (
+        local_base_dir / storage_namespace / submission_key
+        if storage_namespace
+        else local_base_dir / submission_key
+    )
     submission_dir.mkdir(parents=True, exist_ok=True)
 
     for file_name, (content, _) in file_map.items():
@@ -330,23 +387,27 @@ def _save_to_supabase(
     settings = _get_supabase_settings()
     base_url = settings["url"].rstrip("/")
     bucket = settings["bucket"] or DEFAULT_BUCKET
-    remote_prefix = _join_relative_prefix(storage_namespace, "submissions", submission_key)
+    remote_prefix = _join_relative_prefix(
+        storage_namespace, "submissions", submission_key
+    )
     headers = _build_supabase_headers()
 
-    for file_name, (content, content_type) in file_map.items():
-        remote_path = f"{remote_prefix}/{file_name}"
-        upload_url = f"{base_url}/storage/v1/object/{bucket}/{quote(remote_path)}"
-        response = requests.post(
-            upload_url,
-            headers={
-                **headers,
-                "Content-Type": content_type,
-                "x-upsert": "true",
-            },
-            data=io.BytesIO(content).getvalue(),
-            timeout=60,
-        )
-        response.raise_for_status()
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [
+            executor.submit(
+                _upload_single_file_to_supabase,
+                base_url,
+                bucket,
+                remote_prefix,
+                file_name,
+                content,
+                content_type,
+                headers,
+            )
+            for file_name, (content, content_type) in file_map.items()
+        ]
+        for future in as_completed(futures):
+            future.result()  # Raise exception if upload failed
 
     warnings: list[str] = []
     if settings["table"]:
@@ -378,8 +439,12 @@ def _save_to_supabase(
                 timeout=60,
             )
             response.raise_for_status()
-        except requests.RequestException as exc:  # pragma: no cover - depends on user schema
-            warnings.append(f"Supabase file upload worked, but metadata table insert failed: {exc}")
+        except (
+            requests.RequestException
+        ) as exc:  # pragma: no cover - depends on user schema
+            warnings.append(
+                f"Supabase file upload worked, but metadata table insert failed: {exc}"
+            )
 
     return {
         "backend": "supabase",
@@ -402,7 +467,9 @@ def save_submission_bundle(
     uploaded_documents: list[dict[str, Any]] | None = None,
     storage_namespace: str = "",
 ) -> dict[str, Any]:
-    payload = _build_payload(form_data, employers, licenses, accidents, violations, uploaded_documents)
+    payload = _build_payload(
+        form_data, employers, licenses, accidents, violations, uploaded_documents
+    )
     file_map = _build_file_map(payload, artifacts)
     submission_key = payload["submission_key"]
     backend = _get_backend()
@@ -410,17 +477,27 @@ def save_submission_bundle(
 
     if backend == "auto":
         if supabase_ready:
-            return _save_to_supabase(payload, submission_key, file_map, storage_namespace)
-        return _save_locally(local_base_dir, submission_key, file_map, storage_namespace)
+            return _save_to_supabase(
+                payload, submission_key, file_map, storage_namespace
+            )
+        return _save_locally(
+            local_base_dir, submission_key, file_map, storage_namespace
+        )
 
     if backend == "local":
-        return _save_locally(local_base_dir, submission_key, file_map, storage_namespace)
+        return _save_locally(
+            local_base_dir, submission_key, file_map, storage_namespace
+        )
 
     if backend == "supabase":
         return _save_to_supabase(payload, submission_key, file_map, storage_namespace)
 
-    local_result = _save_locally(local_base_dir, submission_key, file_map, storage_namespace)
-    supabase_result = _save_to_supabase(payload, submission_key, file_map, storage_namespace)
+    local_result = _save_locally(
+        local_base_dir, submission_key, file_map, storage_namespace
+    )
+    supabase_result = _save_to_supabase(
+        payload, submission_key, file_map, storage_namespace
+    )
     warnings = []
     warnings.extend(local_result.get("warnings", []))
     warnings.extend(supabase_result.get("warnings", []))
@@ -457,7 +534,9 @@ def save_draft_bundle(
     return result
 
 
-def load_draft_bundle(*, draft_id: str, local_base_dir: Path, storage_namespace: str = "") -> dict[str, Any]:
+def load_draft_bundle(
+    *, draft_id: str, local_base_dir: Path, storage_namespace: str = ""
+) -> dict[str, Any]:
     draft_id = draft_id.strip()
     if not draft_id:
         raise ValueError("Draft ID is required.")
@@ -473,7 +552,9 @@ def load_draft_bundle(*, draft_id: str, local_base_dir: Path, storage_namespace:
     elif backend == "both":
         read_order = ["supabase", "local"]
     else:
-        read_order = ["supabase", "local"] if _supabase_enabled() else ["local", "supabase"]
+        read_order = (
+            ["supabase", "local"] if _supabase_enabled() else ["local", "supabase"]
+        )
 
     last_error: Exception | None = None
     for target in read_order:
@@ -508,24 +589,36 @@ def save_supporting_documents(
             "warnings": [],
         }
 
-    relative_prefix = _join_relative_prefix(_draft_relative_prefix(draft_id, storage_namespace), UPLOADS_DIRNAME)
+    relative_prefix = _join_relative_prefix(
+        _draft_relative_prefix(draft_id, storage_namespace), UPLOADS_DIRNAME
+    )
     file_map: dict[str, tuple[bytes, str]] = {}
     metadata: list[dict[str, Any]] = []
 
     for index, document in enumerate(documents, start=1):
-        file_name = str(document.get("file_name") or f"document-{index}").strip() or f"document-{index}"
+        file_name = (
+            str(document.get("file_name") or f"document-{index}").strip()
+            or f"document-{index}"
+        )
         content = document.get("content", b"")
         content_bytes = content if isinstance(content, bytes) else bytes(content)
         content_digest = str(document.get("content_digest") or "")
         suffix = Path(file_name).suffix
         base_name = Path(file_name).stem or f"document-{index}"
-        stored_name = f"{_slugify(base_name)}-{content_digest[:12] or index}{suffix.lower()}"
-        file_map[stored_name] = (content_bytes, str(document.get("content_type") or "application/octet-stream"))
+        stored_name = (
+            f"{_slugify(base_name)}-{content_digest[:12] or index}{suffix.lower()}"
+        )
+        file_map[stored_name] = (
+            content_bytes,
+            str(document.get("content_type") or "application/octet-stream"),
+        )
         metadata.append(
             {
                 "file_name": file_name,
                 "stored_name": stored_name,
-                "content_type": str(document.get("content_type") or "application/octet-stream"),
+                "content_type": str(
+                    document.get("content_type") or "application/octet-stream"
+                ),
                 "size_bytes": int(document.get("size_bytes") or len(content_bytes)),
                 "content_digest": content_digest,
                 "storage_path": f"{relative_prefix}/{stored_name}",
