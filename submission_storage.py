@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import io
 import json
 import os
@@ -149,6 +150,29 @@ def _save_file_map_locally(
     }
 
 
+
+def _upload_single_file(
+    base_url: str,
+    bucket: str,
+    remote_path: str,
+    content: bytes,
+    content_type: str,
+    headers: dict[str, str],
+) -> None:
+    upload_url = f"{base_url}/storage/v1/object/{bucket}/{quote(remote_path)}"
+    response = requests.post(
+        upload_url,
+        headers={
+            **headers,
+            "Content-Type": content_type,
+            "x-upsert": "true",
+        },
+        data=io.BytesIO(content).getvalue(),
+        timeout=60,
+    )
+    response.raise_for_status()
+
+
 def _save_file_map_to_supabase(
     relative_prefix: str,
     file_map: dict[str, tuple[bytes, str]],
@@ -158,20 +182,23 @@ def _save_file_map_to_supabase(
     bucket = settings["bucket"] or DEFAULT_BUCKET
     headers = _build_supabase_headers()
 
-    for file_name, (content, content_type) in file_map.items():
-        remote_path = f"{relative_prefix}/{file_name}".strip("/")
-        upload_url = f"{base_url}/storage/v1/object/{bucket}/{quote(remote_path)}"
-        response = requests.post(
-            upload_url,
-            headers={
-                **headers,
-                "Content-Type": content_type,
-                "x-upsert": "true",
-            },
-            data=io.BytesIO(content).getvalue(),
-            timeout=60,
-        )
-        response.raise_for_status()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = []
+        for file_name, (content, content_type) in file_map.items():
+            remote_path = f"{relative_prefix}/{file_name}".strip("/")
+            futures.append(
+                executor.submit(
+                    _upload_single_file,
+                    base_url,
+                    bucket,
+                    remote_path,
+                    content,
+                    content_type,
+                    headers,
+                )
+            )
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
 
     return {
         "backend": "supabase",
@@ -333,20 +360,23 @@ def _save_to_supabase(
     remote_prefix = _join_relative_prefix(storage_namespace, "submissions", submission_key)
     headers = _build_supabase_headers()
 
-    for file_name, (content, content_type) in file_map.items():
-        remote_path = f"{remote_prefix}/{file_name}"
-        upload_url = f"{base_url}/storage/v1/object/{bucket}/{quote(remote_path)}"
-        response = requests.post(
-            upload_url,
-            headers={
-                **headers,
-                "Content-Type": content_type,
-                "x-upsert": "true",
-            },
-            data=io.BytesIO(content).getvalue(),
-            timeout=60,
-        )
-        response.raise_for_status()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = []
+        for file_name, (content, content_type) in file_map.items():
+            remote_path = f"{remote_prefix}/{file_name}"
+            futures.append(
+                executor.submit(
+                    _upload_single_file,
+                    base_url,
+                    bucket,
+                    remote_path,
+                    content,
+                    content_type,
+                    headers,
+                )
+            )
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
 
     warnings: list[str] = []
     if settings["table"]:
