@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from functools import lru_cache
 import requests
 
 try:
@@ -84,6 +85,7 @@ def _get_streamlit_secret(name: str) -> str | None:
     return None
 
 
+@lru_cache(maxsize=128)
 def _get_secret(name: str, default: str | None = None) -> str | None:
     streamlit_value = _get_streamlit_secret(name)
     if streamlit_value:
