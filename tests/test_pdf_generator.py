@@ -141,7 +141,6 @@ def test_generate_application_pdf_includes_aligned_credentials_and_disclosures(m
     licenses = [
         {
             "number": "A1234567",
-            "authority": "California DMV",
             "state": "CA",
             "country": "US",
             "class": "Class A",
@@ -227,7 +226,6 @@ def test_generate_application_pdf_includes_aligned_credentials_and_disclosures(m
             "Dry Van",
         "TWIC Card:",
         "TWIC Expiration:",
-        "Licensing Authority:",
         "Pay Range:",
         "Reference #1:",
         "Motor Vehicle Record",
