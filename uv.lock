@@ -659,6 +659,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "fpdf2" },
     { name = "pypdf" },
+    { name = "pytest" },
     { name = "python-dotenv" },
     { name = "requests" },
     { name = "streamlit" },
@@ -673,6 +674,7 @@ dev = [
 requires-dist = [
     { name = "fpdf2", specifier = ">=2.8.7" },
     { name = "pypdf", specifier = ">=4.3.1" },
+    { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
     { name = "python-dotenv", specifier = ">=1.0.1" },
     { name = "requests", specifier = ">=2.32.0" },
