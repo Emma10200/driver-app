@@ -66,3 +66,81 @@ def test_render_supporting_documents_section_shows_requested_uploads(monkeypatch
     assert uploader_calls
     assert uploader_calls[0]["label"] == "Upload supporting documents"
     assert "direct deposit form" in str(uploader_calls[0]["help"]).lower()
+class MockUploadedFile:
+    def __init__(self, name: str, size: int, type_: str, content: bytes = b""):
+        self.name = name
+        self.size = size
+        self.type = type_
+        self._content = content or b"fake content"
+
+    def getvalue(self) -> bytes:
+        return self._content
+
+def test_normalize_pending_uploads_empty(monkeypatch):
+    monkeypatch.setattr(document_service, "get_pending_uploads", lambda: [])
+    normalized, errors = document_service._normalize_pending_uploads()
+    assert normalized == []
+    assert errors == []
+
+def test_normalize_pending_uploads_valid(monkeypatch):
+    mock_file1 = MockUploadedFile(name="doc1.pdf", size=1024, type_="application/pdf", content=b"fake pdf")
+    mock_file2 = MockUploadedFile(name="image.png", size=2048, type_="image/png", content=b"fake png")
+
+    monkeypatch.setattr(document_service, "get_pending_uploads", lambda: [mock_file1, mock_file2])
+
+    normalized, errors = document_service._normalize_pending_uploads()
+
+    assert errors == []
+    assert len(normalized) == 2
+
+    assert normalized[0]["file_name"] == "doc1.pdf"
+    assert normalized[0]["content_type"] == "application/pdf"
+    assert normalized[0]["size_bytes"] == 1024
+    assert normalized[0]["content"] == b"fake pdf"
+    assert "content_digest" in normalized[0]
+
+    assert normalized[1]["file_name"] == "image.png"
+    assert normalized[1]["content_type"] == "image/png"
+    assert normalized[1]["size_bytes"] == 2048
+    assert normalized[1]["content"] == b"fake png"
+    assert "content_digest" in normalized[1]
+
+def test_normalize_pending_uploads_exceeds_max_files(monkeypatch):
+    max_files = document_service.MAX_SUPPORTING_DOCUMENTS
+    mock_files = [MockUploadedFile(name=f"doc{i}.pdf", size=1024, type_="application/pdf") for i in range(max_files + 1)]
+
+    monkeypatch.setattr(document_service, "get_pending_uploads", lambda: mock_files)
+
+    normalized, errors = document_service._normalize_pending_uploads()
+
+    assert len(errors) == 1
+    assert "Upload no more than" in errors[0]
+    assert str(max_files) in errors[0]
+    # The current implementation still processes the files even if the max count is exceeded
+    assert len(normalized) == max_files + 1
+
+def test_normalize_pending_uploads_invalid_extension(monkeypatch):
+    mock_file = MockUploadedFile(name="bad_script.txt", size=1024, type_="text/plain")
+
+    monkeypatch.setattr(document_service, "get_pending_uploads", lambda: [mock_file])
+
+    normalized, errors = document_service._normalize_pending_uploads()
+
+    assert len(errors) == 1
+    assert "bad_script.txt" in errors[0]
+    assert "must be a PDF, JPG, or PNG file" in errors[0]
+    assert len(normalized) == 0
+
+def test_normalize_pending_uploads_exceeds_max_size(monkeypatch):
+    max_size = document_service.MAX_SUPPORTING_DOCUMENT_SIZE_BYTES
+    mock_file = MockUploadedFile(name="huge.pdf", size=max_size + 1, type_="application/pdf")
+
+    monkeypatch.setattr(document_service, "get_pending_uploads", lambda: [mock_file])
+
+    normalized, errors = document_service._normalize_pending_uploads()
+
+    assert len(errors) == 1
+    assert "huge.pdf" in errors[0]
+    assert str(document_service.MAX_SUPPORTING_DOCUMENT_SIZE_MB) in errors[0]
+    assert "exceeds the" in errors[0]
+    assert len(normalized) == 0
