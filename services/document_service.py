@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+
 import hashlib
 from pathlib import Path
 from typing import Any
@@ -171,7 +173,8 @@ def render_supporting_documents_section() -> None:
         st.markdown("**Saved documents**")
         for document in saved_documents:
             size_kb = max(1, int(document.get("size_bytes", 0) / 1024))
-            st.markdown(f"- `{document.get('file_name', 'document')}` ({size_kb} KB)")
+            safe_file_name = html.escape(document.get('file_name', 'document').replace("`", "_"))
+            st.markdown(f"- `{safe_file_name}` ({size_kb} KB)")
 
     pending_uploads = get_pending_uploads()
     normalized, errors = _normalize_pending_uploads()

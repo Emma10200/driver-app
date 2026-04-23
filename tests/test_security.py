@@ -1,17 +1,8 @@
 from __future__ import annotations
 import html
-import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-# Mock dependencies
-sys.modules['streamlit'] = MagicMock()
-sys.modules['streamlit.components.v1'] = MagicMock()
-sys.modules['requests'] = MagicMock()
-sys.modules['fpdf2'] = MagicMock()
-sys.modules['fpdf'] = MagicMock()
-sys.modules['pypdf'] = MagicMock()
-sys.modules['dotenv'] = MagicMock()
 
 import streamlit as st
 import ui.common as common
@@ -19,7 +10,8 @@ import app
 
 def test_app_header_escaping(monkeypatch):
     captured_markdown = []
-    st.markdown.side_effect = lambda content, unsafe_allow_html=False: captured_markdown.append(content)
+    mock_markdown = MagicMock(side_effect=lambda content, unsafe_allow_html=False: captured_markdown.append(content))
+    monkeypatch.setattr(st, "markdown", mock_markdown)
 
     payload = "<script>alert('xss')</script>"
     escaped_payload = html.escape(payload)
@@ -49,7 +41,8 @@ def test_app_header_escaping(monkeypatch):
 
 def test_company_picker_escaping(monkeypatch):
     captured_markdown = []
-    st.markdown.side_effect = lambda content, unsafe_allow_html=False: captured_markdown.append(content)
+    mock_markdown = MagicMock(side_effect=lambda content, unsafe_allow_html=False: captured_markdown.append(content))
+    monkeypatch.setattr(st, "markdown", mock_markdown)
 
     payload = "<script>alert('xss')</script>"
     escaped_payload = html.escape(payload)
@@ -63,7 +56,8 @@ def test_company_picker_escaping(monkeypatch):
     import config
     monkeypatch.setattr(config, "COMPANY_PROFILES", {"test-slug": fake_profile})
     monkeypatch.setattr(app, "st", st)
-    st.columns.return_value = [MagicMock()]
+    mock_columns = MagicMock(return_value=[MagicMock()])
+    monkeypatch.setattr(st, "columns", mock_columns)
 
     app._render_company_picker()
 
@@ -72,3 +66,53 @@ def test_company_picker_escaping(monkeypatch):
     assert picker_markdown is not None
     assert payload not in picker_markdown
     assert escaped_payload in picker_markdown
+
+def test_document_filename_escaping(monkeypatch):
+    captured_markdown = []
+
+    def fake_markdown(content, **kwargs):
+        captured_markdown.append(content)
+
+    mock_markdown = MagicMock(side_effect=fake_markdown)
+    monkeypatch.setattr(st, "markdown", mock_markdown)
+
+    payload = "my_file`</script><script>alert(1)</script>.pdf"
+    expected_safe_name = html.escape(payload.replace("`", "_"))
+
+    fake_session_state = {
+        "uploaded_documents": [
+            {
+                "file_name": payload,
+                "size_bytes": 1024,
+            }
+        ]
+    }
+
+    import services.document_service as document_service
+
+    class FakeSessionState(dict):
+        def __getattr__(self, key: str):
+            try:
+                return self[key]
+            except KeyError as exc:
+                raise AttributeError(key) from exc
+
+        def __setattr__(self, key: str, value):
+            self[key] = value
+
+    fake_st = MagicMock()
+    fake_st.session_state = FakeSessionState(fake_session_state)
+    fake_st.markdown.side_effect = fake_markdown
+
+    # 1. Test review_submit.py render path (it's hard to test the whole page, so we test document_service instead)
+    monkeypatch.setattr(document_service, "st", fake_st)
+    monkeypatch.setattr(document_service, "is_test_mode_active", lambda: False)
+    monkeypatch.setattr(document_service, "get_pending_uploads", lambda: [])
+    monkeypatch.setattr(document_service, "_normalize_pending_uploads", lambda: ([], []))
+
+    document_service.render_supporting_documents_section()
+
+    doc_markdown = next((m for m in captured_markdown if "- `" in m), None)
+    assert doc_markdown is not None
+    assert payload not in doc_markdown
+    assert expected_safe_name in doc_markdown
