@@ -11,6 +11,7 @@ Compliance notes:
 
 from pathlib import Path
 
+import html
 import streamlit as st
 
 from app_sections.company_questions import render_company_questions_page
@@ -70,9 +71,11 @@ def _render_company_picker() -> None:
     cols = st.columns(len(profiles))
     for col, profile in zip(cols, profiles):
         with col:
+            profile_name = html.escape(profile.name)
+            profile_city_state_zip = html.escape(profile.city_state_zip or "")
             st.markdown(
-                f"<div style='text-align:center; padding-top:0.5rem;'><h3 style='margin-bottom:0.25rem;'>{profile.name}</h3>"
-                f"<p style='color:#666; min-height:2.5rem;'>{profile.city_state_zip or ''}</p></div>",
+                f"<div style='text-align:center; padding-top:0.5rem;'><h3 style='margin-bottom:0.25rem;'>{profile_name}</h3>"
+                f"<p style='color:#666; min-height:2.5rem;'>{profile_city_state_zip}</p></div>",
                 unsafe_allow_html=True,
             )
             if st.button(f"Apply with {profile.name}", key=f"pick_company_{profile.slug}", use_container_width=True, type="primary"):
