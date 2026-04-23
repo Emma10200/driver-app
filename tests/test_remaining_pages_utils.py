@@ -10,7 +10,6 @@ sys.modules['state'] = MagicMock()
 sys.modules['ui.common'] = MagicMock()
 
 from datetime import date, datetime
-import pytest
 from app_sections.remaining_pages import _coerce_date
 
 def test_coerce_date_with_date_object():
