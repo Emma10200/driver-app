@@ -111,7 +111,7 @@ def sync_pending_uploads() -> dict[str, Any]:
         return {"ok": True, "saved": 0, "documents": existing_documents, "warnings": []}
 
     existing_digests = {document.get("content_digest") for document in existing_documents}
-    new_documents = [document for document in normalized if document.get("content_digest") not in existing_digests]
+    new_documents = [document for document in normalized if document["content_digest"] not in existing_digests]
 
     if not new_documents:
         return {"ok": True, "saved": 0, "documents": existing_documents, "warnings": []}
@@ -179,6 +179,6 @@ def render_supporting_documents_section() -> None:
         show_missing_fields(errors, "Please fix the supporting document upload issues:")
     elif pending_uploads:
         duplicate_digests = {document.get("content_digest") for document in saved_documents}
-        new_count = sum(1 for document in normalized if document.get("content_digest") not in duplicate_digests)
+        new_count = sum(1 for document in normalized if document["content_digest"] not in duplicate_digests)
         if new_count:
             st.info(f"{new_count} new document(s) selected. They’ll be saved securely when you save a draft or submit.")
