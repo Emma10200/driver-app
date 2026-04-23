@@ -141,11 +141,6 @@ def render_remaining_page(page: int) -> bool:
             lcol1, lcol2, lcol3 = st.columns(3)
             with lcol1:
                 lic_number = st.text_input("License Number", key=f"lic_num_{i}", value=existing.get("number", ""))
-                lic_authority = st.text_input(
-                    "Licensing Authority",
-                    key=f"lic_authority_{i}",
-                    value=existing.get("authority", ""),
-                )
                 lic_state = selectbox_with_placeholder(
                     "Licensing State",
                     US_STATES,
@@ -235,7 +230,6 @@ def render_remaining_page(page: int) -> bool:
             licenses_input.append(
                 {
                     "number": lic_number,
-                    "authority": lic_authority,
                     "state": lic_state,
                     "country": lic_country,
                     "class": lic_class,
@@ -266,8 +260,6 @@ def render_remaining_page(page: int) -> bool:
                 for index, license_entry in enumerate(licenses_input, start=1):
                     if not license_entry["number"]:
                         missing.append(f"License #{index} number")
-                    if not license_entry["authority"]:
-                        missing.append(f"License #{index} licensing authority")
                     if not license_entry["state"]:
                         missing.append(f"License #{index} state")
                     if not license_entry["country"]:

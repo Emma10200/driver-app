@@ -261,7 +261,6 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
         pdf.set_font("Helvetica", "B", 9)
         pdf.cell(0, 6, f"License #{i+1}", new_x="LMARGIN", new_y="NEXT")
         pdf.field_row("  License Number:", lic.get("number", ""))
-        pdf.field_row("  Licensing Authority:", lic.get("authority", ""))
         pdf.field_row("  State:", lic.get("state", ""))
         pdf.field_row("  Country:", lic.get("country", ""))
         pdf.field_row("  Class:", lic.get("class", ""))

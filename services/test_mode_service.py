@@ -122,7 +122,6 @@ def _build_test_licenses() -> list[dict[str, object]]:
     return [
         {
             "number": "T1234567",
-            "authority": "California DMV",
             "state": "CA",
             "country": "US",
             "class": "Class A",
