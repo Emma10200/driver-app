@@ -26,6 +26,8 @@ def _blank_reference() -> dict[str, str]:
 
 
 def _coerce_date(value: object, default: date) -> date:
+    if isinstance(value, datetime):
+        return value.date()
     if isinstance(value, date):
         return value
     if isinstance(value, str) and value.strip():
