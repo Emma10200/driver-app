@@ -21,6 +21,7 @@ from services.document_service import render_supporting_documents_section, sync_
 from services.draft_service import LOCAL_STORAGE_DIR
 from services.error_log_service import log_application_error
 from services.notification_service import send_internal_submission_notification
+from services.sheets_export import append_submission_row
 from services.submission_service import build_submission_artifacts, save_submission_bundle
 from state import prev_page, reset_application_state
 from submission_storage import get_submission_destination_summary, read_supporting_document_bytes
@@ -108,6 +109,56 @@ def _attempt_submission_notification() -> None:
             code="submission_notification_failed",
             user_message="Internal submission notification failed.",
             technical_details=notification_result.get("message"),
+            severity="warning",
+        )
+
+
+def _attempt_sheets_export() -> None:
+    """Append this submission to the shared 'Applicants' Google Sheet.
+
+    Runs once per submission. Failures are logged but never surfaced to the
+    applicant -- the email path and the on-disk submission are the systems of
+    record; the sheet is a convenience view for the safety team.
+    """
+
+    if st.session_state.get("sheets_export_done"):
+        return
+    saved_submission_dir = st.session_state.get("saved_submission_dir")
+    if not saved_submission_dir:
+        return
+
+    try:
+        company_profile = get_active_company_profile()
+        result = append_submission_row(
+            company_slug=getattr(company_profile, "slug", None),
+            form_data=st.session_state.form_data,
+            licenses=st.session_state.get("licenses", []),
+            submission_id=st.session_state.get("submission_id")
+            or st.session_state.get("saved_submission_dir"),
+            storage_location=saved_submission_dir,
+            test_mode=is_test_mode_active(),
+        )
+    except Exception as exc:  # noqa: BLE001 - never let Sheets break the success page
+        log_application_error(
+            code="sheets_export_exception",
+            user_message="Sheets export raised an exception.",
+            technical_details=str(exc),
+            severity="warning",
+        )
+        return
+
+    status = result.get("status")
+    # Only mark "done" on terminal states so transient errors can be retried on
+    # the next rerun while the user is still on the success page.
+    if status == "appended":
+        st.session_state.sheets_export_done = True
+    elif status == "disabled":
+        st.session_state.sheets_export_done = True
+    else:
+        log_application_error(
+            code="sheets_export_failed",
+            user_message="Sheets export failed.",
+            technical_details=result.get("message"),
             severity="warning",
         )
 
@@ -324,6 +375,7 @@ def _render_submission_complete_body(submissions_dir: Path) -> None:
             st.session_state.submission_save_error = "Your application could not be saved right now. Please try again shortly."
 
     _attempt_submission_notification()
+    _attempt_sheets_export()
 
     st.success("### ✅ Application Submitted Successfully!")
     st.markdown(

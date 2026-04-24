@@ -1,0 +1,208 @@
+"""Tests for the Google Sheets export service."""
+
+from __future__ import annotations
+
+import json
+from datetime import date
+from unittest.mock import MagicMock
+
+import pytest
+
+from services import sheets_export
+
+
+@pytest.fixture(autouse=True)
+def _reset_secret_cache():
+    from submission_storage import _get_secret
+
+    _get_secret.cache_clear()
+    yield
+    _get_secret.cache_clear()
+
+
+def _set_secrets(monkeypatch, **values):
+    def fake_get_secret(name, default=None):
+        return values.get(name, default)
+
+    monkeypatch.setattr(sheets_export, "get_runtime_secret", fake_get_secret)
+
+
+def test_build_submission_row_orders_columns_and_stringifies():
+    row = sheets_export.build_submission_row(
+        form_data={
+            "first_name": "Jane",
+            "middle_name": "Q",
+            "last_name": "Driver",
+            "email": "jane@example.com",
+            "primary_phone": "555-0101",
+            "dob": date(1985, 6, 15),
+            "address": "123 Main",
+            "city": "Fontana",
+            "state": "CA",
+            "zip_code": "92335",
+            "position_applied": "OTR Driver",
+            "has_cdl": True,
+            "years_experience": 7,
+            "final_submission_timestamp": "2026-04-24T10:30:00",
+        },
+        licenses=[
+            {"license_number": "D1234567", "license_state": "CA", "license_class": "A"},
+        ],
+        submission_id="sub-001",
+        storage_location="submissions/sub-001",
+        test_mode=False,
+    )
+
+    assert len(row) == len(sheets_export.SHEET_COLUMNS)
+    by_column = dict(zip(sheets_export.SHEET_COLUMNS, row))
+    assert by_column["Submitted At"] == "2026-04-24T10:30:00"
+    assert by_column["Apply Date"] == "2026-04-24"
+    assert by_column["Applicant Name"] == "Jane Q Driver"
+    assert by_column["Email"] == "jane@example.com"
+    assert by_column["Date of Birth"] == "1985-06-15"
+    assert by_column["Has CDL"] == "Yes"
+    assert by_column["License Number"] == "D1234567"
+    assert by_column["License State"] == "CA"
+    assert by_column["License Class"] == "A"
+    assert by_column["Submission ID"] == "sub-001"
+    assert by_column["Test Mode"] == "No"
+
+
+def test_tab_name_routing():
+    assert sheets_export._tab_name_for_company("prestige") == "Prestige Transportation"
+    assert sheets_export._tab_name_for_company("side-xpress") == "Xpress"
+    # Unknown slug falls back to the default company profile's display name.
+    assert sheets_export._tab_name_for_company("unknown-slug") == "PRESTIGE TRANSPORTATION INC."
+
+
+def test_append_submission_row_disabled_when_secrets_missing(monkeypatch):
+    _set_secrets(monkeypatch, GOOGLE_SERVICE_ACCOUNT_JSON="", APPLICANTS_SHEET_ID="")
+    result = sheets_export.append_submission_row(
+        company_slug="prestige",
+        form_data={"first_name": "A", "last_name": "B"},
+    )
+    assert result["status"] == "disabled"
+
+
+def test_append_submission_row_invalid_json(monkeypatch):
+    _set_secrets(
+        monkeypatch,
+        GOOGLE_SERVICE_ACCOUNT_JSON="{not json",
+        APPLICANTS_SHEET_ID="abc",
+    )
+    result = sheets_export.append_submission_row(
+        company_slug="prestige",
+        form_data={"first_name": "A", "last_name": "B"},
+    )
+    assert result["status"] == "error"
+    assert "valid JSON" in result["message"]
+
+
+def test_append_submission_row_inserts_at_top_with_header(monkeypatch):
+    creds_json = json.dumps(
+        {
+            "type": "service_account",
+            "client_email": "x@example.iam.gserviceaccount.com",
+            "private_key": "-----BEGIN-----\nfake\n-----END-----\n",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    )
+    _set_secrets(
+        monkeypatch,
+        GOOGLE_SERVICE_ACCOUNT_JSON=creds_json,
+        APPLICANTS_SHEET_ID="sheet-xyz",
+    )
+
+    fake_worksheet = MagicMock()
+    fake_worksheet.row_values.return_value = []  # empty -> header gets written
+
+    def fake_open(spreadsheet_id, tab_name, credentials_info):
+        assert spreadsheet_id == "sheet-xyz"
+        assert tab_name == "Xpress"
+        assert credentials_info["client_email"].endswith(".iam.gserviceaccount.com")
+        return fake_worksheet
+
+    monkeypatch.setattr(sheets_export, "_open_worksheet", fake_open)
+
+    result = sheets_export.append_submission_row(
+        company_slug="side-xpress",
+        form_data={
+            "first_name": "Test",
+            "last_name": "Applicant",
+            "final_submission_timestamp": "2026-04-24T09:00:00",
+        },
+        licenses=[],
+        submission_id="sub-42",
+        storage_location="submissions/sub-42",
+    )
+
+    assert result["status"] == "appended"
+    assert result["tab"] == "Xpress"
+    fake_worksheet.update.assert_called_once()
+    fake_worksheet.insert_row.assert_called_once()
+    insert_args, insert_kwargs = fake_worksheet.insert_row.call_args
+    assert insert_kwargs.get("index") == 2
+    assert insert_kwargs.get("value_input_option") == "USER_ENTERED"
+    row = insert_args[0]
+    assert "Test Applicant" in row
+
+
+def test_append_submission_row_skips_header_when_present(monkeypatch):
+    creds_json = json.dumps(
+        {
+            "type": "service_account",
+            "client_email": "x@example.iam.gserviceaccount.com",
+            "private_key": "k",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    )
+    _set_secrets(
+        monkeypatch,
+        GOOGLE_SERVICE_ACCOUNT_JSON=creds_json,
+        APPLICANTS_SHEET_ID="sheet-xyz",
+    )
+
+    fake_worksheet = MagicMock()
+    fake_worksheet.row_values.return_value = ["Submitted At", "Apply Date"]
+
+    monkeypatch.setattr(
+        sheets_export, "_open_worksheet", lambda *a, **k: fake_worksheet
+    )
+
+    result = sheets_export.append_submission_row(
+        company_slug="prestige",
+        form_data={"first_name": "R", "last_name": "L"},
+    )
+
+    assert result["status"] == "appended"
+    fake_worksheet.update.assert_not_called()
+    fake_worksheet.insert_row.assert_called_once()
+
+
+def test_append_submission_row_returns_error_on_api_failure(monkeypatch):
+    creds_json = json.dumps(
+        {
+            "type": "service_account",
+            "client_email": "x@example.iam.gserviceaccount.com",
+            "private_key": "k",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    )
+    _set_secrets(
+        monkeypatch,
+        GOOGLE_SERVICE_ACCOUNT_JSON=creds_json,
+        APPLICANTS_SHEET_ID="sheet-xyz",
+    )
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("quota exceeded")
+
+    monkeypatch.setattr(sheets_export, "_open_worksheet", boom)
+
+    result = sheets_export.append_submission_row(
+        company_slug="prestige",
+        form_data={"first_name": "R", "last_name": "L"},
+    )
+
+    assert result["status"] == "error"
+    assert "quota exceeded" in result["message"]
