@@ -34,30 +34,78 @@ COMPANY_TAB_NAMES: dict[str, str] = {
     "side-xpress": "Xpress",
 }
 
-# Column order written into the header row on first run. Adding a new column
-# later is safe -- the code only writes the header if the existing first row
-# is empty, so existing sheets keep their existing column layout.
+# Division label written into the General > Division column. Mirrors what the
+# ProTransport ERP shows so safety can copy/paste straight across.
+COMPANY_DIVISION_LABEL: dict[str, str] = {
+    "prestige": "Prestig Inc",
+    "side-xpress": "Xpress Inc",
+}
+
+# Column order written into the header row. The layout mirrors the
+# ProTransport ERP "Driver Info" tab so the safety team can copy a row from
+# this sheet straight into the matching ERP fields. Columns we do not collect
+# in the application (e.g. bank account, hire date) are still included as
+# empty cells so the column position stays aligned with ProTransport.
 SHEET_COLUMNS: list[str] = [
+    # Application metadata
     "Submitted At",
     "Apply Date",
-    "Applicant Name",
-    "Email",
-    "Primary Phone",
-    "Cell Phone",
-    "Date of Birth",
-    "Address",
+    "Test Mode",
+    # Personal Info
+    "First Name",
+    "Middle Name",
+    "Last Name",
+    "Display Name",
+    "Date Of Birth",
+    "SSN",
+    "FEIN",
+    "Bank Account #",
+    "Bank Routing #",
+    "Active",
+    # Address
+    "Street 1",
+    "Street 2",
     "City",
     "State",
     "Zip",
+    "Country",
+    # Contact
+    "Home Phone",
+    "Cell Phone",
+    "Email",
+    "Send Text Messages",
+    "Send Emails",
+    "Emergency Contact",
+    "Emergency Phone",
+    "Emergency Relationship",
+    # Safety
+    "Medical Card Expiration",
+    "TWIC Expiration",
+    "Pre-Employment Drug Test",
+    "Pre-Employment MVR Date",
+    "Pre-Employment Clearinghouse Date",
+    # General
+    "Hire Date",
+    "Termination Date",
+    "Status",
+    "Driver Personal ID",
+    "Dispatch Category",
+    "Division",
+    # CDL Info
+    "CDL Number",
+    "CDL State",
+    "CDL Expiration Date",
+    "CDL Class",
+    "CDL Endorsement",
+    "Years Of Experience",
+    "States Operated",
+    "Safe Driving Awards",
+    "Special Training",
+    # Application context
     "Position Applied",
     "Has CDL",
-    "License Number",
-    "License State",
-    "License Class",
-    "Years Driving Experience",
     "Submission ID",
     "Storage Location",
-    "Test Mode",
 ]
 
 GOOGLE_SCOPES = [
@@ -97,6 +145,57 @@ def _full_name(form_data: dict[str, Any]) -> str:
     return " ".join(part for part in parts if part)
 
 
+def _display_name(form_data: dict[str, Any]) -> str:
+    """Return 'Last, First M.' to match ProTransport's Display Name field."""
+    last = str(form_data.get("last_name", "") or "").strip()
+    first = str(form_data.get("first_name", "") or "").strip()
+    middle = str(form_data.get("middle_name", "") or "").strip()
+    if not last and not first:
+        return ""
+    middle_initial = f" {middle[0]}." if middle else ""
+    if last and first:
+        return f"{last}, {first}{middle_initial}".strip()
+    return last or first
+
+
+def _cdl_endorsement_label(form_data: dict[str, Any], primary_license: dict[str, Any]) -> str:
+    """Combine endorsement-style flags into one comma-separated label.
+
+    ProTransport stores endorsements as a free-text field; the safety team
+    cares about the abbreviations (H, X, T) plus TWIC, so we surface those.
+    """
+
+    parts: list[str] = []
+    explicit = primary_license.get("endorsements") or primary_license.get("endorsement")
+    if explicit:
+        parts.append(_stringify(explicit))
+
+    hazmat = str(form_data.get("hazmat_endorsement", "") or "").strip().lower()
+    if hazmat in {"yes", "true", "1"}:
+        parts.append("Hazmat")
+
+    twic = str(form_data.get("twic_card", "") or "").strip().lower()
+    if twic in {"yes", "true", "1"}:
+        parts.append("TWIC")
+
+    # Deduplicate while preserving order.
+    seen: set[str] = set()
+    unique: list[str] = []
+    for raw in parts:
+        for token in [t.strip() for t in raw.split(",") if t.strip()]:
+            key = token.lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(token)
+    return ", ".join(unique)
+
+
+def _send_emails_label(form_data: dict[str, Any]) -> str:
+    """Default to Yes if an email is present (ProTransport defaults to checked)."""
+    email = str(form_data.get("email", "") or "").strip()
+    return "Yes" if email else ""
+
+
 def _primary_license(licenses: list[dict[str, Any]] | None) -> dict[str, Any]:
     for entry in licenses or []:
         if isinstance(entry, dict):
@@ -111,6 +210,7 @@ def build_submission_row(
     submission_id: str | None = None,
     storage_location: str | None = None,
     test_mode: bool = False,
+    company_slug: str | None = None,
 ) -> list[str]:
     """Compose the cell values for a single submission row.
 
@@ -133,32 +233,77 @@ def build_submission_row(
         )
     )
 
+    primary_phone = form_data.get("primary_phone")
+    cell_phone = form_data.get("cell_phone") or primary_phone
+
+    division = ""
+    slug = (company_slug or form_data.get("company_slug") or "").strip().lower()
+    if slug:
+        division = COMPANY_DIVISION_LABEL.get(slug, "")
+
     values = {
+        # Application metadata
         "Submitted At": submitted_at,
         "Apply Date": apply_date,
-        "Applicant Name": _full_name(form_data),
-        "Email": form_data.get("email"),
-        "Primary Phone": form_data.get("primary_phone"),
-        "Cell Phone": form_data.get("cell_phone"),
-        "Date of Birth": form_data.get("dob"),
-        "Address": form_data.get("address"),
+        "Test Mode": test_mode,
+        # Personal Info
+        "First Name": form_data.get("first_name"),
+        "Middle Name": form_data.get("middle_name"),
+        "Last Name": form_data.get("last_name"),
+        "Display Name": _display_name(form_data),
+        "Date Of Birth": form_data.get("dob"),
+        "SSN": form_data.get("ssn"),
+        "FEIN": "",
+        "Bank Account #": "",
+        "Bank Routing #": "",
+        "Active": "",
+        # Address
+        "Street 1": form_data.get("address"),
+        "Street 2": "",
         "City": form_data.get("city"),
         "State": form_data.get("state"),
         "Zip": form_data.get("zip_code"),
+        "Country": form_data.get("country"),
+        # Contact
+        "Home Phone": primary_phone,
+        "Cell Phone": cell_phone,
+        "Email": form_data.get("email"),
+        "Send Text Messages": form_data.get("text_consent"),
+        "Send Emails": _send_emails_label(form_data),
+        "Emergency Contact": form_data.get("emergency_name"),
+        "Emergency Phone": form_data.get("emergency_phone"),
+        "Emergency Relationship": form_data.get("emergency_relationship"),
+        # Safety
+        "Medical Card Expiration": form_data.get("medical_card_expiration"),
+        "TWIC Expiration": form_data.get("twic_expiration"),
+        "Pre-Employment Drug Test": "",
+        "Pre-Employment MVR Date": "",
+        "Pre-Employment Clearinghouse Date": "",
+        # General
+        "Hire Date": "",
+        "Termination Date": "",
+        "Status": "",
+        "Driver Personal ID": "",
+        "Dispatch Category": "",
+        "Division": division,
+        # CDL Info
+        "CDL Number": primary.get("license_number") or primary.get("number"),
+        "CDL State": primary.get("license_state") or primary.get("state"),
+        "CDL Expiration Date": primary.get("expiration_date")
+        or primary.get("expiration"),
+        "CDL Class": primary.get("license_class") or primary.get("class"),
+        "CDL Endorsement": _cdl_endorsement_label(form_data, primary),
+        "Years Of Experience": form_data.get("years_experience")
+        or form_data.get("years_driving"),
+        "States Operated": "",
+        "Safe Driving Awards": "",
+        "Special Training": "",
+        # Application context
         "Position Applied": form_data.get("position_applied")
         or form_data.get("position"),
         "Has CDL": form_data.get("has_cdl"),
-        "License Number": primary.get("license_number")
-        or primary.get("number"),
-        "License State": primary.get("license_state")
-        or primary.get("state"),
-        "License Class": primary.get("license_class")
-        or primary.get("class"),
-        "Years Driving Experience": form_data.get("years_experience")
-        or form_data.get("years_driving"),
         "Submission ID": submission_id,
         "Storage Location": storage_location,
-        "Test Mode": test_mode,
     }
     return [_stringify(values.get(column)) for column in SHEET_COLUMNS]
 
@@ -199,11 +344,30 @@ def _open_worksheet(spreadsheet_id: str, tab_name: str, credentials_info: dict[s
 
 
 def _ensure_header(worksheet) -> None:
-    """Write the header row if the sheet is empty; otherwise leave it alone."""
+    """Make sure the header row matches SHEET_COLUMNS.
+
+    If the sheet is empty, write the header. If the existing header doesn't
+    match (e.g. we added new columns in a release), rewrite row 1 in place so
+    new columns appear above any existing data. Only the header row is
+    touched -- data rows below it are never modified here.
+    """
 
     existing = worksheet.row_values(1)
-    if existing:
+    if existing == SHEET_COLUMNS:
         return
+
+    # Make sure the worksheet has enough columns to fit the header.
+    needed_cols = len(SHEET_COLUMNS)
+    try:
+        current_cols = int(getattr(worksheet, "col_count", 0) or 0)
+    except (TypeError, ValueError):
+        current_cols = 0
+    if current_cols and current_cols < needed_cols:
+        try:
+            worksheet.resize(cols=needed_cols)
+        except Exception:  # noqa: BLE001 - resize is best-effort
+            logger.debug("Could not resize worksheet columns", exc_info=True)
+
     worksheet.update("A1", [SHEET_COLUMNS])
     try:
         worksheet.freeze(rows=1)
@@ -245,6 +409,7 @@ def append_submission_row(
         submission_id=submission_id,
         storage_location=storage_location,
         test_mode=test_mode,
+        company_slug=company_slug,
     )
 
     try:
@@ -267,3 +432,36 @@ def append_submission_row(
             "message": f"Sheets append failed: {exc}",
             "tab": tab_name,
         }
+
+
+def append_from_payload(
+    payload: dict[str, Any],
+    *,
+    storage_location: str | None = None,
+    company_slug_override: str | None = None,
+) -> dict[str, Any]:
+    """Append a row from a previously-saved ``submission.json`` payload.
+
+    Used by the admin dashboard to re-export an existing submission to the
+    shared sheet (e.g. for backfilling submissions that pre-date the Sheets
+    integration).
+    """
+
+    payload = payload or {}
+    form_data = payload.get("form_data") or {}
+    company_slug = (
+        company_slug_override
+        or form_data.get("company_slug")
+        or DEFAULT_COMPANY_SLUG
+    )
+    submission_id = payload.get("submission_key") or payload.get("submission_id")
+    test_mode = bool(form_data.get("test_mode"))
+
+    return append_submission_row(
+        company_slug=company_slug,
+        form_data=form_data,
+        licenses=payload.get("licenses") or [],
+        submission_id=submission_id,
+        storage_location=storage_location,
+        test_mode=test_mode,
+    )

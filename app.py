@@ -18,11 +18,13 @@ from app_sections.personal_info import render_personal_information_page
 from app_sections.remaining_pages import render_remaining_page
 from app_sections.review_submit import render_review_submit_page, render_submission_complete
 from runtime_context import (
+    admin_dashboard_requested,
     company_slug_explicitly_provided,
     get_company_profile,
     resolve_company_slug,
     sync_runtime_context,
 )
+from services.admin_dashboard import render_admin_dashboard
 from services.error_log_service import log_application_error
 from state import init_session_state
 from ui.common import (
@@ -51,6 +53,15 @@ st.set_page_config(
 
 init_session_state()
 sync_runtime_context()
+
+
+# Standalone admin dashboard route. Reachable via ?dashboard=1; gated by
+# password (ADMIN_PASSWORD secret, default Prestige2021!). Short-circuits
+# the entire application flow so the dashboard renders by itself.
+if admin_dashboard_requested():
+    render_admin_dashboard(SUBMISSIONS_DIR)
+    render_version_footer()
+    st.stop()
 
 
 def _render_company_picker() -> None:

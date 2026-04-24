@@ -106,6 +106,16 @@ def admin_tools_requested() -> bool:
     return _truthy(_query_param_value("admin")) or _truthy(_query_param_value("mode"))
 
 
+def admin_dashboard_requested() -> bool:
+    """True when the URL carries ``?dashboard=1`` (or similar truthy value).
+
+    Distinct from ``admin_tools_requested`` -- ``?admin=1`` toggles in-page
+    test/admin tools inside the regular application flow, while
+    ``?dashboard=1`` opens the standalone password-protected dashboard.
+    """
+    return _truthy(_query_param_value("dashboard"))
+
+
 def admin_tools_enabled() -> bool:
     if not admin_tools_requested():
         return False

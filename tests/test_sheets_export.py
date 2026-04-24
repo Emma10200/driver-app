@@ -57,15 +57,23 @@ def test_build_submission_row_orders_columns_and_stringifies():
     by_column = dict(zip(sheets_export.SHEET_COLUMNS, row))
     assert by_column["Submitted At"] == "2026-04-24T10:30:00"
     assert by_column["Apply Date"] == "2026-04-24"
-    assert by_column["Applicant Name"] == "Jane Q Driver"
+    assert by_column["First Name"] == "Jane"
+    assert by_column["Middle Name"] == "Q"
+    assert by_column["Last Name"] == "Driver"
+    assert by_column["Display Name"] == "Driver, Jane Q."
     assert by_column["Email"] == "jane@example.com"
-    assert by_column["Date of Birth"] == "1985-06-15"
+    assert by_column["Date Of Birth"] == "1985-06-15"
     assert by_column["Has CDL"] == "Yes"
-    assert by_column["License Number"] == "D1234567"
-    assert by_column["License State"] == "CA"
-    assert by_column["License Class"] == "A"
+    assert by_column["CDL Number"] == "D1234567"
+    assert by_column["CDL State"] == "CA"
+    assert by_column["CDL Class"] == "A"
     assert by_column["Submission ID"] == "sub-001"
     assert by_column["Test Mode"] == "No"
+    assert by_column["Send Emails"] == "Yes"
+    # Empty ERP-only columns are present but blank.
+    assert by_column["FEIN"] == ""
+    assert by_column["Hire Date"] == ""
+    assert by_column["Status"] == ""
 
 
 def test_tab_name_routing():
@@ -144,7 +152,10 @@ def test_append_submission_row_inserts_at_top_with_header(monkeypatch):
     assert insert_kwargs.get("index") == 2
     assert insert_kwargs.get("value_input_option") == "USER_ENTERED"
     row = insert_args[0]
-    assert "Test Applicant" in row
+    by_column = dict(zip(sheets_export.SHEET_COLUMNS, row))
+    assert by_column["First Name"] == "Test"
+    assert by_column["Last Name"] == "Applicant"
+    assert by_column["Division"] == "Xpress Inc"
 
 
 def test_append_submission_row_skips_header_when_present(monkeypatch):
@@ -163,7 +174,8 @@ def test_append_submission_row_skips_header_when_present(monkeypatch):
     )
 
     fake_worksheet = MagicMock()
-    fake_worksheet.row_values.return_value = ["Submitted At", "Apply Date"]
+    # Header that already matches SHEET_COLUMNS exactly -> no rewrite.
+    fake_worksheet.row_values.return_value = list(sheets_export.SHEET_COLUMNS)
 
     monkeypatch.setattr(
         sheets_export, "_open_worksheet", lambda *a, **k: fake_worksheet
@@ -206,3 +218,105 @@ def test_append_submission_row_returns_error_on_api_failure(monkeypatch):
 
     assert result["status"] == "error"
     assert "quota exceeded" in result["message"]
+
+
+def test_division_label_routes_per_company():
+    row = sheets_export.build_submission_row(
+        form_data={"first_name": "A", "last_name": "B"},
+        licenses=[],
+        company_slug="prestige",
+    )
+    by_column = dict(zip(sheets_export.SHEET_COLUMNS, row))
+    assert by_column["Division"] == "Prestig Inc"
+
+    row = sheets_export.build_submission_row(
+        form_data={"first_name": "A", "last_name": "B"},
+        licenses=[],
+        company_slug="side-xpress",
+    )
+    by_column = dict(zip(sheets_export.SHEET_COLUMNS, row))
+    assert by_column["Division"] == "Xpress Inc"
+
+
+def test_cdl_endorsement_combines_hazmat_and_twic():
+    row = sheets_export.build_submission_row(
+        form_data={
+            "first_name": "A",
+            "last_name": "B",
+            "hazmat_endorsement": "Yes",
+            "twic_card": "Yes",
+        },
+        licenses=[{"endorsements": "N"}],
+        company_slug="prestige",
+    )
+    by_column = dict(zip(sheets_export.SHEET_COLUMNS, row))
+    endorsement = by_column["CDL Endorsement"]
+    assert "N" in endorsement
+    assert "Hazmat" in endorsement
+    assert "TWIC" in endorsement
+
+
+def test_append_from_payload_uses_company_slug_from_form_data(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_append(**kwargs):
+        captured.update(kwargs)
+        return {"status": "appended", "tab": "Xpress"}
+
+    monkeypatch.setattr(sheets_export, "append_submission_row", fake_append)
+
+    payload = {
+        "submission_key": "20260420_120000_inc-test",
+        "form_data": {
+            "first_name": "Real",
+            "last_name": "Applicant",
+            "company_slug": "side-xpress",
+            "test_mode": False,
+        },
+        "licenses": [{"license_number": "X1"}],
+    }
+
+    result = sheets_export.append_from_payload(payload, storage_location="/tmp/x")
+    assert result["status"] == "appended"
+    assert captured["company_slug"] == "side-xpress"
+    assert captured["submission_id"] == "20260420_120000_inc-test"
+    assert captured["storage_location"] == "/tmp/x"
+    assert captured["test_mode"] is False
+
+
+def test_ensure_header_rewrites_when_mismatched(monkeypatch):
+    creds_json = json.dumps(
+        {
+            "type": "service_account",
+            "client_email": "x@example.iam.gserviceaccount.com",
+            "private_key": "k",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    )
+    _set_secrets(
+        monkeypatch,
+        GOOGLE_SERVICE_ACCOUNT_JSON=creds_json,
+        APPLICANTS_SHEET_ID="sheet-xyz",
+    )
+
+    fake_worksheet = MagicMock()
+    # Outdated header missing the new ProTransport columns.
+    fake_worksheet.row_values.return_value = ["Submitted At", "Apply Date"]
+    fake_worksheet.col_count = 5
+
+    monkeypatch.setattr(
+        sheets_export, "_open_worksheet", lambda *a, **k: fake_worksheet
+    )
+
+    result = sheets_export.append_submission_row(
+        company_slug="prestige",
+        form_data={"first_name": "R", "last_name": "L"},
+    )
+
+    assert result["status"] == "appended"
+    fake_worksheet.update.assert_called_once()
+    update_args, _ = fake_worksheet.update.call_args
+    assert update_args[0] == "A1"
+    assert update_args[1] == [sheets_export.SHEET_COLUMNS]
+    fake_worksheet.resize.assert_called_once()
+    fake_worksheet.insert_row.assert_called_once()
