@@ -206,11 +206,29 @@ def render_admin_dashboard(submissions_root: Path) -> None:
             st.session_state[SESSION_AUTH_KEY] = False
             st.rerun()
 
+    show_test_mode = st.checkbox(
+        "Show test-mode submissions",
+        value=False,
+        help=(
+            "Hidden by default. Toggle on to also list applications that were "
+            "submitted with test mode enabled (these go to the test-mode "
+            "namespace and are tagged TEST MODE in the card header)."
+        ),
+        key="admin_show_test_mode",
+    )
+
+    def _is_test_mode(payload: dict[str, Any], *, mode_hint: str | None = None) -> bool:
+        if mode_hint and mode_hint.lower() == "test-mode":
+            return True
+        form_data = payload.get("form_data") or {}
+        return bool(form_data.get("test_mode"))
+
     # Build the merged list: Supabase first (these are the real production
     # submissions), then any local submissions that are not also represented
     # in Supabase by the same submission key.
     seen_keys: set[str] = set()
     rendered_count = 0
+    hidden_count = 0
 
     if supabase_storage_enabled():
         try:
@@ -226,6 +244,9 @@ def render_admin_dashboard(submissions_root: Path) -> None:
             if payload is None:
                 with st.expander(f"⚠️  {key} (could not read submission.json)"):
                     st.caption(f"Location: `{entry['location_label']}`")
+                continue
+            if not show_test_mode and _is_test_mode(payload, mode_hint=entry.get("mode")):
+                hidden_count += 1
                 continue
             files = [
                 {
@@ -260,6 +281,9 @@ def render_admin_dashboard(submissions_root: Path) -> None:
             with st.expander(f"⚠️  {submission_dir.name} (could not read submission.json)"):
                 st.caption(f"Folder: `{submission_dir}`")
             continue
+        if not show_test_mode and _is_test_mode(payload):
+            hidden_count += 1
+            continue
         local_files = sorted(p for p in submission_dir.iterdir() if p.is_file())
         files = [
             {
@@ -278,7 +302,12 @@ def render_admin_dashboard(submissions_root: Path) -> None:
         rendered_count += 1
 
     if rendered_count == 0:
-        if supabase_storage_enabled():
+        if hidden_count > 0:
+            st.info(
+                f"All {hidden_count} submission(s) are test-mode — toggle "
+                "'Show test-mode submissions' above to view them."
+            )
+        elif supabase_storage_enabled():
             st.info(
                 "No submissions found in Supabase or in the local "
                 f"`{submissions_root}` folder."
@@ -291,4 +320,7 @@ def render_admin_dashboard(submissions_root: Path) -> None:
                 "dashboard can list them."
             )
     else:
-        st.caption(f"Rendered **{rendered_count}** submission(s).")
+        suffix = (
+            f" ({hidden_count} test-mode hidden)" if hidden_count and not show_test_mode else ""
+        )
+        st.caption(f"Rendered **{rendered_count}** submission(s).{suffix}")

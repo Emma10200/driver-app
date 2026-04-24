@@ -27,10 +27,18 @@ def test_notification_settings_auto_includes_company_safety_email(monkeypatch):
     )
 
     prestige = notification_service._notification_settings("prestige", test_mode=False)
-    assert prestige["recipients"] == ["ops@example.com", "safety@prestigecalifornia.com"]
+    assert prestige["recipients"] == [
+        "ops@example.com",
+        "safety@prestigecalifornia.com",
+        "dann@prestigetransportation.com",
+    ]
 
     xpress = notification_service._notification_settings("side-xpress", test_mode=False)
-    assert xpress["recipients"] == ["ops@example.com", "safety@xpresstransinc.com"]
+    assert xpress["recipients"] == [
+        "ops@example.com",
+        "safety@xpresstransinc.com",
+        "dann@prestigetransportation.com",
+    ]
 
 
 def test_notification_settings_test_mode_skips_safety_email(monkeypatch):
@@ -48,6 +56,43 @@ def test_notification_settings_test_mode_skips_safety_email(monkeypatch):
     settings = notification_service._notification_settings("prestige", test_mode=True)
     assert settings["recipients"] == ["qa@example.com"]
     assert "safety@prestigecalifornia.com" not in settings["recipients"]
+    assert "dann@prestigetransportation.com" not in settings["recipients"]
+
+
+def test_notification_settings_always_cc_override(monkeypatch):
+    monkeypatch.setattr(
+        notification_service,
+        "get_runtime_secret",
+        _fake_secrets({
+            "SMTP_HOST": "smtp.example.com",
+            "SMTP_FROM_EMAIL": "alerts@example.com",
+            "INTERNAL_NOTIFICATION_TO": "ops@example.com",
+            "ALWAYS_NOTIFY_EMAILS": "owner@example.com, exec@example.com",
+        }),
+    )
+
+    settings = notification_service._notification_settings("prestige", test_mode=False)
+    assert "owner@example.com" in settings["recipients"]
+    assert "exec@example.com" in settings["recipients"]
+    assert "dann@prestigetransportation.com" not in settings["recipients"]
+
+
+def test_notification_settings_always_cc_dedupes(monkeypatch):
+    monkeypatch.setattr(
+        notification_service,
+        "get_runtime_secret",
+        _fake_secrets({
+            "SMTP_HOST": "smtp.example.com",
+            "SMTP_FROM_EMAIL": "alerts@example.com",
+            "INTERNAL_NOTIFICATION_TO": "ops@example.com, dann@prestigetransportation.com",
+        }),
+    )
+
+    settings = notification_service._notification_settings("prestige", test_mode=False)
+    # dann should only appear once even though it's both in INTERNAL_NOTIFICATION_TO
+    # and in the always-CC default list.
+    lowered = [r.lower() for r in settings["recipients"]]
+    assert lowered.count("dann@prestigetransportation.com") == 1
 
 
 # Avoid unused-import warning when running selectively.

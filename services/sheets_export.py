@@ -50,7 +50,6 @@ SHEET_COLUMNS: list[str] = [
     # Application metadata
     "Submitted At",
     "Apply Date",
-    "Test Mode",
     # Personal Info
     "First Name",
     "Middle Name",
@@ -245,7 +244,6 @@ def build_submission_row(
         # Application metadata
         "Submitted At": submitted_at,
         "Apply Date": apply_date,
-        "Test Mode": test_mode,
         # Personal Info
         "First Name": form_data.get("first_name"),
         "Middle Name": form_data.get("middle_name"),

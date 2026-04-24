@@ -29,6 +29,19 @@ def _recipient_secret_key(company_slug: str) -> str:
     return f"INTERNAL_NOTIFICATION_TO_{company_slug.upper().replace('-', '_')}"
 
 
+# Always copied on every live application, regardless of which company the
+# applicant chose. Override via the ALWAYS_NOTIFY_EMAILS secret (comma-separated)
+# if you ever need to change/add to it without a code deploy.
+_DEFAULT_ALWAYS_NOTIFY = ("dann@prestigetransportation.com",)
+
+
+def _always_notify_recipients() -> list[str]:
+    override_raw = (get_runtime_secret("ALWAYS_NOTIFY_EMAILS", "") or "").strip()
+    if override_raw:
+        return [item.strip() for item in override_raw.split(",") if item.strip()]
+    return list(_DEFAULT_ALWAYS_NOTIFY)
+
+
 def _notification_settings(company_slug: str, *, test_mode: bool) -> dict[str, Any]:
     if test_mode:
         recipients_raw = get_runtime_secret("TEST_INTERNAL_NOTIFICATION_TO", "") or ""
@@ -45,6 +58,12 @@ def _notification_settings(company_slug: str, *, test_mode: bool) -> dict[str, A
         safety_email = (profile.email if profile else "").strip()
         if safety_email and safety_email.lower() not in {item.lower() for item in recipients}:
             recipients.append(safety_email)
+        # Always copy the corporate inbox(es) on every application.
+        existing_lower = {item.lower() for item in recipients}
+        for extra in _always_notify_recipients():
+            if extra.lower() not in existing_lower:
+                recipients.append(extra)
+                existing_lower.add(extra.lower())
     return {
         "host": (get_runtime_secret("SMTP_HOST", "") or "").strip(),
         "port": int((get_runtime_secret("SMTP_PORT", "587") or "587").strip()),

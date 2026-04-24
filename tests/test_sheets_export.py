@@ -68,7 +68,7 @@ def test_build_submission_row_orders_columns_and_stringifies():
     assert by_column["CDL State"] == "CA"
     assert by_column["CDL Class"] == "A"
     assert by_column["Submission ID"] == "sub-001"
-    assert by_column["Test Mode"] == "No"
+    assert "Test Mode" not in by_column
     assert by_column["Send Emails"] == "Yes"
     # Empty ERP-only columns are present but blank.
     assert by_column["FEIN"] == ""
