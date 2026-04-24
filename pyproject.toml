@@ -5,6 +5,8 @@ description = "Add your description here"
 requires-python = ">=3.11"
 dependencies = [
     "fpdf2>=2.8.7",
+    "google-auth>=2.29.0",
+    "gspread>=6.0.0",
     "pypdf>=4.3.1",
     "python-dotenv>=1.0.1",
     "requests>=2.32.0",
