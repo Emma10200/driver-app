@@ -26,7 +26,7 @@ from typing import Any
 import streamlit as st
 
 from config import COMPANY_PROFILES, DEFAULT_COMPANY_SLUG
-from services.sheets_export import append_from_payload
+from services.sheets_export import append_decision_from_payload, append_from_payload
 from submission_storage import (
     get_runtime_secret,
     list_supabase_submissions,
@@ -160,6 +160,72 @@ def _render_submission_card(
                 else:
                     st.error(
                         f"Push failed: {result.get('message', 'unknown error')}"
+                    )
+
+        st.markdown("---")
+        st.markdown("**Decision** — log this applicant in the Approved or Declined tab.")
+        decision_log_key = f"decision_log_{source}_{identifier}"
+        previous_decision = st.session_state.get(decision_log_key)
+        if previous_decision:
+            badge = "✅" if previous_decision.get("decision") == "approved" else "❌"
+            st.info(
+                f"{badge} Last logged: **{previous_decision.get('decision', '').title()}** "
+                f"({previous_decision.get('tab', '')}) — {previous_decision.get('decided_by', '?')}"
+            )
+        decision_form_key = f"decision_form_{source}_{identifier}"
+        with st.form(decision_form_key, clear_on_submit=False):
+            decided_by = st.text_input(
+                "Your name / initials",
+                key=f"decided_by_{source}_{identifier}",
+                placeholder="e.g. Dann",
+            )
+            notes = st.text_area(
+                "Notes (optional)",
+                key=f"notes_{source}_{identifier}",
+                placeholder="Optional context for the decision log",
+                height=70,
+            )
+            approve_col, decline_col = st.columns(2)
+            with approve_col:
+                approve_clicked = st.form_submit_button(
+                    "✅ Approve", use_container_width=True
+                )
+            with decline_col:
+                decline_clicked = st.form_submit_button(
+                    "❌ Decline", use_container_width=True
+                )
+
+        if approve_clicked or decline_clicked:
+            decision = "approved" if approve_clicked else "declined"
+            if not (decided_by or "").strip():
+                st.warning("Please enter your name/initials before logging a decision.")
+            else:
+                with st.spinner(f"Logging {decision}..."):
+                    result = append_decision_from_payload(
+                        payload,
+                        decision=decision,
+                        decided_by=decided_by,
+                        notes=notes,
+                        storage_location=location_label,
+                    )
+                status = result.get("status")
+                if status == "appended":
+                    st.session_state[decision_log_key] = {
+                        "decision": decision,
+                        "decided_by": decided_by.strip(),
+                        "tab": result.get("tab", ""),
+                    }
+                    st.success(
+                        f"Logged **{decision}** in the '{result.get('tab')}' tab."
+                    )
+                elif status == "disabled":
+                    st.warning(
+                        "Sheets export is not configured. "
+                        "Set GOOGLE_SERVICE_ACCOUNT_JSON and APPLICANTS_SHEET_ID in Streamlit Secrets."
+                    )
+                else:
+                    st.error(
+                        f"Could not log decision: {result.get('message', 'unknown error')}"
                     )
 
         st.markdown("**Files**")

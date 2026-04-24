@@ -34,6 +34,14 @@ COMPANY_TAB_NAMES: dict[str, str] = {
     "side-xpress": "Xpress",
 }
 
+# Tab names for the cross-company decision log. Approved + declined live in
+# the same spreadsheet as the per-company applicant tabs so safety/owner only
+# has one URL to bookmark.
+DECISION_TAB_NAMES: dict[str, str] = {
+    "approved": "Approved",
+    "declined": "Declined",
+}
+
 # Division label written into the General > Division column. Mirrors what the
 # ProTransport ERP shows so safety can copy/paste straight across.
 COMPANY_DIVISION_LABEL: dict[str, str] = {
@@ -341,21 +349,23 @@ def _open_worksheet(spreadsheet_id: str, tab_name: str, credentials_info: dict[s
     return worksheet
 
 
-def _ensure_header(worksheet) -> None:
-    """Make sure the header row matches SHEET_COLUMNS.
+def _ensure_header(worksheet, columns: list[str] | None = None) -> None:
+    """Make sure the header row matches the given column list.
 
+    Defaults to SHEET_COLUMNS so existing callers stay backward-compatible.
     If the sheet is empty, write the header. If the existing header doesn't
     match (e.g. we added new columns in a release), rewrite row 1 in place so
     new columns appear above any existing data. Only the header row is
     touched -- data rows below it are never modified here.
     """
 
+    target_columns = columns if columns is not None else SHEET_COLUMNS
     existing = worksheet.row_values(1)
-    if existing == SHEET_COLUMNS:
+    if existing == target_columns:
         return
 
     # Make sure the worksheet has enough columns to fit the header.
-    needed_cols = len(SHEET_COLUMNS)
+    needed_cols = len(target_columns)
     try:
         current_cols = int(getattr(worksheet, "col_count", 0) or 0)
     except (TypeError, ValueError):
@@ -366,7 +376,7 @@ def _ensure_header(worksheet) -> None:
         except Exception:  # noqa: BLE001 - resize is best-effort
             logger.debug("Could not resize worksheet columns", exc_info=True)
 
-    worksheet.update("A1", [SHEET_COLUMNS])
+    worksheet.update("A1", [target_columns])
     try:
         worksheet.freeze(rows=1)
     except Exception:  # noqa: BLE001 - freeze is cosmetic, never fatal
@@ -456,6 +466,144 @@ def append_from_payload(
     test_mode = bool(form_data.get("test_mode"))
 
     return append_submission_row(
+        company_slug=company_slug,
+        form_data=form_data,
+        licenses=payload.get("licenses") or [],
+        submission_id=submission_id,
+        storage_location=storage_location,
+        test_mode=test_mode,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Decision log (Approved / Declined tabs)
+# ---------------------------------------------------------------------------
+
+# Columns prepended to every decision row. The remainder of the row mirrors
+# SHEET_COLUMNS so safety/owner can see the full applicant snapshot alongside
+# the decision metadata in one place.
+DECISION_PREFIX_COLUMNS: list[str] = [
+    "Decision",
+    "Decided At",
+    "Decided By",
+    "Company",
+    "Notes",
+]
+DECISION_SHEET_COLUMNS: list[str] = DECISION_PREFIX_COLUMNS + SHEET_COLUMNS
+
+
+def _decision_tab_name(decision: str) -> str:
+    key = (decision or "").strip().lower()
+    if key not in DECISION_TAB_NAMES:
+        raise ValueError(
+            f"Unknown decision '{decision}'. Expected one of: "
+            f"{sorted(DECISION_TAB_NAMES)}."
+        )
+    return DECISION_TAB_NAMES[key]
+
+
+def append_decision_row(
+    *,
+    decision: str,
+    decided_by: str | None,
+    notes: str | None,
+    company_slug: str | None,
+    form_data: dict[str, Any] | None,
+    licenses: list[dict[str, Any]] | None = None,
+    submission_id: str | None = None,
+    storage_location: str | None = None,
+    test_mode: bool = False,
+) -> dict[str, Any]:
+    """Insert one row into the Approved or Declined tab. Always returns a status dict."""
+
+    settings = _sheets_settings()
+    if not settings["service_account_json"] or not settings["spreadsheet_id"]:
+        return {
+            "status": "disabled",
+            "message": "Sheets export not configured (missing GOOGLE_SERVICE_ACCOUNT_JSON or APPLICANTS_SHEET_ID).",
+        }
+
+    try:
+        tab_name = _decision_tab_name(decision)
+    except ValueError as exc:
+        return {"status": "error", "message": str(exc)}
+
+    try:
+        credentials_info = json.loads(settings["service_account_json"])
+    except json.JSONDecodeError as exc:
+        logger.warning("Invalid GOOGLE_SERVICE_ACCOUNT_JSON: %s", exc)
+        return {
+            "status": "error",
+            "message": f"GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON: {exc}",
+        }
+
+    applicant_row = build_submission_row(
+        form_data=form_data,
+        licenses=licenses,
+        submission_id=submission_id,
+        storage_location=storage_location,
+        test_mode=test_mode,
+        company_slug=company_slug,
+    )
+    profile = (
+        COMPANY_PROFILES.get((company_slug or "").strip().lower())
+        or COMPANY_PROFILES.get(DEFAULT_COMPANY_SLUG)
+    )
+    company_label = profile.name if profile else (company_slug or "")
+    prefix_values = [
+        tab_name,
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        (decided_by or "").strip(),
+        company_label,
+        (notes or "").strip(),
+    ]
+    row = prefix_values + applicant_row
+
+    try:
+        worksheet = _open_worksheet(
+            settings["spreadsheet_id"], tab_name, credentials_info
+        )
+        _ensure_header(worksheet, DECISION_SHEET_COLUMNS)
+        worksheet.insert_row(row, index=2, value_input_option="USER_ENTERED")
+        return {
+            "status": "appended",
+            "message": f"Row added to '{tab_name}' tab.",
+            "tab": tab_name,
+        }
+    except Exception as exc:  # noqa: BLE001 - never let Sheets break the dashboard
+        logger.warning("Sheets decision append failed for '%s': %s", tab_name, exc)
+        return {
+            "status": "error",
+            "message": f"Sheets append failed: {exc}",
+            "tab": tab_name,
+        }
+
+
+def append_decision_from_payload(
+    payload: dict[str, Any],
+    *,
+    decision: str,
+    decided_by: str | None = None,
+    notes: str | None = None,
+    storage_location: str | None = None,
+    company_slug_override: str | None = None,
+) -> dict[str, Any]:
+    """Wrapper that pulls company/licenses out of a saved submission payload."""
+
+    payload = payload or {}
+    form_data = payload.get("form_data") or {}
+    company_slug = (
+        company_slug_override
+        or form_data.get("company_slug")
+        or DEFAULT_COMPANY_SLUG
+    )
+    submission_id = payload.get("submission_key") or payload.get("submission_id")
+    test_mode = bool(form_data.get("test_mode"))
+
+    return append_decision_row(
+        decision=decision,
+        decided_by=decided_by,
+        notes=notes,
         company_slug=company_slug,
         form_data=form_data,
         licenses=payload.get("licenses") or [],

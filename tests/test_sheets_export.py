@@ -320,3 +320,138 @@ def test_ensure_header_rewrites_when_mismatched(monkeypatch):
     assert update_args[1] == [sheets_export.SHEET_COLUMNS]
     fake_worksheet.resize.assert_called_once()
     fake_worksheet.insert_row.assert_called_once()
+
+
+def test_append_decision_row_writes_to_approved_tab(monkeypatch):
+    creds_json = json.dumps(
+        {
+            "type": "service_account",
+            "client_email": "x@example.iam.gserviceaccount.com",
+            "private_key": "k",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    )
+    _set_secrets(
+        monkeypatch,
+        GOOGLE_SERVICE_ACCOUNT_JSON=creds_json,
+        APPLICANTS_SHEET_ID="sheet-xyz",
+    )
+
+    fake_worksheet = MagicMock()
+    fake_worksheet.row_values.return_value = list(sheets_export.DECISION_SHEET_COLUMNS)
+
+    captured: dict[str, object] = {}
+
+    def fake_open(spreadsheet_id, tab_name, credentials_info):
+        captured["tab_name"] = tab_name
+        return fake_worksheet
+
+    monkeypatch.setattr(sheets_export, "_open_worksheet", fake_open)
+
+    result = sheets_export.append_decision_row(
+        decision="approved",
+        decided_by="Dann",
+        notes="looks great",
+        company_slug="prestige",
+        form_data={"first_name": "Jane", "last_name": "Driver"},
+        submission_id="sub-99",
+    )
+
+    assert result["status"] == "appended"
+    assert result["tab"] == "Approved"
+    assert captured["tab_name"] == "Approved"
+    fake_worksheet.insert_row.assert_called_once()
+    args, kwargs = fake_worksheet.insert_row.call_args
+    row_values = args[0]
+    # Decision prefix lands at the start of the row.
+    assert row_values[0] == "Approved"
+    assert row_values[2] == "Dann"
+    assert row_values[4] == "looks great"
+    assert kwargs.get("index") == 2
+
+
+def test_append_decision_row_routes_decline_to_declined_tab(monkeypatch):
+    creds_json = json.dumps(
+        {
+            "type": "service_account",
+            "client_email": "x@example.iam.gserviceaccount.com",
+            "private_key": "k",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    )
+    _set_secrets(
+        monkeypatch,
+        GOOGLE_SERVICE_ACCOUNT_JSON=creds_json,
+        APPLICANTS_SHEET_ID="sheet-xyz",
+    )
+
+    fake_worksheet = MagicMock()
+    fake_worksheet.row_values.return_value = list(sheets_export.DECISION_SHEET_COLUMNS)
+    monkeypatch.setattr(
+        sheets_export, "_open_worksheet", lambda *a, **k: fake_worksheet
+    )
+
+    result = sheets_export.append_decision_row(
+        decision="DECLINED",  # case-insensitive
+        decided_by="Safety",
+        notes=None,
+        company_slug="side-xpress",
+        form_data={"first_name": "X", "last_name": "Y"},
+    )
+
+    assert result["status"] == "appended"
+    assert result["tab"] == "Declined"
+
+
+def test_append_decision_row_rejects_unknown_decision(monkeypatch):
+    creds_json = json.dumps(
+        {
+            "type": "service_account",
+            "client_email": "x@example.iam.gserviceaccount.com",
+            "private_key": "k",
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    )
+    _set_secrets(
+        monkeypatch,
+        GOOGLE_SERVICE_ACCOUNT_JSON=creds_json,
+        APPLICANTS_SHEET_ID="sheet-xyz",
+    )
+
+    result = sheets_export.append_decision_row(
+        decision="maybe",
+        decided_by="Dann",
+        notes="",
+        company_slug="prestige",
+        form_data={"first_name": "X", "last_name": "Y"},
+    )
+    assert result["status"] == "error"
+    assert "maybe" in result["message"]
+
+
+def test_append_decision_from_payload_pulls_company_from_form_data(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_append(**kwargs):
+        captured.update(kwargs)
+        return {"status": "appended", "tab": "Approved"}
+
+    monkeypatch.setattr(sheets_export, "append_decision_row", fake_append)
+
+    payload = {
+        "submission_key": "20260420_120000_inc-test",
+        "form_data": {
+            "first_name": "Real",
+            "last_name": "Applicant",
+            "company_slug": "side-xpress",
+        },
+    }
+    result = sheets_export.append_decision_from_payload(
+        payload, decision="approved", decided_by="Dann", notes="ok"
+    )
+    assert result["status"] == "appended"
+    assert captured["company_slug"] == "side-xpress"
+    assert captured["decision"] == "approved"
+    assert captured["decided_by"] == "Dann"
+    assert captured["notes"] == "ok"
+    assert captured["submission_id"] == "20260420_120000_inc-test"
