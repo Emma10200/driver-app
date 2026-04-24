@@ -650,7 +650,17 @@ def list_supabase_submissions() -> list[dict[str, Any]]:
     bucket = settings["bucket"] or DEFAULT_BUCKET
     results: list[dict[str, Any]] = []
 
-    for slug in COMPANY_PROFILES:
+    # Include the canonical company slugs plus any legacy slugs we have
+    # historical Supabase data under (e.g. "side-xpress" was renamed to
+    # "xpress"; old submissions still live at companies/side-xpress/...).
+    LEGACY_SLUG_REMAP = {"side-xpress": "xpress"}
+    slugs_to_walk: list[str] = list(COMPANY_PROFILES.keys())
+    for legacy in LEGACY_SLUG_REMAP:
+        if legacy not in slugs_to_walk:
+            slugs_to_walk.append(legacy)
+
+    for slug in slugs_to_walk:
+        canonical_slug = LEGACY_SLUG_REMAP.get(slug, slug)
         for mode in ("live", "test-mode"):
             prefix = f"companies/{slug}/{mode}/submissions"
             try:
@@ -677,7 +687,7 @@ def list_supabase_submissions() -> list[dict[str, Any]]:
                 results.append(
                     {
                         "submission_key": name,
-                        "company_slug": slug,
+                        "company_slug": canonical_slug,
                         "mode": mode,
                         "remote_prefix": remote_prefix,
                         "location_label": f"{bucket}/{remote_prefix}",

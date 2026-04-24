@@ -33,7 +33,7 @@ def test_notification_settings_auto_includes_company_safety_email(monkeypatch):
         "dann@prestigetransportation.com",
     ]
 
-    xpress = notification_service._notification_settings("side-xpress", test_mode=False)
+    xpress = notification_service._notification_settings("xpress", test_mode=False)
     assert xpress["recipients"] == [
         "ops@example.com",
         "safety@xpresstransinc.com",

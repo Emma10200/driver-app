@@ -78,7 +78,7 @@ def test_build_submission_row_orders_columns_and_stringifies():
 
 def test_tab_name_routing():
     assert sheets_export._tab_name_for_company("prestige") == "Prestige Transportation"
-    assert sheets_export._tab_name_for_company("side-xpress") == "Xpress"
+    assert sheets_export._tab_name_for_company("xpress") == "Xpress"
     # Unknown slug falls back to the default company profile's display name.
     assert sheets_export._tab_name_for_company("unknown-slug") == "PRESTIGE TRANSPORTATION INC."
 
@@ -133,7 +133,7 @@ def test_append_submission_row_inserts_at_top_with_header(monkeypatch):
     monkeypatch.setattr(sheets_export, "_open_worksheet", fake_open)
 
     result = sheets_export.append_submission_row(
-        company_slug="side-xpress",
+        company_slug="xpress",
         form_data={
             "first_name": "Test",
             "last_name": "Applicant",
@@ -232,7 +232,7 @@ def test_division_label_routes_per_company():
     row = sheets_export.build_submission_row(
         form_data={"first_name": "A", "last_name": "B"},
         licenses=[],
-        company_slug="side-xpress",
+        company_slug="xpress",
     )
     by_column = dict(zip(sheets_export.SHEET_COLUMNS, row))
     assert by_column["Division"] == "Xpress Inc"
@@ -270,7 +270,7 @@ def test_append_from_payload_uses_company_slug_from_form_data(monkeypatch):
         "form_data": {
             "first_name": "Real",
             "last_name": "Applicant",
-            "company_slug": "side-xpress",
+            "company_slug": "xpress",
             "test_mode": False,
         },
         "licenses": [{"license_number": "X1"}],
@@ -278,7 +278,7 @@ def test_append_from_payload_uses_company_slug_from_form_data(monkeypatch):
 
     result = sheets_export.append_from_payload(payload, storage_location="/tmp/x")
     assert result["status"] == "appended"
-    assert captured["company_slug"] == "side-xpress"
+    assert captured["company_slug"] == "xpress"
     assert captured["submission_id"] == "20260420_120000_inc-test"
     assert captured["storage_location"] == "/tmp/x"
     assert captured["test_mode"] is False
@@ -395,7 +395,7 @@ def test_append_decision_row_routes_decline_to_declined_tab(monkeypatch):
         decision="DECLINED",  # case-insensitive
         decided_by="Safety",
         notes=None,
-        company_slug="side-xpress",
+        company_slug="xpress",
         form_data={"first_name": "X", "last_name": "Y"},
     )
 
@@ -443,14 +443,14 @@ def test_append_decision_from_payload_pulls_company_from_form_data(monkeypatch):
         "form_data": {
             "first_name": "Real",
             "last_name": "Applicant",
-            "company_slug": "side-xpress",
+            "company_slug": "xpress",
         },
     }
     result = sheets_export.append_decision_from_payload(
         payload, decision="approved", decided_by="Dann", notes="ok"
     )
     assert result["status"] == "appended"
-    assert captured["company_slug"] == "side-xpress"
+    assert captured["company_slug"] == "xpress"
     assert captured["decision"] == "approved"
     assert captured["decided_by"] == "Dann"
     assert captured["notes"] == "ok"

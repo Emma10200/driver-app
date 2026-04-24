@@ -31,12 +31,14 @@ def normalize_company_slug(value: str | None) -> str:
         "": DEFAULT_COMPANY_SLUG,
         "prestige-transportation": "prestige",
         "prestige-transportation-inc": "prestige",
-        "sidexpress": "side-xpress",
-        "sideexpress": "side-xpress",
-        "side-xpress-inc": "side-xpress",
-        "xpress": "side-xpress",
-        "xpress-trans": "side-xpress",
-        "xpresstrans": "side-xpress",
+        # Legacy slug -- keep so old printed/bookmarked links resolve.
+        "side-xpress": "xpress",
+        "sidexpress": "xpress",
+        "sideexpress": "xpress",
+        "side-xpress-inc": "xpress",
+        "xpress-inc": "xpress",
+        "xpress-trans": "xpress",
+        "xpresstrans": "xpress",
     }
     slug = aliases.get(slug, slug)
     return slug if slug in COMPANY_PROFILES else DEFAULT_COMPANY_SLUG
@@ -50,12 +52,13 @@ def _try_resolve_known_slug(value: str | None) -> str | None:
     aliases = {
         "prestige-transportation": "prestige",
         "prestige-transportation-inc": "prestige",
-        "sidexpress": "side-xpress",
-        "sideexpress": "side-xpress",
-        "side-xpress-inc": "side-xpress",
-        "xpress": "side-xpress",
-        "xpress-trans": "side-xpress",
-        "xpresstrans": "side-xpress",
+        "side-xpress": "xpress",
+        "sidexpress": "xpress",
+        "sideexpress": "xpress",
+        "side-xpress-inc": "xpress",
+        "xpress-inc": "xpress",
+        "xpress-trans": "xpress",
+        "xpresstrans": "xpress",
     }
     candidate = aliases.get(raw, raw)
     return candidate if candidate in COMPANY_PROFILES else None
@@ -68,7 +71,7 @@ def extract_slug_from_query() -> str | None:
       - ?company=<slug>   (canonical, kept for backwards compatibility)
       - ?c=<slug>         (short alias)
       - ?co=<slug>        (short alias)
-      - ?<slug>           (keyless, e.g. ?prestige or ?side-xpress)
+      - ?<slug>           (keyless, e.g. ?prestige or ?xpress)
     """
     for key in ("company", "c", "co"):
         resolved = _try_resolve_known_slug(_query_param_value(key))

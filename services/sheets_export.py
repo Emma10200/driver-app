@@ -1,8 +1,7 @@
 """Append each submission as a row in the shared 'Applicants' Google Sheet.
 
-The sheet has one tab per company. The slug-to-tab mapping intentionally keeps
-the URL slug "side-xpress" so existing application links keep working, while
-the visible tab is just "Xpress" per the safety team's preference.
+The sheet has one tab per company. The visible tab name is just "Xpress" per
+the safety team's preference.
 
 The tabs receive a frozen header row on first write. New submissions are
 inserted at row 2 so the newest applicant is always at the top -- no manual
@@ -27,11 +26,10 @@ from submission_storage import get_runtime_secret
 logger = logging.getLogger(__name__)
 
 
-# Visible Google Sheets tab name per company slug. Slugs themselves are
-# unchanged so existing ?company=<slug> links keep working.
+# Visible Google Sheets tab name per company slug.
 COMPANY_TAB_NAMES: dict[str, str] = {
     "prestige": "Prestige Transportation",
-    "side-xpress": "Xpress",
+    "xpress": "Xpress",
 }
 
 # Tab names for the cross-company decision log. Approved + declined live in
@@ -46,7 +44,7 @@ DECISION_TAB_NAMES: dict[str, str] = {
 # ProTransport ERP shows so safety can copy/paste straight across.
 COMPANY_DIVISION_LABEL: dict[str, str] = {
     "prestige": "Prestig Inc",
-    "side-xpress": "Xpress Inc",
+    "xpress": "Xpress Inc",
 }
 
 # Column order written into the header row. The layout mirrors the
