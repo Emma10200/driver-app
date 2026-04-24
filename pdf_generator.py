@@ -47,13 +47,33 @@ class CompanyPDF(FPDF):
         self.ln(2)
 
     def field_row(self, label, value):
+        label_w = 70
+        line_h = 6
+        val_str = str(value) if value else ""
+
+        x_start = self.l_margin
+        y_start = self.get_y()
+        val_w = self.w - self.r_margin - (x_start + label_w)
+
+        # Label (bold, may wrap onto multiple lines for long labels)
+        self.set_xy(x_start, y_start)
         self.set_font("Helvetica", "B", 9)
         self.set_text_color(60, 60, 60)
-        self.cell(70, 6, label, new_x="RIGHT")
+        label_lines = self.multi_cell(
+            label_w, line_h, label, dry_run=True, output="LINES"
+        )
+        label_line_count = max(1, len(label_lines))
+        self.multi_cell(label_w, line_h, label, new_x="RIGHT", new_y="TOP")
+        label_bottom = y_start + line_h * label_line_count
+
+        # Value (positioned to the right of the label, also wraps if long)
         self.set_font("Helvetica", "", 9)
         self.set_text_color(0, 0, 0)
-        val_str = str(value) if value else ""
-        self.cell(0, 6, val_str, new_x="LMARGIN", new_y="NEXT")
+        self.multi_cell(val_w, line_h, val_str, new_x="LMARGIN", new_y="NEXT")
+        value_bottom = self.get_y()
+
+        # Advance past whichever side took more vertical space
+        self.set_y(max(label_bottom, value_bottom))
 
     def field_row_wide(self, label, value):
         self.set_font("Helvetica", "B", 9)

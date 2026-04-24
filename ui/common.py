@@ -621,6 +621,27 @@ def selectbox_with_placeholder(
     help: str | None = None,
     disabled: bool = False,
 ) -> str:
+    # For binary Yes/No questions, render as a horizontal radio instead of a
+    # dropdown. On mobile, selectbox triggers the on-screen keyboard (for option
+    # search), which eats half the screen for a two-choice answer.
+    if sorted(options) == ["No", "Yes"]:
+        ordered = list(options)
+        radio_index: int | None
+        if current_value in ordered:
+            radio_index = ordered.index(current_value)
+        else:
+            radio_index = None
+        selected = st.radio(
+            label,
+            ordered,
+            index=radio_index,
+            key=key,
+            help=help,
+            disabled=disabled,
+            horizontal=True,
+        )
+        return selected if selected in ordered else ""
+
     display_options = [placeholder, *options]
     selected_value = current_value if current_value in options else None
     index = display_options.index(selected_value) if selected_value else 0

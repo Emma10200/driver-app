@@ -16,12 +16,14 @@ from pdf_generator import (
     generate_psp_pdf,
 )
 from runtime_context import get_active_company_profile, get_storage_namespace, is_test_mode_active
+from services.csv_export import build_application_csv
 from services.document_service import render_supporting_documents_section, sync_pending_uploads
+from services.draft_service import LOCAL_STORAGE_DIR
 from services.error_log_service import log_application_error
 from services.notification_service import send_internal_submission_notification
 from services.submission_service import build_submission_artifacts, save_submission_bundle
 from state import prev_page, reset_application_state
-from submission_storage import get_submission_destination_summary
+from submission_storage import get_submission_destination_summary, read_supporting_document_bytes
 from ui.common import render_save_draft_button, show_missing_fields, show_user_error, summary_item
 
 
@@ -37,12 +39,39 @@ def _attempt_submission_notification() -> None:
 
     try:
         artifacts = st.session_state.get("submission_artifacts") or {}
+        uploaded_documents = st.session_state.get("uploaded_documents", []) or []
+        application_csv = build_application_csv(
+            form_data=st.session_state.form_data,
+            employers=st.session_state.get("employers", []),
+            licenses=st.session_state.get("licenses", []),
+            accidents=st.session_state.get("accidents", []),
+            violations=st.session_state.get("violations", []),
+            uploaded_documents=uploaded_documents,
+        )
+        supporting_payloads: list[dict[str, object]] = []
+        for document in uploaded_documents:
+            try:
+                content = read_supporting_document_bytes(
+                    document, local_base_dir=LOCAL_STORAGE_DIR
+                )
+            except Exception:  # noqa: BLE001 - missing bytes is non-fatal
+                content = None
+            supporting_payloads.append(
+                {
+                    "file_name": document.get("file_name"),
+                    "content_type": document.get("content_type"),
+                    "size_bytes": document.get("size_bytes"),
+                    "content": content,
+                }
+            )
         notification_result = send_internal_submission_notification(
             form_data=st.session_state.form_data,
             submission_result={"location_label": saved_submission_dir},
-            uploaded_documents=st.session_state.get("uploaded_documents", []),
+            uploaded_documents=uploaded_documents,
             application_pdf=artifacts.get("application_pdf"),
             artifacts=artifacts,
+            application_csv=application_csv,
+            supporting_document_payloads=supporting_payloads,
         )
     except Exception as exc:  # noqa: BLE001 - never let notification break the success page
         st.session_state.submission_notification_status_code = "error"

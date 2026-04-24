@@ -235,3 +235,98 @@ def test_send_internal_submission_notification_in_test_mode_uses_fallback_recipi
     assert smtp_instance.sent_message is not None
     assert smtp_instance.sent_message["Subject"].startswith("[TEST] ")
     assert smtp_instance.sent_message["To"] == "statements@prestigetransportation.com"
+
+def _stub_settings(monkeypatch, *, max_attachment_bytes: int = 0):
+    monkeypatch.setattr(
+        notification_service,
+        "_notification_settings",
+        lambda company_slug, test_mode: {
+            "host": "smtp.example.com",
+            "port": 587,
+            "username": "mailer",
+            "password": "secret",
+            "from_email": "alerts@example.com",
+            "recipients": ["safety@example.com"],
+            "use_tls": True,
+            "use_ssl": False,
+            "attachment_password": "",
+            "max_attachment_bytes": max_attachment_bytes,
+        },
+    )
+
+
+def test_notification_attaches_csv_and_supporting_documents(monkeypatch):
+    smtp_instance: FakeSMTP | None = None
+
+    def fake_smtp(host, port, timeout=30):
+        nonlocal smtp_instance
+        smtp_instance = FakeSMTP(host, port, timeout)
+        return smtp_instance
+
+    _stub_settings(monkeypatch)
+    monkeypatch.setattr(notification_service.smtplib, "SMTP", fake_smtp)
+
+    result = notification_service.send_internal_submission_notification(
+        form_data={"first_name": "Jane", "last_name": "Doe"},
+        submission_result={"location_label": "local/path"},
+        uploaded_documents=[{"file_name": "license.pdf"}],
+        application_pdf=b"%PDF-1.4 packet",
+        application_csv=b"Field,Value\nFirst Name,Jane\n",
+        supporting_document_payloads=[
+            {
+                "file_name": "license.pdf",
+                "content_type": "application/pdf",
+                "size_bytes": 12,
+                "content": b"FAKEPDFBYTES",
+            }
+        ],
+    )
+
+    assert result["status"] == "sent"
+    assert smtp_instance is not None and smtp_instance.sent_message is not None
+    filenames = sorted(
+        part.get_filename() for part in smtp_instance.sent_message.iter_attachments()
+    )
+    assert any(name.endswith(".pdf") and "packet" in name for name in filenames)
+    assert any(name.endswith(".csv") for name in filenames)
+    assert "license.pdf" in filenames
+    body = smtp_instance.sent_message.get_body(preferencelist=("plain",)).get_content()
+    assert "license.pdf" in body
+    assert "spreadsheet" in body.lower()
+
+
+def test_notification_skips_oversize_supporting_documents(monkeypatch):
+    smtp_instance: FakeSMTP | None = None
+
+    def fake_smtp(host, port, timeout=30):
+        nonlocal smtp_instance
+        smtp_instance = FakeSMTP(host, port, timeout)
+        return smtp_instance
+
+    # Cap so small that even one tiny doc cannot fit alongside the PDF + CSV.
+    _stub_settings(monkeypatch, max_attachment_bytes=50)
+    monkeypatch.setattr(notification_service.smtplib, "SMTP", fake_smtp)
+
+    result = notification_service.send_internal_submission_notification(
+        form_data={"first_name": "Jane", "last_name": "Doe"},
+        submission_result={"location_label": "local/path"},
+        uploaded_documents=[{"file_name": "huge.pdf"}],
+        application_pdf=b"%PDF-1.4 " + b"x" * 40,
+        application_csv=b"Field,Value\n",
+        supporting_document_payloads=[
+            {
+                "file_name": "huge.pdf",
+                "content_type": "application/pdf",
+                "size_bytes": 1000,
+                "content": b"x" * 1000,
+            }
+        ],
+    )
+
+    assert result["status"] == "sent"
+    assert smtp_instance is not None and smtp_instance.sent_message is not None
+    filenames = [part.get_filename() for part in smtp_instance.sent_message.iter_attachments()]
+    assert "huge.pdf" not in filenames  # was skipped due to size cap
+    body = smtp_instance.sent_message.get_body(preferencelist=("plain",)).get_content()
+    assert "NOT attached" in body
+    assert "huge.pdf" in body

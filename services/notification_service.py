@@ -55,6 +55,11 @@ def _notification_settings(company_slug: str, *, test_mode: bool) -> dict[str, A
         "use_tls": _as_bool(get_runtime_secret("SMTP_USE_TLS", "true"), True),
         "use_ssl": _as_bool(get_runtime_secret("SMTP_USE_SSL", "false"), False),
         "attachment_password": (get_runtime_secret("SMTP_ATTACHMENT_PASSWORD", "") or "").strip(),
+        # Total cap on the email payload (PDF + CSV + supporting docs). Most
+        # SMTP relays choke around 25 MB; default to 22 MB to leave headroom.
+        "max_attachment_bytes": int(
+            (get_runtime_secret("SMTP_MAX_ATTACHMENT_BYTES", "23068672") or "23068672").strip()
+        ),
     }
 
 
@@ -139,6 +144,8 @@ def send_internal_submission_notification(
     uploaded_documents: list[dict[str, Any]] | None = None,
     application_pdf: bytes | None = None,
     artifacts: dict[str, bytes | None] | None = None,
+    application_csv: bytes | None = None,
+    supporting_document_payloads: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     company_slug = str(form_data.get("company_slug") or DEFAULT_COMPANY_SLUG).strip() or DEFAULT_COMPANY_SLUG
     test_mode = bool(form_data.get("test_mode")) or is_test_mode_active()
@@ -201,31 +208,87 @@ def send_internal_submission_notification(
 
     bundle_sections_line = ", ".join(bundle_sections) if bundle_sections else "Application"
 
-    message.set_content(
-        "\n".join(
-            [
-                "A new driver application was submitted.",
-                "",
-                f"Applicant: {applicant_name}",
-                f"Preferred office: {preferred_office}",
-                f"Phone: {form_data.get('primary_phone', 'Not provided')}",
-                f"Email: {form_data.get('email', 'Not provided')}",
-                f"Submitted at: {form_data.get('final_submission_timestamp', 'Unknown')}",
-                f"Saved to: {submission_result.get('location_label', 'Unknown location')}",
-                f"Supporting document count: {len(uploaded_documents)}",
-                f"Attached PDF includes: {bundle_sections_line}.",
-                "",
-                "This notification intentionally excludes supporting-document attachments and sensitive SSN data.",
-            ]
-        )
-    )
-
     merged_pdf = _merge_pdfs(pdf_parts) or application_pdf or b""
     pdf_bytes = _protect_pdf(merged_pdf, settings.get("attachment_password", ""))
     applicant_last = str(form_data.get("last_name", "driver")).strip().lower().replace(" ", "-") or "driver"
     timestamp = datetime.now().strftime("%Y%m%d")
-    filename = f"driver_application_packet_{applicant_last}_{timestamp}.pdf"
-    message.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=filename)
+    pdf_filename = f"driver_application_packet_{applicant_last}_{timestamp}.pdf"
+
+    # Track total attachment size and decide which supporting docs we can fit.
+    max_total = max(0, int(settings.get("max_attachment_bytes", 0) or 0))
+    used_bytes = len(pdf_bytes)
+
+    csv_filename: str | None = None
+    if application_csv:
+        csv_filename = f"driver_application_{applicant_last}_{timestamp}.csv"
+        used_bytes += len(application_csv)
+
+    supporting_payloads = supporting_document_payloads or []
+    attached_docs: list[dict[str, Any]] = []
+    skipped_docs: list[dict[str, Any]] = []
+    for payload in supporting_payloads:
+        content = payload.get("content")
+        if not isinstance(content, (bytes, bytearray)) or not content:
+            skipped_docs.append({**payload, "_reason": "no bytes available"})
+            continue
+        size = len(content)
+        if max_total and (used_bytes + size) > max_total:
+            skipped_docs.append({**payload, "_reason": "would exceed email size limit"})
+            continue
+        attached_docs.append({**payload, "_size": size})
+        used_bytes += size
+
+    body_lines = [
+        "A new driver application was submitted.",
+        "",
+        f"Applicant: {applicant_name}",
+        f"Preferred office: {preferred_office}",
+        f"Phone: {form_data.get('primary_phone', 'Not provided')}",
+        f"Email: {form_data.get('email', 'Not provided')}",
+        f"Submitted at: {form_data.get('final_submission_timestamp', 'Unknown')}",
+        f"Saved to: {submission_result.get('location_label', 'Unknown location')}",
+        f"Supporting document count: {len(uploaded_documents)}",
+        f"Attached PDF includes: {bundle_sections_line}.",
+    ]
+    if csv_filename:
+        body_lines.append(
+            f"Attached CSV ({csv_filename}) contains every form field for spreadsheet use."
+        )
+    if attached_docs:
+        body_lines.append("")
+        body_lines.append("Supporting documents attached to this email:")
+        for doc in attached_docs:
+            body_lines.append(f"  - {doc.get('file_name', 'document')}")
+    if skipped_docs:
+        body_lines.append("")
+        body_lines.append(
+            "The following supporting documents were NOT attached (size limit or missing bytes); "
+            "they remain available at the saved location above:"
+        )
+        for doc in skipped_docs:
+            body_lines.append(
+                f"  - {doc.get('file_name', 'document')} ({doc.get('_reason', 'unavailable')})"
+            )
+
+    message.set_content("\n".join(body_lines))
+
+    message.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=pdf_filename)
+    if application_csv and csv_filename:
+        message.add_attachment(
+            application_csv, maintype="text", subtype="csv", filename=csv_filename
+        )
+    for doc in attached_docs:
+        ctype = str(doc.get("content_type") or "application/octet-stream")
+        if "/" in ctype:
+            maintype, _, subtype = ctype.partition("/")
+        else:
+            maintype, subtype = "application", "octet-stream"
+        message.add_attachment(
+            bytes(doc["content"]),
+            maintype=maintype,
+            subtype=subtype,
+            filename=str(doc.get("file_name") or "document"),
+        )
 
     try:
         _deliver_message(message, settings)

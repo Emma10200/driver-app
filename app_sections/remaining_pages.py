@@ -786,7 +786,7 @@ def render_remaining_page(page: int) -> bool:
                         acc_fatalities = st.number_input("Fatalities", min_value=0, key=f"acc_fat_{i}", value=int(existing.get("fatalities", 0) or 0))
                     with acol2:
                         acc_injuries = st.number_input("Injuries", min_value=0, key=f"acc_inj_{i}", value=int(existing.get("injuries", 0) or 0))
-                        acc_hazmat = st.selectbox("Hazmat Spill?", ["No", "Yes"], key=f"acc_haz_{i}", index=0 if existing.get("hazmat", "No") == "No" else 1)
+                        acc_hazmat = st.radio("Hazmat Spill?", ["No", "Yes"], key=f"acc_haz_{i}", index=0 if existing.get("hazmat", "No") == "No" else 1, horizontal=True)
                         acc_description = st.text_area("Description", key=f"acc_desc_{i}", value=existing.get("description", ""))
                     accidents_input.append(
                         {

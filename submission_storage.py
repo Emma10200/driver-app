@@ -543,3 +543,47 @@ def save_supporting_documents(
     result["draft_id"] = draft_id
     result["documents"] = metadata
     return result
+
+
+def read_supporting_document_bytes(
+    document: dict[str, Any],
+    *,
+    local_base_dir: Path,
+) -> bytes | None:
+    """Return raw bytes for a previously-saved supporting document.
+
+    Tries the in-memory ``content`` payload first (still present when the same
+    session that uploaded the file is also submitting it), then falls back to
+    the storage backends in the same order ``load_draft_bundle`` does.
+    Returns ``None`` if the bytes cannot be located.
+    """
+    inline = document.get("content")
+    if isinstance(inline, (bytes, bytearray)) and inline:
+        return bytes(inline)
+
+    relative_path = str(document.get("storage_path") or "").strip("/")
+    if not relative_path:
+        return None
+
+    backend = _get_backend()
+    supabase_ready = _supabase_enabled()
+    if backend == "supabase":
+        read_order = ["supabase"]
+    elif backend == "local":
+        read_order = ["local"]
+    else:
+        read_order = ["supabase", "local"] if supabase_ready else ["local", "supabase"]
+
+    for source in read_order:
+        try:
+            if source == "local":
+                return _read_local_bytes(local_base_dir, relative_path)
+            if source == "supabase" and supabase_ready:
+                return _read_supabase_bytes(relative_path)
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
+
+    return None
+
