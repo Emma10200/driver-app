@@ -64,11 +64,11 @@ def _render_company_picker() -> None:
     st.markdown(
         """
         <div style='text-align:center; padding: 1.5rem 0 0.5rem;'>
-            <h1 style='margin-bottom:0.25rem;'>This link doesn't go anywhere yet</h1>
+            <h1 style='margin-bottom:0.25rem;'>Whoops &mdash; this link looks off</h1>
             <p style='color:#bbb; font-size:1.05rem; max-width:640px; margin:0.75rem auto 0;'>
-                We couldn't find the application you're looking for. If you were
-                sent here to fill out a driver application, please reach out and
-                we'll send you the correct link.
+                It looks like the application link was pasted incomplete or
+                copied wrong. No worries &mdash; reach out below and we'll get
+                you a working link right away.
             </p>
         </div>
         """,
@@ -77,27 +77,31 @@ def _render_company_picker() -> None:
 
     st.markdown(
         """
-        <div style='max-width:520px; margin:2rem auto 0; padding:1.5rem 1.75rem;
+        <div style='max-width:560px; margin:2rem auto 0; padding:1.5rem 1.75rem;
                     border:1px solid rgba(255,255,255,0.12); border-radius:12px;
                     background:rgba(255,255,255,0.03);'>
-            <h3 style='margin:0 0 1rem; text-align:center;'>Who to call</h3>
+            <h3 style='margin:0 0 1rem; text-align:center;'>
+                Call or text any of the following for a working application link
+            </h3>
             <p style='margin:0.35rem 0;'>
                 <strong>Safety</strong> &mdash; Dann
                 &nbsp;<a href='tel:+12245953477'>(224) 595-3477</a>
+                &nbsp;&middot;&nbsp;
+                <a href='sms:+12245953477'>text</a>
             </p>
             <p style='margin:0.35rem 0;'>
                 <strong>Accounting</strong> &mdash; Emma
                 &nbsp;<a href='tel:+17735439577'>(773) 543-9577</a>
+                &nbsp;&middot;&nbsp;
+                <a href='sms:+17735439577'>text</a>
             </p>
             <p style='margin:0.35rem 0;'>
                 <strong>Owner</strong> &mdash; Deyana
                 &nbsp;<a href='tel:+12247151371'>(224) 715-1371</a>
+                &nbsp;&middot;&nbsp;
+                <a href='sms:+12247151371'>text</a>
             </p>
         </div>
-        <p style='text-align:center; color:#888; margin-top:2rem; font-size:0.9rem;'>
-            Already have your link? Make sure you opened the full URL &mdash; the
-            company shortcode at the end is what loads your application.
-        </p>
         """,
         unsafe_allow_html=True,
     )
