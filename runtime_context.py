@@ -140,11 +140,58 @@ def get_storage_namespace() -> str:
     return f"companies/{profile.slug}/{mode_segment}"
 
 
+def _canonicalize_company_slug_in_url(canonical_slug: str) -> None:
+    """If the URL carries a legacy/alias form of the slug, rewrite it in place
+    to the canonical form (e.g. ?company=side-xpress -> ?company=xpress, or
+    keyless ?side-xpress -> ?xpress). Only writes when something actually
+    changes to avoid a rerun loop."""
+    try:
+        params = st.query_params
+    except Exception:
+        return
+
+    # Keyed forms: company / c / co
+    for key in ("company", "c", "co"):
+        try:
+            raw = params.get(key, "")
+        except Exception:
+            raw = ""
+        if isinstance(raw, list):
+            raw = raw[0] if raw else ""
+        raw = str(raw or "")
+        if raw and raw.strip().lower() != canonical_slug:
+            resolved = _try_resolve_known_slug(raw)
+            if resolved == canonical_slug:
+                try:
+                    params[key] = canonical_slug
+                except Exception:
+                    pass
+                return
+
+    # Keyless form: ?side-xpress -> ?xpress
+    try:
+        keys = list(params.keys())
+    except Exception:
+        keys = []
+    for key in keys:
+        if key.strip().lower() == canonical_slug:
+            continue
+        resolved = _try_resolve_known_slug(key)
+        if resolved == canonical_slug:
+            try:
+                del params[key]
+                params[canonical_slug] = ""
+            except Exception:
+                pass
+            return
+
+
 def sync_runtime_context() -> None:
     url_slug = extract_slug_from_query()
     if url_slug:
         st.session_state.company_slug = url_slug
         st.session_state.company_slug_locked = True
+        _canonicalize_company_slug_in_url(url_slug)
     elif st.session_state.get("company_slug_locked"):
         # User picked via the in-app picker; keep their selection.
         pass
