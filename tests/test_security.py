@@ -39,33 +39,32 @@ def test_app_header_escaping(monkeypatch):
     assert payload not in header_html
     assert escaped_payload in header_html
 
-def test_company_picker_escaping(monkeypatch):
+def test_company_picker_does_not_leak_company_list(monkeypatch):
+    """The landing page must not expose the list of companies; it should only
+    show contact info so visitors can request the right link."""
     captured_markdown = []
     mock_markdown = MagicMock(side_effect=lambda content, unsafe_allow_html=False: captured_markdown.append(content))
     monkeypatch.setattr(st, "markdown", mock_markdown)
 
-    payload = "<script>alert('xss')</script>"
-    escaped_payload = html.escape(payload)
-
     fake_profile = SimpleNamespace(
-        name=payload,
-        city_state_zip=payload,
-        slug="test-slug"
+        name="Secret Company LLC",
+        city_state_zip="Secret City, SC 00000",
+        slug="secret-co",
     )
 
     import config
-    monkeypatch.setattr(config, "COMPANY_PROFILES", {"test-slug": fake_profile})
+    monkeypatch.setattr(config, "COMPANY_PROFILES", {"secret-co": fake_profile})
     monkeypatch.setattr(app, "st", st)
-    mock_columns = MagicMock(return_value=[MagicMock()])
-    monkeypatch.setattr(st, "columns", mock_columns)
 
     app._render_company_picker()
 
-    # Find the markdown call containing the profile name and city
-    picker_markdown = next((m for m in captured_markdown if "</h3>" in m), None)
-    assert picker_markdown is not None
-    assert payload not in picker_markdown
-    assert escaped_payload in picker_markdown
+    rendered = "\n".join(captured_markdown)
+    assert "Secret Company LLC" not in rendered
+    assert "secret-co" not in rendered
+    # The help page should surface the office contacts.
+    assert "Dann" in rendered
+    assert "Emma" in rendered
+    assert "Deyana" in rendered
 
 def test_document_filename_escaping(monkeypatch):
     captured_markdown = []

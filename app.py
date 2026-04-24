@@ -11,7 +11,6 @@ Compliance notes:
 
 from pathlib import Path
 
-import html
 import streamlit as st
 
 from app_sections.company_questions import render_company_questions_page
@@ -55,42 +54,51 @@ sync_runtime_context()
 
 
 def _render_company_picker() -> None:
-    from config import COMPANY_PROFILES
+    """Render the 'broken link' help page shown when no company slug was provided.
 
+    Per ownership: the public landing page should NOT expose the list of
+    companies. If someone reaches this page, the link they followed was either
+    incomplete or wrong. Show a friendly help message with phone numbers so they
+    can call us for the correct application link.
+    """
     st.markdown(
         """
         <div style='text-align:center; padding: 1.5rem 0 0.5rem;'>
-            <h1 style='margin-bottom:0.25rem;'>Driver Application</h1>
-            <p style='color:#555; font-size:1.05rem;'>Select the company for this application.</p>
+            <h1 style='margin-bottom:0.25rem;'>This link doesn't go anywhere yet</h1>
+            <p style='color:#bbb; font-size:1.05rem; max-width:640px; margin:0.75rem auto 0;'>
+                We couldn't find the application you're looking for. If you were
+                sent here to fill out a driver application, please reach out and
+                we'll send you the correct link.
+            </p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    profiles = list(COMPANY_PROFILES.values())
-    cols = st.columns(len(profiles))
-    for col, profile in zip(cols, profiles):
-        with col:
-            profile_name = html.escape(profile.name)
-            profile_city_state_zip = html.escape(profile.city_state_zip or "")
-            st.markdown(
-                f"<div style='text-align:center; padding-top:0.5rem;'><h3 style='margin-bottom:0.25rem;'>{profile_name}</h3>"
-                f"<p style='color:#666; min-height:2.5rem;'>{profile_city_state_zip}</p></div>",
-                unsafe_allow_html=True,
-            )
-            if st.button(f"Apply with {profile.name}", key=f"pick_company_{profile.slug}", use_container_width=True, type="primary"):
-                st.session_state.company_slug = profile.slug
-                st.session_state.company_slug_locked = True
-                try:
-                    st.query_params["company"] = profile.slug
-                except Exception:
-                    pass
-                st.rerun()
-
     st.markdown(
-        "<p style='text-align:center; color:#888; margin-top:2rem; font-size:0.85rem;'>"
-        "If you received a direct link, it should bring you straight to the right application."
-        "</p>",
+        """
+        <div style='max-width:520px; margin:2rem auto 0; padding:1.5rem 1.75rem;
+                    border:1px solid rgba(255,255,255,0.12); border-radius:12px;
+                    background:rgba(255,255,255,0.03);'>
+            <h3 style='margin:0 0 1rem; text-align:center;'>Who to call</h3>
+            <p style='margin:0.35rem 0;'>
+                <strong>Safety</strong> &mdash; Dann
+                &nbsp;<a href='tel:+12245953477'>(224) 595-3477</a>
+            </p>
+            <p style='margin:0.35rem 0;'>
+                <strong>Accounting</strong> &mdash; Emma
+                &nbsp;<a href='tel:+17735439577'>(773) 543-9577</a>
+            </p>
+            <p style='margin:0.35rem 0;'>
+                <strong>Owner</strong> &mdash; Deyana
+                &nbsp;<a href='tel:+12247151371'>(224) 715-1371</a>
+            </p>
+        </div>
+        <p style='text-align:center; color:#888; margin-top:2rem; font-size:0.9rem;'>
+            Already have your link? Make sure you opened the full URL &mdash; the
+            company shortcode at the end is what loads your application.
+        </p>
+        """,
         unsafe_allow_html=True,
     )
 

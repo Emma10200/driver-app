@@ -188,7 +188,9 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
     pdf.section_title("Personal Information")
     pdf.field_row("Full Name:", f"{_safe(form_data, 'first_name')} {_safe(form_data, 'middle_name')} {_safe(form_data, 'last_name')}")
     pdf.field_row("Date of Birth:", _safe(form_data, "dob"))
-    pdf.field_row("SSN:", "***-**-" + _safe(form_data, "ssn")[-4:] if len(_safe(form_data, "ssn")) >= 4 else "On File")
+    # SSN intentionally omitted from the PDF; it lives only in the per-applicant
+    # CSV that ships in the same notification email, so it never appears twice
+    # in the safety mailbox.
     pdf.field_row("Address:", _safe(form_data, "address"))
     pdf.field_row("City, State, Zip:", f"{_safe(form_data, 'city')}, {_safe(form_data, 'state')} {_safe(form_data, 'zip_code')}")
     pdf.field_row("Country:", _safe(form_data, "country", "United States"))
