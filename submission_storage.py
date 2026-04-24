@@ -587,3 +587,130 @@ def read_supporting_document_bytes(
 
     return None
 
+
+# ---------------------------------------------------------------------------
+# Supabase listing helpers (used by the admin dashboard).
+# ---------------------------------------------------------------------------
+
+
+def supabase_storage_enabled() -> bool:
+    """Public alias of ``_supabase_enabled`` for use outside this module."""
+    return _supabase_enabled()
+
+
+def _supabase_list(prefix: str, *, limit: int = 200) -> list[dict[str, Any]]:
+    """Return raw Supabase Storage listing for ``prefix`` (one level only)."""
+
+    settings = _get_supabase_settings()
+    if not settings["url"] or not settings["key"]:
+        return []
+    base_url = settings["url"].rstrip("/")
+    bucket = settings["bucket"] or DEFAULT_BUCKET
+    list_url = f"{base_url}/storage/v1/object/list/{bucket}"
+    headers = {**_build_supabase_headers(), "Content-Type": "application/json"}
+    body = {
+        "prefix": prefix.strip("/"),
+        "limit": limit,
+        "offset": 0,
+        "sortBy": {"column": "name", "order": "desc"},
+    }
+    response = requests.post(list_url, headers=headers, json=body, timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, list):
+        return []
+    return data
+
+
+def list_supabase_submissions() -> list[dict[str, Any]]:
+    """Enumerate every submission stored in Supabase across both companies.
+
+    Returns a list of dicts, one per submission, each shaped like::
+
+        {
+            "submission_key": "20260420_151243_inc-prestig",
+            "company_slug": "prestige",
+            "mode": "live" | "test-mode",
+            "remote_prefix": "companies/prestige/live/submissions/<key>",
+            "location_label": "<bucket>/<remote_prefix>",
+            "files": ["application.pdf", "submission.json", ...],
+        }
+
+    Returns an empty list (never raises) if Supabase is not configured or the
+    listing call fails. The admin dashboard treats failures as "no remote
+    submissions" rather than crashing the whole page.
+    """
+
+    if not _supabase_enabled():
+        return []
+
+    from config import COMPANY_PROFILES  # local import to avoid a cycle at import time
+
+    settings = _get_supabase_settings()
+    bucket = settings["bucket"] or DEFAULT_BUCKET
+    results: list[dict[str, Any]] = []
+
+    for slug in COMPANY_PROFILES:
+        for mode in ("live", "test-mode"):
+            prefix = f"companies/{slug}/{mode}/submissions"
+            try:
+                submission_dirs = _supabase_list(prefix)
+            except Exception:  # noqa: BLE001 - dashboard must not crash
+                continue
+            for entry in submission_dirs:
+                name = str(entry.get("name") or "").strip()
+                if not name:
+                    continue
+                # Folder entries from the Supabase list API have no id.
+                if entry.get("id") is not None:
+                    continue
+                remote_prefix = f"{prefix}/{name}"
+                try:
+                    files_listing = _supabase_list(remote_prefix)
+                except Exception:  # noqa: BLE001
+                    files_listing = []
+                file_names = [
+                    str(f.get("name") or "")
+                    for f in files_listing
+                    if f.get("id") is not None and f.get("name")
+                ]
+                results.append(
+                    {
+                        "submission_key": name,
+                        "company_slug": slug,
+                        "mode": mode,
+                        "remote_prefix": remote_prefix,
+                        "location_label": f"{bucket}/{remote_prefix}",
+                        "files": sorted(file_names),
+                    }
+                )
+
+    # Sort newest-first by the timestamp prefix in the submission key
+    # (keys look like 20260420_151243_inc-prestig).
+    results.sort(key=lambda item: item["submission_key"], reverse=True)
+    return results
+
+
+def read_remote_submission_payload(remote_prefix: str) -> dict[str, Any] | None:
+    """Fetch and parse ``submission.json`` from Supabase. Returns ``None`` on failure."""
+
+    relative_path = f"{remote_prefix.strip('/')}/submission.json"
+    try:
+        raw = _read_supabase_bytes(relative_path)
+    except Exception:  # noqa: BLE001 - dashboard must not crash
+        return None
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def read_remote_file_bytes(remote_prefix: str, file_name: str) -> bytes | None:
+    """Fetch a single file from Supabase Storage. Returns ``None`` on failure."""
+
+    relative_path = f"{remote_prefix.strip('/')}/{file_name.strip('/')}"
+    try:
+        return _read_supabase_bytes(relative_path)
+    except Exception:  # noqa: BLE001
+        return None
+

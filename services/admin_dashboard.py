@@ -27,7 +27,13 @@ import streamlit as st
 
 from config import COMPANY_PROFILES, DEFAULT_COMPANY_SLUG
 from services.sheets_export import append_from_payload
-from submission_storage import get_runtime_secret
+from submission_storage import (
+    get_runtime_secret,
+    list_supabase_submissions,
+    read_remote_file_bytes,
+    read_remote_submission_payload,
+    supabase_storage_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +96,22 @@ def _company_label(slug: str) -> str:
     return profile.name if profile else slug
 
 
-def _render_submission_card(submission_dir: Path, payload: dict[str, Any]) -> None:
+def _render_submission_card(
+    *,
+    source: str,
+    identifier: str,
+    payload: dict[str, Any],
+    location_label: str,
+    files: list[dict[str, Any]],
+) -> None:
+    """Render one submission card.
+
+    ``source`` is either ``"local"`` or ``"supabase"``. ``files`` is a list of
+    ``{"name": str, "fetch": Callable[[], bytes | None]}`` dicts so we can
+    reuse this card for both filesystem-backed and Supabase-backed
+    submissions without leaking storage details.
+    """
+
     form_data = payload.get("form_data") or {}
     first = (form_data.get("first_name") or "").strip()
     last = (form_data.get("last_name") or "").strip()
@@ -103,6 +124,7 @@ def _render_submission_card(submission_dir: Path, payload: dict[str, Any]) -> No
     label_bits = [name, _company_label(slug)]
     if submitted_at:
         label_bits.append(submitted_at)
+    label_bits.append("☁️ Supabase" if source == "supabase" else "💾 Local")
     if test_mode:
         label_bits.append("TEST MODE")
     header_label = "  ·  ".join(label_bits)
@@ -115,15 +137,15 @@ def _render_submission_card(submission_dir: Path, payload: dict[str, Any]) -> No
                 f"**Phone:** {form_data.get('primary_phone', '') or '—'}  \n"
                 f"**City/State:** "
                 f"{(form_data.get('city') or '—')}, {(form_data.get('state') or '')}  \n"
-                f"**Submission ID:** `{payload.get('submission_key') or submission_dir.name}`  \n"
-                f"**Folder:** `{submission_dir}`"
+                f"**Submission ID:** `{payload.get('submission_key') or identifier}`  \n"
+                f"**Location:** `{location_label}`"
             )
         with col_b:
-            push_key = f"push_{submission_dir.name}"
+            push_key = f"push_{source}_{identifier}"
             if st.button("📤 Push to shared sheet", key=push_key, use_container_width=True):
                 with st.spinner("Pushing to Google Sheets..."):
                     result = append_from_payload(
-                        payload, storage_location=str(submission_dir)
+                        payload, storage_location=location_label
                     )
                 status = result.get("status")
                 if status == "appended":
@@ -141,22 +163,26 @@ def _render_submission_card(submission_dir: Path, payload: dict[str, Any]) -> No
                     )
 
         st.markdown("**Files**")
-        files = sorted(p for p in submission_dir.iterdir() if p.is_file())
         if not files:
-            st.caption("No files in this submission folder.")
+            st.caption("No files in this submission.")
             return
         cols = st.columns(min(len(files), 3) or 1)
-        for index, file_path in enumerate(files):
+        for index, file_entry in enumerate(files):
+            file_name = file_entry["name"]
+            target_col = cols[index % len(cols)]
             try:
-                data = file_path.read_bytes()
-            except OSError as exc:
-                cols[index % len(cols)].error(f"{file_path.name}: {exc}")
+                data = file_entry["fetch"]()
+            except Exception as exc:  # noqa: BLE001 - never crash the dashboard
+                target_col.error(f"{file_name}: {exc}")
                 continue
-            cols[index % len(cols)].download_button(
-                label=f"⬇️ {file_path.name}",
+            if data is None:
+                target_col.warning(f"{file_name}: could not fetch")
+                continue
+            target_col.download_button(
+                label=f"⬇️ {file_name}",
                 data=data,
-                file_name=file_path.name,
-                key=f"dl_{submission_dir.name}_{file_path.name}",
+                file_name=file_name,
+                key=f"dl_{source}_{identifier}_{file_name}",
                 use_container_width=True,
             )
 
@@ -180,19 +206,89 @@ def render_admin_dashboard(submissions_root: Path) -> None:
             st.session_state[SESSION_AUTH_KEY] = False
             st.rerun()
 
-    submission_dirs = _iter_submission_dirs(submissions_root)
-    if not submission_dirs:
-        st.info(
-            f"No submissions found under `{submissions_root}`. "
-            "If real submissions live in Supabase only, they won't appear here."
-        )
-        return
+    # Build the merged list: Supabase first (these are the real production
+    # submissions), then any local submissions that are not also represented
+    # in Supabase by the same submission key.
+    seen_keys: set[str] = set()
+    rendered_count = 0
 
-    st.caption(f"Found **{len(submission_dirs)}** submission(s).")
-    for submission_dir in submission_dirs:
+    if supabase_storage_enabled():
+        try:
+            remote_submissions = list_supabase_submissions()
+        except Exception as exc:  # noqa: BLE001 - dashboard must not crash
+            st.warning(f"Could not list Supabase submissions: {exc}")
+            remote_submissions = []
+
+        for entry in remote_submissions:
+            key = entry["submission_key"]
+            seen_keys.add(key)
+            payload = read_remote_submission_payload(entry["remote_prefix"])
+            if payload is None:
+                with st.expander(f"⚠️  {key} (could not read submission.json)"):
+                    st.caption(f"Location: `{entry['location_label']}`")
+                continue
+            files = [
+                {
+                    "name": file_name,
+                    "fetch": (
+                        lambda prefix=entry["remote_prefix"], name=file_name: read_remote_file_bytes(prefix, name)
+                    ),
+                }
+                for file_name in entry["files"]
+            ]
+            _render_submission_card(
+                source="supabase",
+                identifier=key,
+                payload=payload,
+                location_label=entry["location_label"],
+                files=files,
+            )
+            rendered_count += 1
+    else:
+        st.caption(
+            "Supabase is not configured for this deployment — only local "
+            "submissions on the running container will appear below."
+        )
+
+    local_dirs = _iter_submission_dirs(submissions_root)
+    for submission_dir in local_dirs:
+        if submission_dir.name in seen_keys:
+            # Already shown via the Supabase listing.
+            continue
         payload = _load_submission(submission_dir)
         if payload is None:
             with st.expander(f"⚠️  {submission_dir.name} (could not read submission.json)"):
                 st.caption(f"Folder: `{submission_dir}`")
             continue
-        _render_submission_card(submission_dir, payload)
+        local_files = sorted(p for p in submission_dir.iterdir() if p.is_file())
+        files = [
+            {
+                "name": file_path.name,
+                "fetch": (lambda path=file_path: path.read_bytes()),
+            }
+            for file_path in local_files
+        ]
+        _render_submission_card(
+            source="local",
+            identifier=submission_dir.name,
+            payload=payload,
+            location_label=str(submission_dir),
+            files=files,
+        )
+        rendered_count += 1
+
+    if rendered_count == 0:
+        if supabase_storage_enabled():
+            st.info(
+                "No submissions found in Supabase or in the local "
+                f"`{submissions_root}` folder."
+            )
+        else:
+            st.info(
+                f"No submissions found under `{submissions_root}`. "
+                "If real submissions live in Supabase only, configure the "
+                "SUPABASE_URL / SUPABASE_SERVICE_KEY secrets so the "
+                "dashboard can list them."
+            )
+    else:
+        st.caption(f"Rendered **{rendered_count}** submission(s).")
