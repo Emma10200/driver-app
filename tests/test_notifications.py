@@ -180,7 +180,10 @@ def test_send_internal_submission_notification_uses_tls_and_reply_to(monkeypatch
     assert smtp_instance is not None
     assert [call[0] for call in smtp_instance.calls] == ["ehlo", "starttls", "ehlo", "login", "send_message"]
     assert smtp_instance.sent_message is not None
-    assert smtp_instance.sent_message["Reply-To"] == "emma@example.com"
+    # Reply-To is intentionally NOT set: the applicant email must not appear
+    # in any header on the internal packet (avoids any chance of the team
+    # accidentally including the applicant when they hit Reply All).
+    assert smtp_instance.sent_message["Reply-To"] is None
     text_part = smtp_instance.sent_message.get_body(preferencelist=("plain",))
     assert text_part is not None
     assert "Supporting document count: 1" in text_part.get_content()

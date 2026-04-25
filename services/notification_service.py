@@ -210,8 +210,6 @@ def send_internal_submission_notification(
     message["Subject"] = f"{subject_prefix}New driver application submitted: {applicant_name}"
     message["From"] = settings["from_email"]
     message["To"] = ", ".join(settings["recipients"])
-    if applicant_email:
-        message["Reply-To"] = applicant_email
 
     if not application_pdf and not artifacts:
         return {
