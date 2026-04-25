@@ -33,6 +33,17 @@ BASE_STYLES = """
     div[data-testid="stMultiSelect"] div[role="combobox"] {
         font-size: 16px !important;
     }
+    /* Stop the on-screen keyboard from popping up on dropdowns. The
+       BaseWeb select wraps an <input> we don't actually want users typing
+       into -- the wrapper div handles taps and opens the menu. Making
+       the input itself inert (no caret, no pointer events) keeps the
+       dropdown tappable while preventing the soft keyboard from eating
+       half the screen on mobile. Trade-off: keyboard typeahead-search
+       on desktop is also disabled; arrow keys + click still work. */
+    div[data-baseweb="select"] input {
+        caret-color: transparent !important;
+        pointer-events: none !important;
+    }
     /* Touch-friendly primary buttons on mobile. */
     .stButton > button {
         min-height: 2.75rem;

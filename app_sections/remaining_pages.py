@@ -309,7 +309,7 @@ def render_remaining_page(page: int) -> bool:
         num_employers = st.number_input(
             "How many employers/contractors would you like to add?",
             min_value=1,
-            max_value=10,
+            max_value=25,
             value=max(1, len(st.session_state.employers) if st.session_state.employers else 1),
             help="You can add more entries if needed.",
         )

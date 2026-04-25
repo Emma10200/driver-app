@@ -241,14 +241,31 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
         pdf.field_row("Other Name(s):", _safe(form_data, "other_name"))
     pdf.field_row("Safe Driving Awards:", _safe(form_data, "safe_driving_awards"))
     if _safe(form_data, "position") == "Owner Operator":
-        pdf.field_row("Owner Op Equipment:", _safe(form_data, "equipment_description"))
-        pdf.field_row("  Year/Make/Model:", f"{_safe(form_data, 'equipment_year')} {_safe(form_data, 'equipment_make')} {_safe(form_data, 'equipment_model')}")
-        pdf.field_row("  Color:", _safe(form_data, "equipment_color"))
-        pdf.field_row("  VIN:", _safe(form_data, "equipment_vin"))
-        pdf.field_row("  Weight:", _safe(form_data, "equipment_weight"))
-        pdf.field_row("  Mileage:", _safe(form_data, "equipment_mileage"))
-        pdf.field_row("  Fifth Wheel Height:", _safe(form_data, "fifth_wheel_height"))
-    pdf.ln(4)
+        equipment_desc = _safe(form_data, "equipment_description")
+        ymm = " ".join(
+            part for part in [
+                _safe(form_data, "equipment_year"),
+                _safe(form_data, "equipment_make"),
+                _safe(form_data, "equipment_model"),
+            ] if part
+        )
+        # Only render Owner Op rows that actually have data; blank labels
+        # leave awkward gaps and can orphan a single row onto the next page.
+        if equipment_desc:
+            pdf.field_row("Owner Op Equipment:", equipment_desc)
+        if ymm:
+            pdf.field_row("  Year/Make/Model:", ymm)
+        for label, key in [
+            ("  Color:", "equipment_color"),
+            ("  VIN:", "equipment_vin"),
+            ("  Weight:", "equipment_weight"),
+            ("  Mileage:", "equipment_mileage"),
+            ("  Fifth Wheel Height:", "fifth_wheel_height"),
+        ]:
+            value = _safe(form_data, key)
+            if value:
+                pdf.field_row(label, value)
+    pdf.ln(2)
 
     # --- Driving Experience ---
     pdf.section_title("Driving Experience")
