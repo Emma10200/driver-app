@@ -33,16 +33,13 @@ BASE_STYLES = """
     div[data-testid="stMultiSelect"] div[role="combobox"] {
         font-size: 16px !important;
     }
-    /* Stop the on-screen keyboard from popping up on dropdowns. The
-       BaseWeb select wraps an <input> we don't actually want users typing
-       into -- the wrapper div handles taps and opens the menu. Making
-       the input itself inert (no caret, no pointer events) keeps the
-       dropdown tappable while preventing the soft keyboard from eating
-       half the screen on mobile. Trade-off: keyboard typeahead-search
-       on desktop is also disabled; arrow keys + click still work. */
+    /* Hide the typeahead caret on dropdowns -- we suppress the mobile
+       keyboard via JS (_suppress_select_keyboard_via_js) by marking the
+       inner input readonly + inputmode="none". CSS alone can't stop
+       BaseWeb from programmatically focusing the input, which is what
+       triggers the keyboard. */
     div[data-baseweb="select"] input {
         caret-color: transparent !important;
-        pointer-events: none !important;
     }
     /* Touch-friendly primary buttons on mobile. */
     .stButton > button {
@@ -483,6 +480,60 @@ def _sync_browser_autofill_via_js() -> None:
     )
 
 
+def _suppress_select_keyboard_via_js() -> None:
+    """Mark every BaseWeb <select> input as readonly + inputmode='none'.
+
+    Streamlit's selectbox uses BaseWeb, which programmatically focuses
+    an inner <input> when the user taps the combobox so typeahead works.
+    On mobile that focus opens the soft keyboard, which eats half the
+    screen for a list of fixed options. Setting inputmode="none" tells
+    the browser not to show a virtual keyboard for this input, and
+    readonly is a belt-and-suspenders for browsers that ignore inputmode.
+    Both attributes survive Streamlit reruns thanks to the MutationObserver.
+    """
+    components.html(
+        """
+        <script>
+        (function () {
+            const parentDocument = window.parent.document;
+            const SELECTOR = 'div[data-baseweb="select"] input';
+
+            function harden(input) {
+                if (input.getAttribute('inputmode') !== 'none') {
+                    input.setAttribute('inputmode', 'none');
+                }
+                if (!input.hasAttribute('readonly')) {
+                    input.setAttribute('readonly', 'readonly');
+                }
+            }
+
+            function applyAll(root) {
+                const scope = root && root.querySelectorAll ? root : parentDocument;
+                scope.querySelectorAll(SELECTOR).forEach(harden);
+            }
+
+            applyAll(parentDocument);
+
+            if (parentDocument.body && parentDocument.body.dataset.selectKeyboardSuppressBound !== '1') {
+                parentDocument.body.dataset.selectKeyboardSuppressBound = '1';
+                const observer = new MutationObserver((mutations) => {
+                    for (const mutation of mutations) {
+                        mutation.addedNodes.forEach((node) => {
+                            if (node.nodeType === 1) {
+                                applyAll(node);
+                            }
+                        });
+                    }
+                });
+                observer.observe(parentDocument.body, { childList: true, subtree: true });
+            }
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
 def render_save_draft_button(
     button_key: str,
     label: str = "Save Draft",
@@ -690,6 +741,7 @@ def render_app_shell() -> None:
         with st.sidebar:
             render_admin_test_tools()
     _sync_browser_autofill_via_js()
+    _suppress_select_keyboard_via_js()
     st.markdown(
         f"""
 <div class="app-header">
