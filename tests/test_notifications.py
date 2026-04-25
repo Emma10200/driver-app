@@ -375,3 +375,148 @@ def test_notification_skips_oversize_supporting_documents(monkeypatch):
     body = smtp_instance.sent_message.get_body(preferencelist=("plain",)).get_content()
     assert "NOT attached" in body
     assert "huge.pdf" in body
+
+
+def test_internal_notification_strips_applicant_from_recipients(monkeypatch):
+    """Defense in depth: even if the applicant's address ends up in the
+    internal recipient list (misconfigured secret, accidental match with the
+    company safety mailbox, etc.), the internal email -- which carries the
+    CSV and supporting documents -- must NEVER be delivered to them."""
+    smtp_instance: FakeSMTP | None = None
+
+    def fake_smtp(host, port, timeout=30):
+        nonlocal smtp_instance
+        smtp_instance = FakeSMTP(host, port, timeout)
+        return smtp_instance
+
+    monkeypatch.setattr(
+        notification_service,
+        "_notification_settings",
+        lambda company_slug, test_mode: {
+            "host": "smtp.example.com",
+            "port": 587,
+            "username": "mailer",
+            "password": "secret",
+            "from_email": "alerts@example.com",
+            "recipients": [
+                "ops@example.com",
+                "Applicant@Example.com",  # mixed case on purpose
+                "safety@example.com",
+            ],
+            "use_tls": True,
+            "use_ssl": False,
+            "attachment_password": "",
+            "max_attachment_bytes": 0,
+        },
+    )
+    monkeypatch.setattr(notification_service.smtplib, "SMTP", fake_smtp)
+
+    result = notification_service.send_internal_submission_notification(
+        form_data={
+            "first_name": "Emma",
+            "last_name": "Driver",
+            "email": "applicant@example.com",
+        },
+        submission_result={"location_label": "local/path"},
+        uploaded_documents=[],
+        application_pdf=b"%PDF-1.4 packet",
+        application_csv=b"Field,Value\n",
+    )
+
+    assert result["status"] == "sent"
+    assert smtp_instance is not None and smtp_instance.sent_message is not None
+    to_header = smtp_instance.sent_message["To"]
+    assert "applicant@example.com" not in to_header.lower()
+    assert "ops@example.com" in to_header
+    assert "safety@example.com" in to_header
+
+
+def test_internal_notification_errors_when_only_recipient_is_applicant(monkeypatch):
+    monkeypatch.setattr(
+        notification_service,
+        "_notification_settings",
+        lambda company_slug, test_mode: {
+            "host": "smtp.example.com",
+            "port": 587,
+            "username": "mailer",
+            "password": "secret",
+            "from_email": "alerts@example.com",
+            "recipients": ["applicant@example.com"],
+            "use_tls": True,
+            "use_ssl": False,
+            "attachment_password": "",
+            "max_attachment_bytes": 0,
+        },
+    )
+
+    def fake_smtp(*args, **kwargs):
+        raise AssertionError("SMTP must not be invoked when no internal recipients remain")
+
+    monkeypatch.setattr(notification_service.smtplib, "SMTP", fake_smtp)
+
+    result = notification_service.send_internal_submission_notification(
+        form_data={
+            "first_name": "Emma",
+            "last_name": "Driver",
+            "email": "applicant@example.com",
+        },
+        submission_result={"location_label": "local/path"},
+        uploaded_documents=[],
+        application_pdf=b"%PDF-1.4 packet",
+    )
+
+    assert result["status"] == "error"
+
+
+def test_send_applicant_confirmation_email_sends_clean_message(monkeypatch):
+    smtp_instance: FakeSMTP | None = None
+
+    def fake_smtp(host, port, timeout=30):
+        nonlocal smtp_instance
+        smtp_instance = FakeSMTP(host, port, timeout)
+        return smtp_instance
+
+    monkeypatch.setattr(
+        notification_service,
+        "_notification_settings",
+        lambda company_slug, test_mode: {
+            "host": "smtp.example.com",
+            "port": 587,
+            "username": "mailer",
+            "password": "secret",
+            "from_email": "alerts@example.com",
+            "recipients": ["ops@example.com"],
+            "use_tls": True,
+            "use_ssl": False,
+            "attachment_password": "",
+            "max_attachment_bytes": 0,
+        },
+    )
+    monkeypatch.setattr(notification_service.smtplib, "SMTP", fake_smtp)
+
+    result = notification_service.send_applicant_confirmation_email(
+        form_data={
+            "first_name": "Emma",
+            "last_name": "Driver",
+            "email": "applicant@example.com",
+            "company_slug": "prestige",
+        },
+        application_pdf=b"%PDF-1.4 packet",
+    )
+
+    assert result["status"] == "sent"
+    assert smtp_instance is not None and smtp_instance.sent_message is not None
+    assert smtp_instance.sent_message["To"] == "applicant@example.com"
+    # Only the application PDF -- no CSV, no supporting docs.
+    attachments = list(smtp_instance.sent_message.iter_attachments())
+    assert len(attachments) == 1
+    assert attachments[0].get_filename().endswith(".pdf")
+    assert attachments[0].get_filename().startswith("driver_application_driver_")
+
+
+def test_send_applicant_confirmation_email_skips_when_no_email():
+    result = notification_service.send_applicant_confirmation_email(
+        form_data={"first_name": "Emma", "last_name": "Driver", "email": ""},
+        application_pdf=b"%PDF-1.4 packet",
+    )
+    assert result["status"] == "skipped"

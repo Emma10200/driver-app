@@ -20,7 +20,10 @@ from services.csv_export import build_application_csv
 from services.document_service import render_supporting_documents_section, sync_pending_uploads
 from services.draft_service import LOCAL_STORAGE_DIR
 from services.error_log_service import log_application_error
-from services.notification_service import send_internal_submission_notification
+from services.notification_service import (
+    send_applicant_confirmation_email,
+    send_internal_submission_notification,
+)
 from services.sheets_export import append_submission_row
 from services.submission_service import build_submission_artifacts, save_submission_bundle
 from state import prev_page, reset_application_state
@@ -109,6 +112,52 @@ def _attempt_submission_notification() -> None:
             code="submission_notification_failed",
             user_message="Internal submission notification failed.",
             technical_details=notification_result.get("message"),
+            severity="warning",
+        )
+
+
+def _attempt_applicant_confirmation_email() -> None:
+    """Send the applicant their own clean confirmation (no CSV, no supporting docs)."""
+    if st.session_state.get("applicant_confirmation_sent"):
+        return
+    if st.session_state.get("applicant_confirmation_status_code") == "disabled":
+        return
+
+    form_data = st.session_state.get("form_data") or {}
+    if not str(form_data.get("email", "") or "").strip():
+        return
+
+    artifacts = st.session_state.get("submission_artifacts") or {}
+
+    try:
+        result = send_applicant_confirmation_email(
+            form_data=form_data,
+            application_pdf=artifacts.get("application_pdf"),
+        )
+    except Exception as exc:  # noqa: BLE001 - never let confirmation break the success page
+        st.session_state.applicant_confirmation_status_code = "error"
+        st.session_state.applicant_confirmation_error = str(exc)
+        log_application_error(
+            code="applicant_confirmation_exception",
+            user_message="Applicant confirmation email raised an exception.",
+            technical_details=str(exc),
+            severity="warning",
+        )
+        return
+
+    status = result.get("status")
+    st.session_state.applicant_confirmation_status_code = status
+    if status == "sent":
+        st.session_state.applicant_confirmation_sent = True
+        st.session_state.applicant_confirmation_error = None
+    elif status in {"disabled", "skipped"}:
+        st.session_state.applicant_confirmation_error = None
+    else:
+        st.session_state.applicant_confirmation_error = result.get("message")
+        log_application_error(
+            code="applicant_confirmation_failed",
+            user_message="Applicant confirmation email failed.",
+            technical_details=result.get("message"),
             severity="warning",
         )
 
@@ -375,6 +424,7 @@ def _render_submission_complete_body(submissions_dir: Path) -> None:
             st.session_state.submission_save_error = "Your application could not be saved right now. Please try again shortly."
 
     _attempt_submission_notification()
+    _attempt_applicant_confirmation_email()
     _attempt_sheets_export()
 
     st.success("### ✅ Application Submitted Successfully!")

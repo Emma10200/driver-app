@@ -36,6 +36,9 @@ SESSION_DEFAULTS: dict[str, Any] = {
     "submission_notification_status_code": None,
     "submission_notification_status": None,
     "submission_notification_error": None,
+    "applicant_confirmation_sent": False,
+    "applicant_confirmation_status_code": None,
+    "applicant_confirmation_error": None,
 }
 
 

@@ -177,6 +177,23 @@ def send_internal_submission_notification(
 
     settings = _notification_settings(company_slug, test_mode=test_mode)
 
+    applicant_email = str(form_data.get("email", "") or "").strip()
+    # Hard guard: the applicant must NEVER receive the internal packet
+    # (which contains the CSV export and supporting documents). Strip their
+    # address out of the recipient list regardless of how it got in there
+    # (misconfigured secret, accidental safety mailbox match, etc.).
+    if applicant_email:
+        applicant_lower = applicant_email.lower()
+        settings["recipients"] = [
+            r for r in settings["recipients"] if r.strip().lower() != applicant_lower
+        ]
+
+    if not settings["recipients"]:
+        return {
+            "status": "error",
+            "message": "Internal notification has no recipients after filtering the applicant address.",
+        }
+
     applicant_name = " ".join(
         part
         for part in [
@@ -193,7 +210,6 @@ def send_internal_submission_notification(
     message["Subject"] = f"{subject_prefix}New driver application submitted: {applicant_name}"
     message["From"] = settings["from_email"]
     message["To"] = ", ".join(settings["recipients"])
-    applicant_email = str(form_data.get("email", "") or "").strip()
     if applicant_email:
         message["Reply-To"] = applicant_email
 
@@ -321,6 +337,74 @@ def send_internal_submission_notification(
         "status": "sent",
         "message": f"Internal notification sent to {', '.join(settings['recipients'])}.",
     }
+
+
+def send_applicant_confirmation_email(
+    *,
+    form_data: dict[str, Any],
+    application_pdf: bytes | None = None,
+) -> dict[str, Any]:
+    """Send the applicant a clean confirmation email with a copy of their application.
+
+    This email intentionally contains NO CSV export and NO supporting documents --
+    just a friendly acknowledgment plus their own application PDF for their records.
+    The internal packet (CSV + uploaded docs) only goes to internal recipients via
+    `send_internal_submission_notification`.
+    """
+    applicant_email = str(form_data.get("email", "") or "").strip()
+    if not applicant_email:
+        return {"status": "skipped", "message": "No applicant email on file."}
+
+    company_slug = str(form_data.get("company_slug") or DEFAULT_COMPANY_SLUG).strip() or DEFAULT_COMPANY_SLUG
+    test_mode = bool(form_data.get("test_mode")) or is_test_mode_active()
+
+    if not notifications_enabled(company_slug, test_mode=test_mode):
+        return {"status": "disabled", "message": "Email is not configured on this deployment."}
+
+    settings = _notification_settings(company_slug, test_mode=test_mode)
+    if not settings["from_email"]:
+        return {"status": "disabled", "message": "No from-email configured."}
+
+    profile = COMPANY_PROFILES.get(company_slug) or COMPANY_PROFILES.get(DEFAULT_COMPANY_SLUG)
+    company_name = profile.name if profile else "our team"
+
+    applicant_first = str(form_data.get("first_name", "")).strip()
+    applicant_last = str(form_data.get("last_name", "")).strip()
+    applicant_display = (f"{applicant_first} {applicant_last}".strip()) or "Applicant"
+
+    message = EmailMessage()
+    subject_prefix = "[TEST] " if test_mode else ""
+    message["Subject"] = f"{subject_prefix}We received your {company_name} driver application"
+    message["From"] = settings["from_email"]
+    message["To"] = applicant_email
+
+    body = (
+        f"Hi {applicant_first or applicant_display},\n\n"
+        f"Thank you for submitting your driver application to {company_name}. "
+        "We have received it and our team will review and reach out using the "
+        "contact information you provided.\n\n"
+        "A copy of your completed application is attached for your records.\n\n"
+        "If you have any questions in the meantime, just reply to this email.\n\n"
+        f"-- {company_name}"
+    )
+    message.set_content(body)
+
+    if application_pdf:
+        last_for_file = (applicant_last or "driver").lower().replace(" ", "-") or "driver"
+        timestamp = datetime.now().strftime("%Y%m%d")
+        message.add_attachment(
+            application_pdf,
+            maintype="application",
+            subtype="pdf",
+            filename=f"driver_application_{last_for_file}_{timestamp}.pdf",
+        )
+
+    try:
+        _deliver_message(message, settings)
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+    return {"status": "sent", "message": f"Confirmation emailed to {applicant_email}."}
 
 
 def send_resume_link_email(
