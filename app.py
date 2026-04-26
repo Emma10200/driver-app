@@ -55,9 +55,9 @@ init_session_state()
 sync_runtime_context()
 
 
-# Standalone admin dashboard route. Reachable via ?dashboard=1; gated by
-# password (ADMIN_PASSWORD secret, default Prestige2021!). Short-circuits
-# the entire application flow so the dashboard renders by itself.
+# Standalone admin dashboard route. Reachable via ?dashboard=1; gated by admin
+# auth config (Google SSO, password fallback, or both). Short-circuits the
+# entire application flow so the dashboard renders by itself.
 if admin_dashboard_requested():
     render_admin_dashboard(SUBMISSIONS_DIR)
     render_version_footer()

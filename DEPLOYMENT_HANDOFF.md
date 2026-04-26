@@ -28,6 +28,8 @@ Do **not** upload these local-only files to GitHub:
 - `.streamlit/secrets.toml`
 - `submissions/`
 - `.venv/`
+- `.mypy_cache/`
+- `.pytest_cache/`
 
 Safe templates already included in the repo:
 
@@ -71,7 +73,19 @@ In Streamlit Community Cloud:
 ```toml
 [app]
 SUBMISSION_STORAGE_BACKEND = "auto"
+ADMIN_AUTH_MODE = "both"
+ADMIN_ALLOWED_EMAILS = "owner@gmail.com,safety@gmail.com"
+ADMIN_PASSWORD = "set-a-long-random-admin-password"
 ADMIN_TEST_TOKEN = "set-a-secret-token-for-admin-test-links"
+
+[auth]
+redirect_uri = "https://your-app.streamlit.app/oauth2callback"
+cookie_secret = "generate-a-long-random-string"
+
+[auth.google]
+client_id = "your-google-oauth-client-id.apps.googleusercontent.com"
+client_secret = "your-google-oauth-client-secret"
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
 
 [supabase]
 SUPABASE_URL = "https://your-project-ref.supabase.co"
@@ -115,8 +129,14 @@ Safe test mode uses fake data, stores records under a separate company test name
 ## Recommended settings
 
 - Keep `SUBMISSION_STORAGE_BACKEND = "auto"` for launch
-- Use `"both"` only if you also want local file saves during local development
+- Use `SUBMISSION_STORAGE_BACKEND = "both"` only if you also want local file
+  saves during local development
 - Do not put real secrets in GitHub
+- Set `ADMIN_PASSWORD` in Streamlit Secrets before using `?dashboard=1`; there
+  is intentionally no code fallback password.
+- For the admin dashboard, start with `ADMIN_AUTH_MODE = "both"`, verify Google
+  login with an allowlisted Gmail account, then switch to `"google"`.
+- See `docs/ADMIN_AUTH.md` for Google OAuth setup details.
 - Keep SMTP recipients limited to internal company inboxes only
 
 ## What safety/owner should review

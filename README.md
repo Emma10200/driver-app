@@ -41,6 +41,9 @@ pip install -r requirements.txt
 
 - Copy `.env.example` to `.env` and fill in local values, or
 - Use Streamlit secrets in `.streamlit/secrets.toml` for cloud-style config
+- The admin dashboard intentionally has no hardcoded fallback password; use
+  `ADMIN_PASSWORD`, Google SSO, or both via `ADMIN_AUTH_MODE`.
+- For Google SSO on the admin dashboard, see `docs/ADMIN_AUTH.md`.
 
 3. Run the app:
 
@@ -54,6 +57,8 @@ Recommended setup:
 
 - Host app on **Streamlit Community Cloud**
 - Store submissions in **Supabase**
+- Keep real secrets in Streamlit Secrets, not in GitHub.
+- Protect the hidden admin dashboard with Google SSO allowlisted Gmail accounts.
 
 For full deployment steps and troubleshooting, see:
 
@@ -68,6 +73,8 @@ For full deployment steps and troubleshooting, see:
 - `pdf_generator.py` — generated PDF output
 - `submission_storage.py` — local/Supabase storage logic
 - `config.py` — company profile + options
+- `docs/PROJECT_MAP.md` — navigation guide for the repo layout
+- `docs/ADMIN_AUTH.md` — admin password/Google SSO setup
 
 ## Data handling summary
 

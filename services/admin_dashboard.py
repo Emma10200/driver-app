@@ -1,8 +1,9 @@
-"""Password-protected admin dashboard for safety/ownership.
+"""Protected admin dashboard for safety/ownership.
 
-Reachable by adding ``?dashboard=1`` to the application URL. The default
-password is ``Prestige2021!`` and is overridable via the ``ADMIN_PASSWORD``
-secret (Streamlit Cloud Secrets, env var, or local secrets.toml).
+Reachable by adding ``?dashboard=1`` to the application URL. The dashboard can
+be gated by a runtime ``ADMIN_PASSWORD``, Google SSO with an explicit email
+allowlist, or both while SSO is being rolled out. There is intentionally no
+hardcoded fallback password.
 
 The dashboard:
 - Lists every saved submission found under the local ``submissions/`` tree.
@@ -17,13 +18,31 @@ The dashboard:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+import hashlib
+import hmac
 import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import streamlit as st
+try:
+    from streamlit.errors import StreamlitSecretNotFoundError as _StreamlitSecretNotFoundError
+except ImportError:  # pragma: no cover - defensive fallback for older tooling
+    _streamlit_secret_exceptions: tuple[type[BaseException], ...] = (
+        FileNotFoundError,
+        AttributeError,
+        KeyError,
+    )
+else:
+    _streamlit_secret_exceptions = (
+        _StreamlitSecretNotFoundError,
+        FileNotFoundError,
+        AttributeError,
+        KeyError,
+    )
 
 from config import COMPANY_PROFILES, DEFAULT_COMPANY_SLUG
 from services.sheets_export import append_decision_from_payload, append_from_payload
@@ -37,27 +56,195 @@ from submission_storage import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ADMIN_PASSWORD = "Prestige2021!"
 SESSION_AUTH_KEY = "admin_dashboard_authenticated"
+SESSION_AUTH_FINGERPRINT_KEY = "admin_dashboard_auth_fingerprint"
+VALID_ADMIN_AUTH_MODES = {"password", "google", "both", "disabled"}
+DEFAULT_ADMIN_AUTH_MODE = "both"
+GOOGLE_AUTH_PROVIDER = "google"
 
 
-def _expected_password() -> str:
+def _admin_auth_mode() -> str:
+    configured = (get_runtime_secret("ADMIN_AUTH_MODE", DEFAULT_ADMIN_AUTH_MODE) or "").strip().lower()
+    return configured if configured in VALID_ADMIN_AUTH_MODES else DEFAULT_ADMIN_AUTH_MODE
+
+
+def _password_auth_enabled(mode: str | None = None) -> bool:
+    selected_mode = mode or _admin_auth_mode()
+    return selected_mode in {"password", "both"}
+
+
+def _google_auth_enabled(mode: str | None = None) -> bool:
+    selected_mode = mode or _admin_auth_mode()
+    return selected_mode in {"google", "both"}
+
+
+def _parse_admin_emails(raw_value: str | None) -> set[str]:
+    if not raw_value:
+        return set()
+    normalized = raw_value.replace(";", ",").replace("\n", ",")
+    return {item.strip().lower() for item in normalized.split(",") if item.strip()}
+
+
+def _allowed_admin_emails() -> set[str]:
+    return _parse_admin_emails(get_runtime_secret("ADMIN_ALLOWED_EMAILS", ""))
+
+
+def _expected_password() -> str | None:
     configured = (get_runtime_secret("ADMIN_PASSWORD", "") or "").strip()
-    return configured or DEFAULT_ADMIN_PASSWORD
+    return configured or None
 
 
-def _render_login() -> None:
-    st.title("🔒 Admin Dashboard")
-    st.caption("Restricted access. Enter the admin password to continue.")
+def _mapping_get(mapping: Any, key: str) -> Any:
+    if isinstance(mapping, Mapping):
+        return cast(Mapping[str, Any], mapping).get(key)
+    try:
+        return mapping[key]
+    except (KeyError, TypeError, AttributeError):
+        return getattr(mapping, key, None)
+
+
+def _streamlit_auth_configured() -> bool:
+    if not hasattr(st, "login") or not hasattr(st, "user"):
+        return False
+    try:
+        auth_config = _mapping_get(st.secrets, "auth")
+    except _streamlit_secret_exceptions:
+        return False
+    if not auth_config:
+        return False
+
+    redirect_uri = str(_mapping_get(auth_config, "redirect_uri") or "").strip()
+    cookie_secret = str(_mapping_get(auth_config, "cookie_secret") or "").strip()
+    provider_config = _mapping_get(auth_config, GOOGLE_AUTH_PROVIDER) or auth_config
+    client_id = str(_mapping_get(provider_config, "client_id") or "").strip()
+    client_secret = str(_mapping_get(provider_config, "client_secret") or "").strip()
+    metadata_url = str(_mapping_get(provider_config, "server_metadata_url") or "").strip()
+
+    return bool(redirect_uri and cookie_secret and client_id and client_secret and metadata_url)
+
+
+def _google_user_is_logged_in() -> bool:
+    user = getattr(st, "user", None)
+    return bool(user and getattr(user, "is_logged_in", False))
+
+
+def _google_user_email() -> str:
+    user = getattr(st, "user", None)
+    if not user:
+        return ""
+    value = _mapping_get(user, "email") or getattr(user, "email", "")
+    return str(value or "").strip().lower()
+
+
+def _google_user_is_allowed() -> bool:
+    email = _google_user_email()
+    return bool(email and email in _allowed_admin_emails())
+
+
+def _admin_access_granted() -> bool:
+    mode = _admin_auth_mode()
+    if mode == "disabled":
+        return False
+    if _google_auth_enabled(mode) and _google_user_is_logged_in() and _google_user_is_allowed():
+        return True
+    if _password_auth_enabled(mode) and _authentication_is_current(_expected_password()):
+        return True
+    return False
+
+
+def _password_fingerprint(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def _clear_authentication() -> None:
+    st.session_state[SESSION_AUTH_KEY] = False
+    st.session_state.pop(SESSION_AUTH_FINGERPRINT_KEY, None)
+
+
+def _mark_authenticated(password: str) -> None:
+    st.session_state[SESSION_AUTH_KEY] = True
+    st.session_state[SESSION_AUTH_FINGERPRINT_KEY] = _password_fingerprint(password)
+
+
+def _authentication_is_current(expected_password: str | None) -> bool:
+    if not expected_password:
+        return False
+    return bool(st.session_state.get(SESSION_AUTH_KEY)) and st.session_state.get(
+        SESSION_AUTH_FINGERPRINT_KEY
+    ) == _password_fingerprint(expected_password)
+
+
+def _render_google_login(mode: str) -> None:
+    if not _google_auth_enabled(mode):
+        return
+
+    st.subheader("Google SSO")
+    allowed_emails = _allowed_admin_emails()
+    if not allowed_emails:
+        st.warning(
+            "Google SSO is selected, but ADMIN_ALLOWED_EMAILS is empty. "
+            "Add your Gmail address before relying on Google login."
+        )
+        return
+    if not _streamlit_auth_configured():
+        st.info(
+            "Google SSO is ready in code, but OAuth secrets are not configured yet. "
+            "Add the [auth] and [auth.google] Streamlit Secrets after creating "
+            "a Google OAuth client."
+        )
+        return
+
+    if _google_user_is_logged_in():
+        email = _google_user_email() or "unknown account"
+        if _google_user_is_allowed():
+            st.success(f"Signed in as {email}.")
+            st.rerun()
+        else:
+            st.error(f"{email} is signed in with Google but is not allowed for this dashboard.")
+            if st.button("Sign out of Google", use_container_width=True):
+                st.logout()
+        return
+
+    if st.button("Continue with Google", use_container_width=True):
+        st.login(GOOGLE_AUTH_PROVIDER)
+
+
+def _render_password_login(mode: str) -> None:
+    if not _password_auth_enabled(mode):
+        return
+
+    st.subheader("Password fallback")
+    expected_password = _expected_password()
+    if not expected_password:
+        st.caption("Password login is unavailable because ADMIN_PASSWORD is not set.")
+        return
+
     with st.form("admin_login_form", clear_on_submit=False):
         password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Sign in")
     if submitted:
-        if password == _expected_password():
-            st.session_state[SESSION_AUTH_KEY] = True
+        if hmac.compare_digest(password, expected_password):
+            _mark_authenticated(expected_password)
             st.rerun()
         else:
             st.error("Incorrect password.")
+
+
+def _render_login() -> None:
+    st.title("🔒 Admin Dashboard")
+    st.caption("Restricted access. Sign in with an approved Google account or configured admin password.")
+    mode = _admin_auth_mode()
+    if mode == "disabled":
+        st.error("Admin dashboard access is disabled by ADMIN_AUTH_MODE=disabled.")
+        return
+
+    _render_google_login(mode)
+    if mode == "both":
+        st.divider()
+    _render_password_login(mode)
+
+    if not _google_auth_enabled(mode) and not _password_auth_enabled(mode):
+        st.error("No admin authentication method is enabled.")
 
 
 def _iter_submission_dirs(submissions_root: Path) -> list[Path]:
@@ -256,7 +443,8 @@ def _render_submission_card(
 def render_admin_dashboard(submissions_root: Path) -> None:
     """Top-level entry point. Renders login OR the dashboard content."""
 
-    if not st.session_state.get(SESSION_AUTH_KEY):
+    if not _admin_access_granted():
+        _clear_authentication()
         _render_login()
         return
 
@@ -269,7 +457,9 @@ def render_admin_dashboard(submissions_root: Path) -> None:
         )
     with top_right:
         if st.button("Sign out", use_container_width=True):
-            st.session_state[SESSION_AUTH_KEY] = False
+            _clear_authentication()
+            if _google_user_is_logged_in():
+                st.logout()
             st.rerun()
 
     show_test_mode = st.checkbox(

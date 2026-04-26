@@ -1,8 +1,10 @@
 """Tests for the password-protected admin dashboard service."""
+# pyright: reportPrivateUsage=false
 
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,9 +20,9 @@ def _reset_secret_cache():
     _get_secret.cache_clear()
 
 
-def test_default_admin_password_used_when_secret_unset(monkeypatch):
+def test_admin_password_required_when_secret_unset(monkeypatch):
     monkeypatch.setattr(admin_dashboard, "get_runtime_secret", lambda *_a, **_k: None)
-    assert admin_dashboard._expected_password() == admin_dashboard.DEFAULT_ADMIN_PASSWORD
+    assert admin_dashboard._expected_password() is None
 
 
 def test_admin_password_overridable_via_secret(monkeypatch):
@@ -31,6 +33,114 @@ def test_admin_password_overridable_via_secret(monkeypatch):
 
     monkeypatch.setattr(admin_dashboard, "get_runtime_secret", fake_secret)
     assert admin_dashboard._expected_password() == "S3curePass!"
+
+
+def test_admin_auth_mode_defaults_to_both(monkeypatch):
+    monkeypatch.setattr(admin_dashboard, "get_runtime_secret", lambda *_a, **_k: None)
+
+    assert admin_dashboard._admin_auth_mode() == "both"
+
+
+def test_invalid_admin_auth_mode_falls_back_to_both(monkeypatch):
+    def fake_secret(name, default=None):
+        if name == "ADMIN_AUTH_MODE":
+            return "surprise"
+        return default
+
+    monkeypatch.setattr(admin_dashboard, "get_runtime_secret", fake_secret)
+
+    assert admin_dashboard._admin_auth_mode() == "both"
+
+
+def test_allowed_admin_emails_are_normalized(monkeypatch):
+    def fake_secret(name, default=None):
+        if name == "ADMIN_ALLOWED_EMAILS":
+            return " Owner@Gmail.com, safety@gmail.com\naccounting@gmail.com; "
+        return default
+
+    monkeypatch.setattr(admin_dashboard, "get_runtime_secret", fake_secret)
+
+    assert admin_dashboard._allowed_admin_emails() == {
+        "owner@gmail.com",
+        "safety@gmail.com",
+        "accounting@gmail.com",
+    }
+
+
+def test_google_user_must_be_allowlisted(monkeypatch):
+    def fake_secret(name, default=None):
+        if name == "ADMIN_ALLOWED_EMAILS":
+            return "owner@gmail.com"
+        return default
+
+    fake_st = SimpleNamespace(user=SimpleNamespace(is_logged_in=True, email="OWNER@gmail.com"))
+    monkeypatch.setattr(admin_dashboard, "get_runtime_secret", fake_secret)
+    monkeypatch.setattr(admin_dashboard, "st", fake_st)
+
+    assert admin_dashboard._google_user_is_allowed()
+
+    fake_st.user.email = "someoneelse@gmail.com"
+    assert not admin_dashboard._google_user_is_allowed()
+
+
+def test_admin_access_allows_google_without_password(monkeypatch):
+    def fake_secret(name, default=None):
+        values = {
+            "ADMIN_AUTH_MODE": "google",
+            "ADMIN_ALLOWED_EMAILS": "owner@gmail.com",
+            "ADMIN_PASSWORD": "",
+        }
+        return values.get(name, default)
+
+    fake_st = SimpleNamespace(user=SimpleNamespace(is_logged_in=True, email="owner@gmail.com"))
+    monkeypatch.setattr(admin_dashboard, "get_runtime_secret", fake_secret)
+    monkeypatch.setattr(admin_dashboard, "st", fake_st)
+
+    assert admin_dashboard._admin_access_granted()
+
+
+def test_admin_access_rejects_non_allowlisted_google_user(monkeypatch):
+    def fake_secret(name, default=None):
+        values = {
+            "ADMIN_AUTH_MODE": "google",
+            "ADMIN_ALLOWED_EMAILS": "owner@gmail.com",
+            "ADMIN_PASSWORD": "",
+        }
+        return values.get(name, default)
+
+    fake_st = SimpleNamespace(user=SimpleNamespace(is_logged_in=True, email="intruder@gmail.com"))
+    monkeypatch.setattr(admin_dashboard, "get_runtime_secret", fake_secret)
+    monkeypatch.setattr(admin_dashboard, "st", fake_st)
+
+    assert not admin_dashboard._admin_access_granted()
+
+
+def test_authentication_requires_current_password(monkeypatch):
+    fake_st = SimpleNamespace(session_state={})
+    monkeypatch.setattr(admin_dashboard, "st", fake_st)
+
+    assert not admin_dashboard._authentication_is_current("old-pass")
+
+    admin_dashboard._mark_authenticated("old-pass")
+
+    assert admin_dashboard._authentication_is_current("old-pass")
+    assert not admin_dashboard._authentication_is_current("new-pass")
+    assert not admin_dashboard._authentication_is_current(None)
+
+
+def test_clear_authentication_removes_fingerprint(monkeypatch):
+    fake_st = SimpleNamespace(
+        session_state={
+            admin_dashboard.SESSION_AUTH_KEY: True,
+            admin_dashboard.SESSION_AUTH_FINGERPRINT_KEY: "abc",
+        }
+    )
+    monkeypatch.setattr(admin_dashboard, "st", fake_st)
+
+    admin_dashboard._clear_authentication()
+
+    assert fake_st.session_state[admin_dashboard.SESSION_AUTH_KEY] is False
+    assert admin_dashboard.SESSION_AUTH_FINGERPRINT_KEY not in fake_st.session_state
 
 
 def test_iter_submission_dirs_finds_nested_submissions(tmp_path):
