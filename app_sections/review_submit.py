@@ -165,7 +165,7 @@ def _attempt_sheets_export() -> None:
 
 def render_review_submit_page(submissions_dir: Path) -> None:
     company = get_active_company_profile()
-    st.subheader("🧾 Review & Submit")
+    st.subheader("Review & Submit")
     st.markdown(
         "Please review the summary of your application below. "
         "Use the **Back** button if you need to make any changes before submitting."
@@ -337,7 +337,7 @@ def render_submission_complete(submissions_dir: Path) -> None:
             technical_details=str(exc),
             severity="error",
         )
-        st.success("### ✅ Application Submitted Successfully!")
+        st.success("### Application Submitted Successfully")
         st.markdown(
             "Your application has been received. "
             "If you'd like a copy for your records, please contact us and we'll send one over."
@@ -377,7 +377,7 @@ def _render_submission_complete_body(submissions_dir: Path) -> None:
     _attempt_submission_notification()
     _attempt_sheets_export()
 
-    st.success("### ✅ Application Submitted Successfully!")
+    st.success("### Application Submitted Successfully")
     st.markdown(
         f"""
     Thank you, **{st.session_state.form_data.get('first_name', '')} {st.session_state.form_data.get('last_name', '')}**!
@@ -419,7 +419,7 @@ def _render_submission_complete_body(submissions_dir: Path) -> None:
             )
         )
         st.download_button(
-            label="📥 Download Application PDF",
+            label="Download Application PDF",
             data=pdf_bytes,
             file_name=f"{company.slug}_application_{st.session_state.form_data.get('last_name', 'driver')}_{date.today().isoformat()}.pdf",
             mime="application/pdf",
@@ -444,7 +444,7 @@ def _render_submission_complete_body(submissions_dir: Path) -> None:
                 else generate_fcra_pdf(st.session_state.form_data)
             )
             st.download_button(
-                label="📥 FCRA Disclosure PDF",
+                label="Download FCRA Disclosure PDF",
                 data=fcra_pdf,
                 file_name="FCRA_Disclosure_Standalone.pdf",
                 mime="application/pdf",
@@ -465,7 +465,7 @@ def _render_submission_complete_body(submissions_dir: Path) -> None:
                 else generate_psp_pdf(st.session_state.form_data)
             )
             st.download_button(
-                label="📥 PSP Disclosure PDF",
+                label="Download PSP Disclosure PDF",
                 data=psp_pdf,
                 file_name="PSP_Disclosure_Standalone.pdf",
                 mime="application/pdf",
@@ -486,7 +486,7 @@ def _render_submission_complete_body(submissions_dir: Path) -> None:
                 else generate_clearinghouse_pdf(st.session_state.form_data)
             )
             st.download_button(
-                label="📥 Clearinghouse Release PDF",
+                label="Download Clearinghouse Release PDF",
                 data=ch_pdf,
                 file_name="Clearinghouse_Release_Standalone.pdf",
                 mime="application/pdf",
@@ -502,7 +502,7 @@ def _render_submission_complete_body(submissions_dir: Path) -> None:
     if st.session_state.submission_artifacts and st.session_state.submission_artifacts.get("california_pdf"):
         try:
             st.download_button(
-                label="📥 California Disclosure PDF",
+                label="Download California Disclosure PDF",
                 data=st.session_state.submission_artifacts["california_pdf"],
                 file_name="California_Disclosure_Standalone.pdf",
                 mime="application/pdf",
