@@ -5,10 +5,9 @@ This repo is intentionally small, but the root has several Streamlit entry/confi
 ## Runtime entry points
 
 - `app.py` — main Streamlit entry point used by deployment.
-- `main.py` — alternate/local entry point if needed.
 - `runtime_context.py` — reads URL query params such as company, test mode, and admin dashboard route.
 - `state.py` — Streamlit session-state initialization.
-- `config.py` — company profiles, wording, and app options.
+- `config.py` — company profiles, public URL aliases, wording, and app options.
 
 ## UI and application pages
 
@@ -51,3 +50,9 @@ Some files stay in the root because Streamlit/GitHub/cloud tooling expects or co
 - `.streamlit/config.toml`
 
 A deeper package reorganization is possible later, but it should be done as a separate refactor with full regression testing because many imports are currently root-relative.
+
+## Company link conventions
+
+- Current posted links using `?company=prestige`, `?prestige`, or related Prestige Transportation aliases continue to route to Prestige Transportation.
+- New public links for Prestige Transportation can use `?company=prestigetransportation` for clarity.
+- The future third company should use a distinct explicit slug such as `prestig`; do not repurpose the already-posted `prestige` links unless ownership intentionally wants those old links to change companies.
