@@ -2,17 +2,18 @@
 
 from datetime import date
 from io import BytesIO
+from typing import Any
 
 from fpdf import FPDF
 
-from config import EQUIPMENT_TYPES
+from config import EQUIPMENT_TYPES, CompanyProfile
 from runtime_context import get_active_company_profile
 
 
 class CompanyPDF(FPDF):
     """Base PDF class with runtime company header/footer."""
 
-    def __init__(self, company):
+    def __init__(self, company: CompanyProfile) -> None:
         super().__init__()
         self.company = company
 
@@ -39,49 +40,111 @@ class CompanyPDF(FPDF):
         self.set_text_color(128, 128, 128)
         self.cell(0, 10, f"Page {self.page_no()}/{{nb}}", align="C")
 
-    def section_title(self, title):
+    def _page_bottom(self) -> float:
+        return self.h - self.b_margin
+
+    def _usable_page_height(self) -> float:
+        return self._page_bottom() - self.t_margin
+
+    def _remaining_height(self) -> float:
+        return self._page_bottom() - self.get_y()
+
+    def _line_count(self, width: float, line_h: float, text: str) -> int:
+        lines = self.multi_cell(width, line_h, text, dry_run=True, output="LINES")
+        return max(1, len(lines)) if isinstance(lines, list) else 1
+
+    def ensure_space(self, height: float) -> None:
+        """Start a new page when an upcoming block would be orphaned.
+
+        The check is intentionally skipped for content taller than a full page;
+        fpdf2 can split that content naturally. For normal rows, preflighting
+        avoids labels being left on one page while values continue on the next.
+        """
+        if height <= self._usable_page_height() and self._remaining_height() < height:
+            self.add_page()
+
+    def section_title(self, title: str) -> None:
+        self.ensure_space(20)
         self.set_font("Helvetica", "B", 11)
         self.set_text_color(26, 60, 110)
         self.set_fill_color(230, 236, 245)
         self.cell(0, 8, f"  {title}", fill=True, new_x="LMARGIN", new_y="NEXT")
         self.ln(2)
 
-    def field_row(self, label, value):
+    def item_heading(self, title: str) -> None:
+        self.ensure_space(24)
+        self.set_font("Helvetica", "B", 9)
+        self.set_text_color(26, 60, 110)
+        self.cell(0, 6, title, new_x="LMARGIN", new_y="NEXT")
+
+    def note_line(self, text: str) -> None:
+        self.ensure_space(6)
+        self.set_font("Helvetica", "", 9)
+        self.set_text_color(0, 0, 0)
+        self.cell(0, 6, text, new_x="LMARGIN", new_y="NEXT")
+
+    def field_row(self, label: str, value: Any) -> None:
         label_w = 70
-        line_h = 6
+        line_h = 5
         val_str = str(value) if value else ""
 
         x_start = self.l_margin
-        y_start = self.get_y()
         val_w = self.w - self.r_margin - (x_start + label_w)
+
+        # Preflight the row height so ordinary rows stay together and do not
+        # leave a label stranded at the bottom of a page.
+        self.set_font("Helvetica", "B", 9)
+        self.set_text_color(60, 60, 60)
+        label_line_count = self._line_count(label_w, line_h, label)
+        self.set_font("Helvetica", "", 9)
+        value_line_count = self._line_count(val_w, line_h, val_str)
+        self.ensure_space(max(label_line_count, value_line_count) * line_h)
+
+        y_start = self.get_y()
+        start_page = self.page_no()
 
         # Label (bold, may wrap onto multiple lines for long labels)
         self.set_xy(x_start, y_start)
         self.set_font("Helvetica", "B", 9)
         self.set_text_color(60, 60, 60)
-        label_lines = self.multi_cell(
-            label_w, line_h, label, dry_run=True, output="LINES"
-        )
-        label_line_count = max(1, len(label_lines))
         self.multi_cell(label_w, line_h, label, new_x="RIGHT", new_y="TOP")
         label_bottom = y_start + line_h * label_line_count
 
         # Value (positioned to the right of the label, also wraps if long)
+        self.set_xy(x_start + label_w, y_start)
         self.set_font("Helvetica", "", 9)
         self.set_text_color(0, 0, 0)
         self.multi_cell(val_w, line_h, val_str, new_x="LMARGIN", new_y="NEXT")
+        value_page = self.page_no()
         value_bottom = self.get_y()
 
-        # Advance past whichever side took more vertical space
-        self.set_y(max(label_bottom, value_bottom))
+        # Advance past whichever side took more vertical space. If the value
+        # flowed onto a new page, never reuse the old page's y-coordinate on the
+        # new page; doing so causes the next row to start near the footer and can
+        # cascade into many almost-empty pages.
+        if value_page == start_page:
+            self.set_y(max(label_bottom, value_bottom))
+        else:
+            self.set_y(value_bottom)
+        self.set_x(self.l_margin)
 
-    def field_row_wide(self, label, value):
+    def field_row_wide(self, label: str, value: Any) -> None:
+        line_h = 5
+        val_str = str(value) if value else ""
+
+        self.set_font("Helvetica", "B", 9)
+        self.set_text_color(60, 60, 60)
+        label_line_count = self._line_count(0, line_h, label)
+        self.set_font("Helvetica", "", 9)
+        value_line_count = self._line_count(0, line_h, val_str)
+        self.ensure_space((label_line_count + value_line_count) * line_h + 1)
+
         self.set_font("Helvetica", "B", 9)
         self.set_text_color(60, 60, 60)
         self.cell(0, 6, label, new_x="LMARGIN", new_y="NEXT")
         self.set_font("Helvetica", "", 9)
         self.set_text_color(0, 0, 0)
-        self.multi_cell(0, 5, str(value) if value else "")
+        self.multi_cell(0, line_h, val_str)
         self.ln(1)
 
 
@@ -254,12 +317,10 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
     pdf.section_title("Driving Experience")
     experience_rows = _selected_experience_rows(form_data)
     if not experience_rows:
-        pdf.set_font("Helvetica", "", 9)
-        pdf.cell(0, 6, "No driving experience details provided", new_x="LMARGIN", new_y="NEXT")
+        pdf.note_line("No driving experience details provided")
     else:
         for row in experience_rows:
-            pdf.set_font("Helvetica", "B", 9)
-            pdf.cell(0, 6, row["label"], new_x="LMARGIN", new_y="NEXT")
+            pdf.item_heading(row["label"])
             pdf.field_row("  Truck Type:", row["truck_type"])
             pdf.field_row("  Equipment Detail:", row["detail"])
             pdf.field_row("  Trailer Length:", row["trailer_length"])
@@ -280,8 +341,7 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
         pdf.field_row("HazMat Expiration:", _safe(form_data, "hazmat_expiration"))
     pdf.ln(2)
     for i, lic in enumerate(licenses):
-        pdf.set_font("Helvetica", "B", 9)
-        pdf.cell(0, 6, f"License #{i+1}", new_x="LMARGIN", new_y="NEXT")
+        pdf.item_heading(f"License #{i+1}")
         pdf.field_row("  License Number:", lic.get("number", ""))
         pdf.field_row("  State:", lic.get("state", ""))
         pdf.field_row("  Country:", lic.get("country", ""))
@@ -303,12 +363,8 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
     # --- Employment History ---
     pdf.section_title("Employment / Contracting History (10 Years)")
     for i, emp in enumerate(employers):
-        if pdf.get_y() > 230:
-            pdf.add_page()
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.set_text_color(26, 60, 110)
         company_name = emp.get("company", f"Employer #{i+1}")
-        pdf.cell(0, 7, f"{i+1}. {company_name}", new_x="LMARGIN", new_y="NEXT")
+        pdf.item_heading(f"{i+1}. {company_name}")
         pdf.set_text_color(0, 0, 0)
         pdf.field_row("  Address:", f"{emp.get('address', '')}, {emp.get('city_state', '')}")
         pdf.field_row("  Country:", emp.get("country", ""))
@@ -382,10 +438,10 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
     # --- Accident Record ---
     pdf.section_title("Vehicle Accident Record (5 Years)")
     if not accidents:
-        pdf.set_font("Helvetica", "", 9)
-        pdf.cell(0, 6, "No Accidents Reported", new_x="LMARGIN", new_y="NEXT")
+        pdf.note_line("No Accidents Reported")
     else:
         for i, acc in enumerate(accidents):
+            pdf.ensure_space(36)
             pdf.field_row(f"  Accident #{i+1} Date:", _safe(acc, "date"))
             pdf.field_row("  Location:", acc.get("location", ""))
             pdf.field_row("  Fatalities:", str(acc.get("fatalities", 0)))
@@ -397,10 +453,10 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
     # --- Violations ---
     pdf.section_title("Traffic Convictions / Violations (3 Years)")
     if not violations:
-        pdf.set_font("Helvetica", "", 9)
-        pdf.cell(0, 6, "No Violations Reported", new_x="LMARGIN", new_y="NEXT")
+        pdf.note_line("No Violations Reported")
     else:
         for i, viol in enumerate(violations):
+            pdf.ensure_space(48)
             pdf.field_row(f"  Violation #{i+1} Date:", _safe(viol, "date"))
             pdf.field_row("  Location:", viol.get("location", ""))
             pdf.field_row("  Charge:", viol.get("charge", ""))
@@ -432,6 +488,7 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
 
     # --- Signature Block ---
     pdf.section_title("Applicant Certification & Signature")
+    pdf.ensure_space(28)
     pdf.set_font("Helvetica", "", 8)
     pdf.multi_cell(0, 4,
         f"I certify that all information provided in this application is true and complete. "

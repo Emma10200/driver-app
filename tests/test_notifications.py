@@ -155,7 +155,7 @@ def test_send_internal_submission_notification_uses_tls_and_reply_to(monkeypatch
             "username": "mailer",
             "password": "secret",
             "from_email": "alerts@example.com",
-            "recipients": ["ops@example.com"],
+            "recipients": ["ops@example.com", "emma@example.com"],
             "use_tls": True,
             "use_ssl": False,
         },
@@ -180,6 +180,7 @@ def test_send_internal_submission_notification_uses_tls_and_reply_to(monkeypatch
     assert smtp_instance is not None
     assert [call[0] for call in smtp_instance.calls] == ["ehlo", "starttls", "ehlo", "login", "send_message"]
     assert smtp_instance.sent_message is not None
+    assert smtp_instance.sent_message["To"] == "ops@example.com"
     assert smtp_instance.sent_message["Reply-To"] == "emma@example.com"
     text_part = smtp_instance.sent_message.get_body(preferencelist=("plain",))
     assert text_part is not None

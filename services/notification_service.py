@@ -82,6 +82,27 @@ def _notification_settings(company_slug: str, *, test_mode: bool) -> dict[str, A
     }
 
 
+def _internal_recipients_only(recipients: list[str], applicant_email: str) -> list[str]:
+    """Return notification recipients, excluding the applicant if misconfigured.
+
+    The applicant may appear as Reply-To so staff can answer directly, but they
+    should never be an envelope/header recipient of the internal packet email.
+    """
+    applicant_email = applicant_email.strip().lower()
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for recipient in recipients:
+        normalized = recipient.strip()
+        normalized_lower = normalized.lower()
+        if not normalized or normalized_lower in seen:
+            continue
+        if applicant_email and normalized_lower == applicant_email:
+            continue
+        cleaned.append(normalized)
+        seen.add(normalized_lower)
+    return cleaned
+
+
 def _protect_pdf(pdf_bytes: bytes, password: str) -> bytes:
     if not password:
         return pdf_bytes
@@ -176,6 +197,13 @@ def send_internal_submission_notification(
         }
 
     settings = _notification_settings(company_slug, test_mode=test_mode)
+    applicant_email = str(form_data.get("email", "") or "").strip()
+    internal_recipients = _internal_recipients_only(settings["recipients"], applicant_email)
+    if not internal_recipients:
+        return {
+            "status": "error",
+            "message": "Internal notification has no recipients after excluding applicant email.",
+        }
 
     applicant_name = " ".join(
         part
@@ -192,8 +220,7 @@ def send_internal_submission_notification(
     subject_prefix = "[TEST] " if test_mode else ""
     message["Subject"] = f"{subject_prefix}New driver application submitted: {applicant_name}"
     message["From"] = settings["from_email"]
-    message["To"] = ", ".join(settings["recipients"])
-    applicant_email = str(form_data.get("email", "") or "").strip()
+    message["To"] = ", ".join(internal_recipients)
     if applicant_email:
         message["Reply-To"] = applicant_email
 
@@ -319,7 +346,7 @@ def send_internal_submission_notification(
 
     return {
         "status": "sent",
-        "message": f"Internal notification sent to {', '.join(settings['recipients'])}.",
+        "message": f"Internal notification sent to {', '.join(internal_recipients)}.",
     }
 
 

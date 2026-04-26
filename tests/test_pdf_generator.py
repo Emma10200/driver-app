@@ -12,6 +12,88 @@ def _extract_text(pdf_bytes: bytes) -> str:
     return "".join(page.extract_text() or "" for page in PdfReader(BytesIO(pdf_bytes)).pages)
 
 
+def test_field_row_cross_page_wrap_does_not_pin_cursor_to_footer(monkeypatch):
+    monkeypatch.setattr(pdf_generator, "get_active_company_profile", lambda: get_company_profile("prestige"))
+
+    pdf = pdf_generator.CompanyPDF(get_company_profile("prestige"))
+    pdf.alias_nb_pages()
+    pdf.set_auto_page_break(auto=True, margin=20)
+    pdf.add_page()
+    pdf.set_y(pdf.h - pdf.b_margin - 8)
+
+    pdf.field_row("Long wrapped value:", "This is a long applicant-provided note. " * 150)
+
+    assert pdf.page_no() > 1
+    assert pdf.get_y() < 200
+
+
+def test_generate_application_pdf_handles_long_wrapped_fields_without_page_explosion(monkeypatch):
+    monkeypatch.setattr(pdf_generator, "get_active_company_profile", lambda: get_company_profile("prestige"))
+
+    form_data = {
+        "first_name": "Long",
+        "last_name": "Fields",
+        "email": "long@example.com",
+        "position": "Owner Operator",
+        "eligible_us": "Yes",
+        "read_english": "Yes",
+        "currently_employed": "Yes",
+        "worked_here_before": "Yes",
+        "prev_dates": "Returned after seasonal work. " * 80,
+        "relatives_here": "No",
+        "known_other_name": "No",
+        "safe_driving_awards": "Safe driving recognition. " * 80,
+        "twic_card": "No",
+        "hazmat_endorsement": "No",
+        "attended_trucking_school": "No",
+        "disq_391_15": "No",
+        "disq_suspended": "No",
+        "disq_denied": "No",
+        "disq_drug_test": "No",
+        "disq_convicted": "Yes",
+        "disq_convicted_details": "Detailed explanation. " * 120,
+        "mvr_suspension_conviction": "No",
+        "mvr_no_valid_license": "No",
+        "mvr_alcohol_controlled_substance": "No",
+        "mvr_illegal_substance_on_duty": "No",
+        "mvr_reckless_driving": "No",
+        "mvr_any_dot_test_positive": "No",
+        "sig_full_name": "Long Fields",
+        "sig_date": "2026-04-26",
+    }
+    employers = [
+        {
+            "company": f"Carrier {index}",
+            "address": f"{index} Fleet Way",
+            "city_state": "Fontana, CA",
+            "country": "United States",
+            "phone": "5551234567",
+            "position": "Owner Operator",
+            "start": "2020-01-01",
+            "end": "2025-01-01",
+            "reason": "Long reason for leaving. " * 80,
+            "pay_range": "Percentage",
+            "terminated": "No",
+            "current": "No",
+            "contact_ok": "Yes",
+            "cmv": "Yes",
+            "fmcsa": "Yes",
+            "dot_testing": "Yes",
+            "areas": "Regional lanes with occasional long-haul assignments. " * 30,
+            "miles": "2500",
+            "truck": "Sleeper tractor",
+            "trailer": "Dry Van",
+            "trailer_len": "53 feet or more",
+        }
+        for index in range(1, 4)
+    ]
+
+    pdf_bytes = pdf_generator.generate_application_pdf(form_data, employers, [], [], [])
+    reader = PdfReader(BytesIO(pdf_bytes))
+
+    assert len(reader.pages) <= 12
+
+
 def test_generate_application_pdf_includes_aligned_credentials_and_disclosures(monkeypatch):
     monkeypatch.setattr(pdf_generator, "get_active_company_profile", lambda: get_company_profile("prestige"))
 
