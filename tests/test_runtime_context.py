@@ -23,6 +23,31 @@ def test_resolve_company_slug_accepts_legacy_side_xpress_alias(monkeypatch):
     assert runtime_context.resolve_company_slug() == "xpress"
 
 
+def test_resolve_company_slug_keeps_posted_prestige_links_working(monkeypatch):
+    monkeypatch.setattr(runtime_context, "st", SimpleNamespace(query_params={"company": "prestige"}))
+
+    assert runtime_context.resolve_company_slug() == "prestige"
+
+
+def test_resolve_company_slug_accepts_prestige_transportation_aliases(monkeypatch):
+    aliases = [
+        "prestige-transportation",
+        "prestige-transportation-inc",
+        "prestigetransportation",
+        "prestigetranportation",
+    ]
+
+    for alias in aliases:
+        monkeypatch.setattr(runtime_context, "st", SimpleNamespace(query_params={"company": alias}))
+        assert runtime_context.resolve_company_slug() == "prestige"
+
+
+def test_keyless_prestige_transportation_alias_resolves(monkeypatch):
+    monkeypatch.setattr(runtime_context, "st", SimpleNamespace(query_params={"prestigetransportation": ""}))
+
+    assert runtime_context.extract_slug_from_query() == "prestige"
+
+
 def test_get_storage_namespace_uses_company_and_test_mode(monkeypatch):
     fake_state = FakeSessionState(company_slug="xpress", test_mode=True)
     monkeypatch.setattr(runtime_context, "st", SimpleNamespace(session_state=fake_state, query_params={}))

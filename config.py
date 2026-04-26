@@ -48,6 +48,29 @@ COMPANY_PROFILES: dict[str, CompanyProfile] = {
     ),
 }
 
+# Public URL aliases. Keep old/posted links working forever; Craigslist/recruiter
+# links may use any of these forms. The eventual third company should get its
+# own explicit slug (for example, "prestig") rather than taking over the posted
+# "prestige" links that already route to Prestige Transportation.
+COMPANY_SLUG_ALIASES: dict[str, str] = {
+    "": DEFAULT_COMPANY_SLUG,
+    "prestige": "prestige",
+    "prestige-transportation": "prestige",
+    "prestige-transportation-inc": "prestige",
+    "prestigetransportation": "prestige",
+    # Common typo guard for internal handoff/link creation.
+    "prestigetranportation": "prestige",
+    # Legacy Xpress names -- keep so old printed/bookmarked links resolve.
+    "side-xpress": "xpress",
+    "sidexpress": "xpress",
+    "sideexpress": "xpress",
+    "side-xpress-inc": "xpress",
+    "xpress": "xpress",
+    "xpress-inc": "xpress",
+    "xpress-trans": "xpress",
+    "xpresstrans": "xpress",
+}
+
 # Application phases
 PHASE_LABELS = {
     1: "Personal Information",
