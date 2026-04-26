@@ -6,7 +6,12 @@ from typing import Any
 
 import streamlit as st
 
-from config import COMPANY_PROFILES, DEFAULT_COMPANY_SLUG, CompanyProfile
+from config import (
+    COMPANY_PROFILES,
+    COMPANY_SLUG_ALIASES,
+    DEFAULT_COMPANY_SLUG,
+    CompanyProfile,
+)
 from submission_storage import get_runtime_secret
 
 
@@ -27,20 +32,7 @@ def _query_param_value(name: str) -> str:
 
 def normalize_company_slug(value: str | None) -> str:
     slug = str(value or "").strip().lower().replace("_", "-")
-    aliases = {
-        "": DEFAULT_COMPANY_SLUG,
-        "prestige-transportation": "prestige",
-        "prestige-transportation-inc": "prestige",
-        # Legacy slug -- keep so old printed/bookmarked links resolve.
-        "side-xpress": "xpress",
-        "sidexpress": "xpress",
-        "sideexpress": "xpress",
-        "side-xpress-inc": "xpress",
-        "xpress-inc": "xpress",
-        "xpress-trans": "xpress",
-        "xpresstrans": "xpress",
-    }
-    slug = aliases.get(slug, slug)
+    slug = COMPANY_SLUG_ALIASES.get(slug, slug)
     return slug if slug in COMPANY_PROFILES else DEFAULT_COMPANY_SLUG
 
 
@@ -49,18 +41,7 @@ def _try_resolve_known_slug(value: str | None) -> str | None:
     raw = str(value or "").strip().lower().replace("_", "-")
     if not raw:
         return None
-    aliases = {
-        "prestige-transportation": "prestige",
-        "prestige-transportation-inc": "prestige",
-        "side-xpress": "xpress",
-        "sidexpress": "xpress",
-        "sideexpress": "xpress",
-        "side-xpress-inc": "xpress",
-        "xpress-inc": "xpress",
-        "xpress-trans": "xpress",
-        "xpresstrans": "xpress",
-    }
-    candidate = aliases.get(raw, raw)
+    candidate = COMPANY_SLUG_ALIASES.get(raw, raw)
     return candidate if candidate in COMPANY_PROFILES else None
 
 
