@@ -301,7 +301,7 @@ def _stub_settings(monkeypatch, *, max_attachment_bytes: int = 0):
     )
 
 
-def test_notification_attaches_csv_and_supporting_documents(monkeypatch):
+def test_notification_omits_csv_and_attaches_supporting_documents(monkeypatch):
     smtp_instance: FakeSMTP | None = None
 
     def fake_smtp(host, port, timeout=30):
@@ -334,11 +334,11 @@ def test_notification_attaches_csv_and_supporting_documents(monkeypatch):
         part.get_filename() for part in smtp_instance.sent_message.iter_attachments()
     )
     assert any(name.endswith(".pdf") and "packet" in name for name in filenames)
-    assert any(name.endswith(".csv") for name in filenames)
+    assert not any(name.endswith(".csv") for name in filenames)
     assert "license.pdf" in filenames
     body = smtp_instance.sent_message.get_body(preferencelist=("plain",)).get_content()
     assert "license.pdf" in body
-    assert "spreadsheet" in body.lower()
+    assert "csv" not in body.lower()
 
 
 def test_notification_skips_oversize_supporting_documents(monkeypatch):
@@ -349,7 +349,7 @@ def test_notification_skips_oversize_supporting_documents(monkeypatch):
         smtp_instance = FakeSMTP(host, port, timeout)
         return smtp_instance
 
-    # Cap so small that even one tiny doc cannot fit alongside the PDF + CSV.
+    # Cap so small that even one tiny doc cannot fit alongside the PDF.
     _stub_settings(monkeypatch, max_attachment_bytes=50)
     monkeypatch.setattr(notification_service.smtplib, "SMTP", fake_smtp)
 

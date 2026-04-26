@@ -16,7 +16,6 @@ from pdf_generator import (
     generate_psp_pdf,
 )
 from runtime_context import get_active_company_profile, get_storage_namespace, is_test_mode_active
-from services.csv_export import build_application_csv
 from services.document_service import render_supporting_documents_section, sync_pending_uploads
 from services.draft_service import LOCAL_STORAGE_DIR
 from services.error_log_service import log_application_error
@@ -41,14 +40,6 @@ def _attempt_submission_notification() -> None:
     try:
         artifacts = st.session_state.get("submission_artifacts") or {}
         uploaded_documents = st.session_state.get("uploaded_documents", []) or []
-        application_csv = build_application_csv(
-            form_data=st.session_state.form_data,
-            employers=st.session_state.get("employers", []),
-            licenses=st.session_state.get("licenses", []),
-            accidents=st.session_state.get("accidents", []),
-            violations=st.session_state.get("violations", []),
-            uploaded_documents=uploaded_documents,
-        )
         supporting_payloads: list[dict[str, object]] = []
         for document in uploaded_documents:
             try:
@@ -71,7 +62,6 @@ def _attempt_submission_notification() -> None:
             uploaded_documents=uploaded_documents,
             application_pdf=artifacts.get("application_pdf"),
             artifacts=artifacts,
-            application_csv=application_csv,
             supporting_document_payloads=supporting_payloads,
         )
     except Exception as exc:  # noqa: BLE001 - never let notification break the success page
