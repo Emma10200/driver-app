@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import os
+import re
 import subprocess
 from datetime import date, datetime
 from functools import lru_cache
@@ -130,6 +131,16 @@ BASE_STYLES = """
     }
 </style>
 """
+
+CSS_COLOR_PATTERN = re.compile(
+    r"^(?:#[0-9a-fA-F]{3,8}|rgba?\([0-9\s,.%]+\)|hsla?\([0-9\s,.%]+\)|[a-zA-Z]+)$"
+)
+
+
+def _is_safe_css_color(value: str) -> bool:
+    """Return True for simple CSS color values safe to inject into a style tag."""
+
+    return bool(CSS_COLOR_PATTERN.fullmatch(value.strip()))
 
 STYLE_PREVIEW_SESSION_KEY = "style_preview_theme"
 STYLE_PREVIEW_ENV_KEYS = ("APP_STYLE_PREVIEW", "STYLE_PREVIEW")
@@ -852,7 +863,7 @@ def render_app_shell() -> None:
 
     st.markdown(BASE_STYLES, unsafe_allow_html=True)
     brand_color = (company.brand_color or "").strip()
-    if brand_color:
+    if brand_color and _is_safe_css_color(brand_color):
         st.markdown(
             f"<style>:root {{ --primary-color: {brand_color}; }}</style>",
             unsafe_allow_html=True,
