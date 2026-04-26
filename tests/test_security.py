@@ -39,6 +39,43 @@ def test_app_header_escaping(monkeypatch):
     assert payload not in header_html
     assert escaped_payload in header_html
 
+
+def test_brand_color_rejects_markup_injection(monkeypatch):
+    captured_markdown = []
+    mock_markdown = MagicMock(side_effect=lambda content, unsafe_allow_html=False: captured_markdown.append(content))
+    monkeypatch.setattr(st, "markdown", mock_markdown)
+
+    payload = "</style><script>alert('xss')</script>"
+
+    fake_company = SimpleNamespace(
+        name="Test Company",
+        address="123 Test St",
+        city_state_zip="Test City, CA 90000",
+        phone="555-0100",
+        email="safety@example.com",
+        brand_color=payload,
+        slug="test-slug",
+    )
+
+    monkeypatch.setattr(common, "get_active_company_profile", lambda: fake_company)
+    monkeypatch.setattr(common, "is_test_mode_active", lambda: False)
+    monkeypatch.setattr(common, "_sync_browser_autofill_via_js", lambda: None)
+    monkeypatch.setattr(common, "render_missing_fields_banner", lambda: None)
+    monkeypatch.setattr(common, "st", st)
+
+    common.render_app_shell()
+
+    rendered = "\n".join(captured_markdown)
+    assert payload not in rendered
+    assert "<script>" not in rendered
+
+
+def test_brand_color_allows_simple_css_colors():
+    assert common._is_safe_css_color("#3E6FA3")
+    assert common._is_safe_css_color("rgb(62, 111, 163)")
+    assert common._is_safe_css_color("steelblue")
+    assert not common._is_safe_css_color("url(javascript:alert(1))")
+
 def test_company_picker_does_not_leak_company_list(monkeypatch):
     """The landing page must not expose the list of companies; it should only
     show contact info so visitors can request the right link."""

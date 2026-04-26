@@ -283,7 +283,7 @@ def render_remaining_page(page: int) -> bool:
 
                 if missing:
                     show_missing_fields(missing, "Please complete the required license details:")
-                    return
+                    return True
 
                 st.session_state.licenses = licenses_input
                 st.session_state.form_data["twic_card"] = twic_card
@@ -502,7 +502,7 @@ def render_remaining_page(page: int) -> bool:
 
                 if missing:
                     show_missing_fields(missing, "Please complete the required employment history fields:")
-                    return
+                    return True
 
                 st.session_state.employers = employers_input
                 next_page()
@@ -624,7 +624,7 @@ def render_remaining_page(page: int) -> bool:
 
                 if missing:
                     show_missing_fields(missing, "Please complete the required education fields:")
-                    return
+                    return True
 
                 ref1 = _format_reference_summary(references[0])
                 ref2 = _format_reference_summary(references[1])
@@ -933,7 +933,7 @@ def render_remaining_page(page: int) -> bool:
 
                 if missing:
                     show_missing_fields(missing, "Please complete the required safety questions:")
-                    return
+                    return True
 
                 st.session_state.form_data.update(
                     {
