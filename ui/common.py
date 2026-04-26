@@ -131,6 +131,188 @@ BASE_STYLES = """
 </style>
 """
 
+STYLE_PREVIEW_SESSION_KEY = "style_preview_theme"
+STYLE_PREVIEW_ENV_KEYS = ("APP_STYLE_PREVIEW", "STYLE_PREVIEW")
+STYLE_PREVIEW_THEMES = ("Light", "Dark")
+
+
+def _flag_enabled(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _style_preview_enabled() -> bool:
+    return any(_flag_enabled(os.environ.get(key)) for key in STYLE_PREVIEW_ENV_KEYS)
+
+
+def _style_preview_theme() -> str:
+    theme = st.session_state.get(STYLE_PREVIEW_SESSION_KEY, STYLE_PREVIEW_THEMES[0])
+    return theme if theme in STYLE_PREVIEW_THEMES else STYLE_PREVIEW_THEMES[0]
+
+
+def _style_preview_css(theme: str) -> str:
+    if theme == "Dark":
+        values = {
+            "bg": "#0F172A",
+            "surface": "#172033",
+            "surface_alt": "#1E293B",
+            "text": "#E5E7EB",
+            "muted": "#A8B3C7",
+            "border": "#334155",
+            "primary": "#8FB8E8",
+            "primary_strong": "#B9D7F6",
+            "error": "#FCA5A5",
+            "error_bg": "rgba(180, 35, 24, 0.18)",
+            "warning_bg": "rgba(181, 71, 8, 0.18)",
+        }
+    else:
+        values = {
+            "bg": "#F4F6F8",
+            "surface": "#FFFFFF",
+            "surface_alt": "#F8FAFC",
+            "text": "#1F2937",
+            "muted": "#5B677A",
+            "border": "#D9E2EC",
+            "primary": "#173B5F",
+            "primary_strong": "#102A43",
+            "error": "#B42318",
+            "error_bg": "rgba(180, 35, 24, 0.07)",
+            "warning_bg": "rgba(181, 71, 8, 0.09)",
+        }
+
+    return f"""
+<style>
+    :root {{
+        --primary-color: {values['primary']};
+        --portal-bg: {values['bg']};
+        --portal-surface: {values['surface']};
+        --portal-surface-alt: {values['surface_alt']};
+        --portal-text: {values['text']};
+        --portal-muted: {values['muted']};
+        --portal-border: {values['border']};
+        --portal-primary: {values['primary']};
+        --portal-primary-strong: {values['primary_strong']};
+        --portal-error: {values['error']};
+        --portal-error-bg: {values['error_bg']};
+        --portal-warning-bg: {values['warning_bg']};
+    }}
+    .stApp,
+    [data-testid="stAppViewContainer"] {{
+        background: var(--portal-bg);
+        color: var(--portal-text);
+    }}
+    [data-testid="stHeader"] {{
+        background: color-mix(in srgb, var(--portal-bg) 92%, transparent);
+    }}
+    [data-testid="stMainBlockContainer"],
+    [data-testid="block-container"] {{
+        padding-top: 1.25rem;
+        max-width: 1120px;
+    }}
+    h1, h2, h3, h4, h5, h6,
+    .stMarkdown,
+    label,
+    p,
+    li {{
+        color: var(--portal-text);
+    }}
+    .style-preview-toolbar {{
+        border: 1px dashed var(--portal-border);
+        background: var(--portal-surface-alt);
+        border-radius: 10px;
+        padding: 0.65rem 0.85rem;
+        margin-bottom: 0.8rem;
+        color: var(--portal-muted);
+        font-size: 0.82rem;
+    }}
+    .app-header {{
+        text-align: left;
+        padding: 1.15rem 1.35rem 1rem;
+        margin-bottom: 1rem;
+        border: 1px solid var(--portal-border);
+        border-top: 5px solid var(--portal-primary);
+        border-radius: 10px;
+        background: var(--portal-surface);
+        box-shadow: 0 8px 22px rgba(15, 23, 42, 0.06);
+    }}
+    .app-header h1 {{
+        color: var(--portal-primary-strong);
+        margin: 0 0 0.25rem;
+        font-size: clamp(1.45rem, 2.8vw, 2rem);
+        letter-spacing: -0.015em;
+    }}
+    .app-header p {{
+        color: var(--portal-muted);
+        margin: 0.1rem 0;
+        font-size: 0.9rem;
+    }}
+    .app-header h3 {{
+        color: var(--portal-primary);
+        margin-top: 0.85rem;
+        margin-bottom: 0;
+        font-size: 0.95rem;
+        font-weight: 750;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+    }}
+    .eeo-notice {{
+        background: color-mix(in srgb, var(--portal-primary) 7%, var(--portal-surface));
+        color: var(--portal-text);
+        padding: 0.85rem 0.95rem;
+        border-radius: 8px;
+        margin: 0.6rem 0 1rem;
+        font-size: 0.86rem;
+        line-height: 1.55;
+        border: 1px solid var(--portal-border);
+        border-left: 4px solid var(--portal-primary);
+    }}
+    .missing-field-wrapper,
+    .missing-field {{
+        border-color: var(--portal-error);
+        background: var(--portal-error-bg);
+    }}
+    .missing-field-note,
+    .missing-field-header {{
+        color: var(--portal-error);
+    }}
+    .stButton > button {{
+        border-radius: 8px;
+        border-color: var(--portal-border);
+        font-weight: 650;
+    }}
+    .stButton > button[kind="primary"],
+    button[data-testid="baseButton-primary"] {{
+        background: var(--portal-primary);
+        border-color: var(--portal-primary);
+        color: #FFFFFF;
+    }}
+    div[data-testid="stAlert"] {{
+        border-radius: 8px;
+    }}
+    div[data-testid="stExpander"] details {{
+        border-color: var(--portal-border);
+        background: var(--portal-surface);
+        border-radius: 8px;
+    }}
+</style>
+"""
+
+
+def _render_style_preview_controls() -> None:
+    if not _style_preview_enabled():
+        return
+
+    st.markdown(_style_preview_css(_style_preview_theme()), unsafe_allow_html=True)
+    st.markdown(
+        '<div class="style-preview-toolbar">Local style preview only. This toggle is hidden unless APP_STYLE_PREVIEW=true.</div>',
+        unsafe_allow_html=True,
+    )
+    st.radio(
+        "Preview theme",
+        STYLE_PREVIEW_THEMES,
+        key=STYLE_PREVIEW_SESSION_KEY,
+        horizontal=True,
+    )
+
 PLACEHOLDER_OPTION = "Select one..."
 VERSION_ENV_KEYS = (
     "APP_VERSION",
@@ -277,7 +459,7 @@ def mark_missing(field_key: str) -> bool:
 
     st.markdown(
         f'<div class="missing-field-note" data-missing-field="{field_key}">'
-        '⚠ Please complete this field'
+        'Please complete this field'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -675,6 +857,7 @@ def render_app_shell() -> None:
             f"<style>:root {{ --primary-color: {brand_color}; }}</style>",
             unsafe_allow_html=True,
         )
+    _render_style_preview_controls()
     if st.session_state.get("admin_tools_enabled"):
         with st.sidebar:
             render_admin_test_tools()
@@ -685,7 +868,7 @@ def render_app_shell() -> None:
     <h1>{company_name}</h1>
     {f'<p>{" | ".join(location_parts)}</p>' if location_parts else ''}
     {f'<p>{" | ".join(contact_parts)}</p>' if contact_parts else ''}
-    <h3>Driver Application</h3>
+    <h3>Independent Contractor Driver Application</h3>
 </div>
 """,
         unsafe_allow_html=True,
