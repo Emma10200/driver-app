@@ -74,7 +74,7 @@ def _notification_settings(company_slug: str, *, test_mode: bool) -> dict[str, A
         "use_tls": _as_bool(get_runtime_secret("SMTP_USE_TLS", "true"), True),
         "use_ssl": _as_bool(get_runtime_secret("SMTP_USE_SSL", "false"), False),
         "attachment_password": (get_runtime_secret("SMTP_ATTACHMENT_PASSWORD", "") or "").strip(),
-        # Total cap on the email payload (PDF + CSV + supporting docs). Most
+        # Total cap on the email payload (PDF + supporting docs). Most
         # SMTP relays choke around 25 MB; default to 22 MB to leave headroom.
         "max_attachment_bytes": int(
             (get_runtime_secret("SMTP_MAX_ATTACHMENT_BYTES", "23068672") or "23068672").strip()
@@ -264,10 +264,11 @@ def send_internal_submission_notification(
     max_total = max(0, int(settings.get("max_attachment_bytes", 0) or 0))
     used_bytes = len(pdf_bytes)
 
-    csv_filename: str | None = None
     if application_csv:
-        csv_filename = f"driver_application_{applicant_last}_{timestamp}.csv"
-        used_bytes += len(application_csv)
+        # Keep this argument backward-compatible, but do not attach CSV files
+        # to internal email. Spreadsheet data is handled by the separate
+        # Google Sheets export path in services/sheets_export.py.
+        pass
 
     supporting_payloads = supporting_document_payloads or []
     attached_docs: list[dict[str, Any]] = []
@@ -296,10 +297,6 @@ def send_internal_submission_notification(
         f"Supporting document count: {len(uploaded_documents)}",
         f"Attached PDF includes: {bundle_sections_line}.",
     ]
-    if csv_filename:
-        body_lines.append(
-            f"Attached CSV ({csv_filename}) contains every form field for spreadsheet use."
-        )
     if attached_docs:
         body_lines.append("")
         body_lines.append("Supporting documents attached to this email:")
@@ -319,10 +316,6 @@ def send_internal_submission_notification(
     message.set_content("\n".join(body_lines))
 
     message.add_attachment(pdf_bytes, maintype="application", subtype="pdf", filename=pdf_filename)
-    if application_csv and csv_filename:
-        message.add_attachment(
-            application_csv, maintype="text", subtype="csv", filename=csv_filename
-        )
     for doc in attached_docs:
         ctype = str(doc.get("content_type") or "application/octet-stream")
         if "/" in ctype:
