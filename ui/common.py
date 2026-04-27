@@ -48,6 +48,35 @@ BASE_STYLES = """
     div[data-testid="stSelectbox"] label p:has(~ *) {
         font-weight: 600;
     }
+    /* Make every input clearly outlined on light backgrounds (desktop). */
+    div[data-testid="stTextInput"] input,
+    div[data-testid="stTextArea"] textarea,
+    div[data-testid="stDateInput"] input,
+    div[data-testid="stNumberInput"] input,
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+    div[data-testid="stMultiSelect"] div[data-baseweb="select"] > div {
+        background-color: #ffffff !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 6px !important;
+        box-shadow: 0 1px 1px rgba(15, 23, 42, 0.04) !important;
+    }
+    div[data-testid="stTextInput"] input:hover,
+    div[data-testid="stTextArea"] textarea:hover,
+    div[data-testid="stDateInput"] input:hover,
+    div[data-testid="stNumberInput"] input:hover,
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div:hover,
+    div[data-testid="stMultiSelect"] div[data-baseweb="select"] > div:hover {
+        border-color: #94a3b8 !important;
+    }
+    div[data-testid="stTextInput"] input:focus,
+    div[data-testid="stTextArea"] textarea:focus,
+    div[data-testid="stDateInput"] input:focus,
+    div[data-testid="stNumberInput"] input:focus,
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div:focus-within,
+    div[data-testid="stMultiSelect"] div[data-baseweb="select"] > div:focus-within {
+        border-color: var(--primary-color) !important;
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-color) 20%, transparent) !important;
+    }
     .missing-field-wrapper {
         border: 2px solid #ff4b4b;
         background: rgba(255, 75, 75, 0.06);
