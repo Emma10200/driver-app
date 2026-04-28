@@ -45,7 +45,7 @@ SUBMISSIONS_DIR = Path(__file__).resolve().parent / "submissions"
 REQUESTED_COMPANY = get_company_profile(resolve_company_slug())
 
 st.set_page_config(
-    page_title=f"{REQUESTED_COMPANY.name} - Driver Application",
+    page_title="Driver Application",
     page_icon="🚛",
     layout="wide",
     initial_sidebar_state="collapsed",
