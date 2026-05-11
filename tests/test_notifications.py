@@ -40,6 +40,13 @@ def test_notification_settings_auto_includes_company_safety_email(monkeypatch):
         "dann@prestigetransportation.com",
     ]
 
+    pg = notification_service._notification_settings("pg", test_mode=False)
+    assert pg["recipients"] == [
+        "ops@example.com",
+        "safety@prestige.inc",
+        "dann@prestigetransportation.com",
+    ]
+
 
 def test_notification_settings_test_mode_skips_safety_email(monkeypatch):
     monkeypatch.setattr(

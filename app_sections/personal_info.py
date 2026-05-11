@@ -111,6 +111,17 @@ def _coerce_date(value: object, default: date) -> date:
     return default
 
 
+def _coerce_optional_date(value: object) -> date | None:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.fromisoformat(value).date()
+        except ValueError:
+            return None
+    return None
+
+
 def _existing_previous_addresses() -> list[dict[str, object]]:
     stored = st.session_state.form_data.get("previous_addresses")
     if isinstance(stored, list) and stored:
@@ -158,9 +169,10 @@ def render_personal_information_page() -> None:
         middle_name = st.text_input("Middle Name", value=st.session_state.form_data.get("middle_name", ""))
         mark_missing("last_name")
         last_name = st.text_input("Last Name *", value=st.session_state.form_data.get("last_name", ""))
+        mark_missing("dob")
         dob = st.date_input(
             "Date of Birth *",
-            value=_coerce_date(st.session_state.form_data.get("dob"), date(1990, 1, 1)),
+            value=_coerce_optional_date(st.session_state.form_data.get("dob")),
             min_value=date(1940, 1, 1),
             max_value=date(2008, 1, 1),
         )
@@ -319,6 +331,8 @@ def render_personal_information_page() -> None:
             missing.append(("first_name", "First Name"))
         if not last_name:
             missing.append(("last_name", "Last Name"))
+        if dob is None:
+            missing.append(("dob", "Date of Birth"))
         if not ssn_digits:
             missing.append(("ssn", "Social Security Number"))
         if not address:

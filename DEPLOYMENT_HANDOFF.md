@@ -121,6 +121,7 @@ For internal QA, you can also use dedicated links like:
 
 - `https://your-app.streamlit.app/?company=prestige&admin=1`
 - `https://your-app.streamlit.app/?company=prestige&mode=test`
+- `https://your-app.streamlit.app/?company=PG&admin=1`
 
 If `ADMIN_TEST_TOKEN` is set, append `&token=YOUR_TOKEN` to those links.
 
@@ -142,6 +143,7 @@ Safe test mode uses fake data, stores records under a separate company test name
 ## What safety/owner should review
 
 - Company email in `config.py`
+- Prestig, Inc. links use `?company=PG` as the main public form; `?company=pretig` is kept as an alternate alias.
 - Company wording and disclosures in the app
 - Supabase project ownership
 - Who should have access to submission records

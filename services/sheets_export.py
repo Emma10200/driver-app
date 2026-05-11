@@ -1,7 +1,7 @@
 """Append each submission as a row in the shared 'Applicants' Google Sheet.
 
-The sheet has one tab per company. The visible tab name is just "Xpress" per
-the safety team's preference.
+The sheet has one tab per company. Some visible tab names are shortened per
+the safety team's preference (for example, "Xpress" and "PG").
 
 The tabs receive a frozen header row on first write. New submissions are
 inserted at row 2 so the newest applicant is always at the top -- no manual
@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 COMPANY_TAB_NAMES: dict[str, str] = {
     "prestige": "Prestige Transportation",
     "xpress": "Xpress",
+    "pg": "PG",
 }
 
 # Tab names for the cross-company decision log. Approved + declined live in
@@ -45,6 +46,7 @@ DECISION_TAB_NAMES: dict[str, str] = {
 COMPANY_DIVISION_LABEL: dict[str, str] = {
     "prestige": "Prestig Inc",
     "xpress": "Xpress Inc",
+    "pg": "Prestig Inc",
 }
 
 # Column order written into the header row. The layout mirrors the

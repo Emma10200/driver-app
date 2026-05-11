@@ -46,12 +46,21 @@ COMPANY_PROFILES: dict[str, CompanyProfile] = {
         email="safety@xpresstransinc.com",
         brand_color="#3F8356",
     ),
+    "pg": CompanyProfile(
+        slug="pg",
+        name="Prestig, Inc.",
+        address="3810 North Ave.",
+        city_state_zip="Stone Park, IL 60165",
+        phone="773-303-4616",
+        email="safety@prestige.inc",
+        brand_color="#6E5AA8",
+    ),
 }
 
 # Public URL aliases. Keep old/posted links working forever; Craigslist/recruiter
-# links may use any of these forms. The eventual third company should get its
-# own explicit slug (for example, "prestig") rather than taking over the posted
-# "prestige" links that already route to Prestige Transportation.
+# links may use any of these forms. Prestig, Inc. uses the distinct public
+# slug "pg" so it does not take over posted "prestige" links that already
+# route to Prestige Transportation.
 COMPANY_SLUG_ALIASES: dict[str, str] = {
     "": DEFAULT_COMPANY_SLUG,
     "prestige": "prestige",
@@ -69,6 +78,12 @@ COMPANY_SLUG_ALIASES: dict[str, str] = {
     "xpress-inc": "xpress",
     "xpress-trans": "xpress",
     "xpresstrans": "xpress",
+    # Prestig, Inc. public links. Main posted link should use PG; keep likely
+    # internal/recruiter spellings as aliases, including the requested typo.
+    "pg": "pg",
+    "prestig": "pg",
+    "pretig": "pg",
+    "prestig-inc": "pg",
 }
 
 # Application phases

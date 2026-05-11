@@ -42,6 +42,14 @@ def test_resolve_company_slug_accepts_prestige_transportation_aliases(monkeypatc
         assert runtime_context.resolve_company_slug() == "prestige"
 
 
+def test_resolve_company_slug_accepts_pg_and_pretig_aliases(monkeypatch):
+    aliases = ["PG", "pg", "prestig", "pretig", "prestig-inc"]
+
+    for alias in aliases:
+        monkeypatch.setattr(runtime_context, "st", SimpleNamespace(query_params={"company": alias}))
+        assert runtime_context.resolve_company_slug() == "pg"
+
+
 def test_keyless_prestige_transportation_alias_resolves(monkeypatch):
     monkeypatch.setattr(runtime_context, "st", SimpleNamespace(query_params={"prestigetransportation": ""}))
 
@@ -63,3 +71,13 @@ def test_get_company_profile_returns_real_xpress_details():
     assert profile.city_state_zip == "Melrose Park, IL 60160"
     assert profile.phone == "708-356-4420"
     assert profile.email == "safety@xpresstransinc.com"
+
+
+def test_get_company_profile_returns_real_pg_details():
+    profile = runtime_context.get_company_profile("pg")
+
+    assert profile.name == "Prestig, Inc."
+    assert profile.address == "3810 North Ave."
+    assert profile.city_state_zip == "Stone Park, IL 60165"
+    assert profile.phone == "773-303-4616"
+    assert profile.email == "safety@prestige.inc"

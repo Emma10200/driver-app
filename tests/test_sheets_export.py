@@ -79,6 +79,7 @@ def test_build_submission_row_orders_columns_and_stringifies():
 def test_tab_name_routing():
     assert sheets_export._tab_name_for_company("prestige") == "Prestige Transportation"
     assert sheets_export._tab_name_for_company("xpress") == "Xpress"
+    assert sheets_export._tab_name_for_company("pg") == "PG"
     # Unknown slug falls back to the default company profile's display name.
     assert sheets_export._tab_name_for_company("unknown-slug") == "PRESTIGE TRANSPORTATION INC."
 
@@ -236,6 +237,14 @@ def test_division_label_routes_per_company():
     )
     by_column = dict(zip(sheets_export.SHEET_COLUMNS, row))
     assert by_column["Division"] == "Xpress Inc"
+
+    row = sheets_export.build_submission_row(
+        form_data={"first_name": "A", "last_name": "B"},
+        licenses=[],
+        company_slug="pg",
+    )
+    by_column = dict(zip(sheets_export.SHEET_COLUMNS, row))
+    assert by_column["Division"] == "Prestig Inc"
 
 
 def test_cdl_endorsement_combines_hazmat_and_twic():

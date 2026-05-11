@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
@@ -32,6 +33,7 @@ def test_page_one_next_advances_without_ssn_exception(monkeypatch, tmp_path):
 
     _widget_by_label(at.text_input, "First Name *").set_value("Emma")
     _widget_by_label(at.text_input, "Last Name *").set_value("Driver")
+    _widget_by_label(at.date_input, "Date of Birth *").set_value(date(1990, 1, 1))
     _widget_by_label(at.text_input, "Social Security Number *").set_value("123456789")
     _widget_by_label(at.text_input, "Current Address *").set_value("123 Main St")
     _widget_by_label(at.text_input, "City *").set_value("Fontana")
@@ -60,6 +62,31 @@ def test_page_one_next_advances_without_ssn_exception(monkeypatch, tmp_path):
     assert at.session_state["form_data"]["emergency_address"] == "123 Family Rd"
     assert at.session_state["form_data"]["text_consent"] is True
     assert any(node.value == "Company Questions & Driving Experience" for node in at.subheader)
+
+
+def test_page_one_dob_starts_blank_and_is_required(monkeypatch, tmp_path):
+    at = _build_app(monkeypatch, tmp_path)
+    at.run(timeout=15)
+
+    dob_widget = _widget_by_label(at.date_input, "Date of Birth *")
+    assert dob_widget.value is None
+
+    _widget_by_label(at.text_input, "First Name *").set_value("Emma")
+    _widget_by_label(at.text_input, "Last Name *").set_value("Driver")
+    _widget_by_label(at.text_input, "Social Security Number *").set_value("123456789")
+    _widget_by_label(at.text_input, "Current Address *").set_value("123 Main St")
+    _widget_by_label(at.text_input, "City *").set_value("Fontana")
+    _widget_by_label(at.text_input, "State *").set_value("California")
+    _widget_by_label(at.text_input, "Zip Code *").set_value("92335")
+    _widget_by_label(at.text_input, "Primary Phone *").set_value("5551234567")
+    _widget_by_label(at.text_input, "Email Address *").set_value("emma@example.com")
+
+    _widget_by_label(at.button, "Next →").click().run(timeout=15)
+
+    assert not at.exception
+    assert at.session_state["current_page"] == 1
+    assert "dob" not in at.session_state["form_data"]
+    assert "Date of Birth" in at.session_state["_missing_field_labels"]
 
 
 def test_page_seven_next_advances_to_fcra(monkeypatch, tmp_path):

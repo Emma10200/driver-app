@@ -55,4 +55,4 @@ A deeper package reorganization is possible later, but it should be done as a se
 
 - Current posted links using `?company=prestige`, `?prestige`, or related Prestige Transportation aliases continue to route to Prestige Transportation.
 - New public links for Prestige Transportation can use `?company=prestigetransportation` for clarity.
-- The future third company should use a distinct explicit slug such as `prestig`; do not repurpose the already-posted `prestige` links unless ownership intentionally wants those old links to change companies.
+- Prestig, Inc. uses `?company=PG` as the main public link slug. `?company=pretig`, `?company=prestig`, and `?company=prestig-inc` are accepted alternates.

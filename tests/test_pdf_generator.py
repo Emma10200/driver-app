@@ -94,6 +94,31 @@ def test_generate_application_pdf_handles_long_wrapped_fields_without_page_explo
     assert len(reader.pages) <= 12
 
 
+def test_generate_application_pdf_uses_pg_company_header(monkeypatch):
+    monkeypatch.setattr(pdf_generator, "get_active_company_profile", lambda: get_company_profile("pg"))
+
+    pdf_bytes = pdf_generator.generate_application_pdf(
+        {
+            "first_name": "PG",
+            "last_name": "Driver",
+            "email": "pg.driver@example.com",
+            "sig_full_name": "PG Driver",
+            "sig_date": "2026-05-11",
+        },
+        [],
+        [],
+        [],
+        [],
+    )
+    text = _extract_text(pdf_bytes)
+
+    assert "Prestig, Inc." in text
+    assert "3810 North Ave." in text
+    assert "Stone Park, IL 60165" in text
+    assert "773-303-4616" in text
+    assert "safety@prestige.inc" in text
+
+
 def test_generate_application_pdf_includes_aligned_credentials_and_disclosures(monkeypatch):
     monkeypatch.setattr(pdf_generator, "get_active_company_profile", lambda: get_company_profile("prestige"))
 
