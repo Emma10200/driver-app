@@ -6,7 +6,7 @@ from typing import Any
 
 from fpdf import FPDF
 
-from config import EQUIPMENT_TYPES, CompanyProfile
+from config import COMPANY_PROFILES, COMPANY_SLUG_ALIASES, EQUIPMENT_TYPES, CompanyProfile
 from runtime_context import get_active_company_profile
 
 
@@ -157,6 +157,18 @@ def _safe(data, key, default=""):
     return str(val)
 
 
+def _company_from_form_data(form_data) -> CompanyProfile | None:
+    raw_slug = str(form_data.get("company_slug") or "").strip().lower().replace("_", "-")
+    if not raw_slug:
+        return None
+    slug = COMPANY_SLUG_ALIASES.get(raw_slug, raw_slug)
+    return COMPANY_PROFILES.get(slug)
+
+
+def _resolve_pdf_company(form_data, company: CompanyProfile | None = None) -> CompanyProfile:
+    return company or _company_from_form_data(form_data) or get_active_company_profile()
+
+
 def _bool_text(value, default=""):
     if value is True:
         return "Yes"
@@ -232,10 +244,10 @@ def _mvr_rows(form_data):
     ]
 
 
-def generate_application_pdf(form_data, employers, licenses, accidents, violations):
+def generate_application_pdf(form_data, employers, licenses, accidents, violations, *, company: CompanyProfile | None = None):
     """Generate the main application PDF."""
-    company = get_active_company_profile()
-    company_name = form_data.get("company_name") or company.name
+    company = _resolve_pdf_company(form_data, company)
+    application_company_name = company.name
     pdf = CompanyPDF(company)
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=20)
@@ -363,8 +375,8 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
     # --- Employment History ---
     pdf.section_title("Employment / Contracting History (10 Years)")
     for i, emp in enumerate(employers):
-        company_name = emp.get("company", f"Employer #{i+1}")
-        pdf.item_heading(f"{i+1}. {company_name}")
+        employer_company_name = emp.get("company", f"Employer #{i+1}")
+        pdf.item_heading(f"{i+1}. {employer_company_name}")
         pdf.set_text_color(0, 0, 0)
         pdf.field_row("  Address:", f"{emp.get('address', '')}, {emp.get('city_state', '')}")
         pdf.field_row("  Country:", emp.get("country", ""))
@@ -492,7 +504,7 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
     pdf.set_font("Helvetica", "", 8)
     pdf.multi_cell(0, 4,
         f"I certify that all information provided in this application is true and complete. "
-        f"I authorize {company_name} to make investigations and inquiries as necessary. "
+        f"I authorize {application_company_name} to make investigations and inquiries as necessary. "
         f"I understand this is not a contract for services. Engagement as an independent contractor "
         f"is based on mutual agreement and allows either party to terminate at any time.")
     pdf.ln(4)
@@ -510,10 +522,10 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
     return buf.getvalue()
 
 
-def generate_fcra_pdf(form_data):
+def generate_fcra_pdf(form_data, *, company: CompanyProfile | None = None):
     """Generate standalone FCRA Disclosure PDF (federal requirement)."""
-    company = get_active_company_profile()
-    company_name = form_data.get("company_name") or company.name
+    company = _resolve_pdf_company(form_data, company)
+    company_name = company.name
     pdf = CompanyPDF(company)
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=20)
@@ -587,10 +599,10 @@ def generate_fcra_pdf(form_data):
     return buf.getvalue()
 
 
-def generate_psp_pdf(form_data):
+def generate_psp_pdf(form_data, *, company: CompanyProfile | None = None):
     """Generate standalone PSP Disclosure PDF."""
-    company = get_active_company_profile()
-    company_name = form_data.get("company_name") or company.name
+    company = _resolve_pdf_company(form_data, company)
+    company_name = company.name
     pdf = CompanyPDF(company)
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=20)
@@ -654,10 +666,10 @@ def generate_psp_pdf(form_data):
     return buf.getvalue()
 
 
-def generate_california_disclosure_pdf(form_data):
+def generate_california_disclosure_pdf(form_data, *, company: CompanyProfile | None = None):
     """Generate California background check disclosure PDF."""
-    company = get_active_company_profile()
-    company_name = form_data.get("company_name") or company.name
+    company = _resolve_pdf_company(form_data, company)
+    company_name = company.name
     pdf = CompanyPDF(company)
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=20)
@@ -714,10 +726,10 @@ def generate_california_disclosure_pdf(form_data):
     return buf.getvalue()
 
 
-def generate_clearinghouse_pdf(form_data):
+def generate_clearinghouse_pdf(form_data, *, company: CompanyProfile | None = None):
     """Generate standalone Clearinghouse Release PDF."""
-    company = get_active_company_profile()
-    company_name = form_data.get("company_name") or company.name
+    company = _resolve_pdf_company(form_data, company)
+    company_name = company.name
     pdf = CompanyPDF(company)
     pdf.alias_nb_pages()
     pdf.set_auto_page_break(auto=True, margin=20)

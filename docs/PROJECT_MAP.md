@@ -31,6 +31,7 @@ This repo is intentionally small, but the root has several Streamlit entry/confi
 - `submission_storage.py` — local/Supabase storage implementation.
 - `pdf_generator.py` — generated PDF output.
 - `submissions/` — local runtime output; ignored by Git.
+- `scripts/copy_submission_company.py` — maintenance utility for regenerating a saved application packet under another company profile.
 
 ## Tests and docs
 

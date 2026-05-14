@@ -89,6 +89,32 @@ def test_page_one_dob_starts_blank_and_is_required(monkeypatch, tmp_path):
     assert "Date of Birth" in at.session_state["_missing_field_labels"]
 
 
+def test_page_two_position_defaults_blank_and_driver_can_advance(monkeypatch, tmp_path):
+    at = _build_app(monkeypatch, tmp_path)
+    at.session_state["current_page"] = 2
+    at.run(timeout=15)
+
+    position_widget = _widget_by_label(at.selectbox, "Position applying for *")
+    assert position_widget.value == "Select one..."
+
+    position_widget.set_value("Driver").run(timeout=15)
+    assert not any(node.value == "Owner Operator Equipment" for node in at.subheader)
+
+    _widget_by_label(at.selectbox, "Preferred office for onboarding *").set_value("California Office")
+    _widget_by_label(
+        at.radio,
+        "Are you legally eligible to provide contracted services in the United States? *",
+    ).set_value("Yes")
+    _widget_by_label(at.radio, "Do you read, write, and speak English? *").set_value("Yes")
+
+    _widget_by_label(at.button, "Next →").click().run(timeout=15)
+
+    assert not at.exception
+    assert at.session_state["current_page"] == 3
+    assert at.session_state["form_data"]["position"] == "Driver"
+    assert at.session_state["form_data"]["equipment_description"] == ""
+
+
 def test_page_seven_next_advances_to_fcra(monkeypatch, tmp_path):
     at = _build_app(monkeypatch, tmp_path)
     at.session_state["current_page"] = 7

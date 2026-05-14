@@ -36,7 +36,7 @@ def _coerce_date(value: object, default: date) -> date:
 
 def render_company_questions_page() -> None:
     st.subheader("Company Questions & Driving Experience")
-    st.caption("This application is currently for owner-operators only.")
+    st.caption("Select whether you are applying as a company driver or owner-operator.")
 
     currently_employed_value = st.session_state.form_data.get("currently_employed")
     relatives_here_value = st.session_state.form_data.get("relatives_here")
@@ -44,13 +44,11 @@ def render_company_questions_page() -> None:
 
     col1, col2 = st.columns(2)
     with col1:
-        current_position = st.session_state.form_data.get("position") or OWNER_OPERATOR_POSITION
-        st.selectbox(
+        position = selectbox_with_placeholder(
             "Position applying for *",
             POSITION_TYPES,
-            index=POSITION_TYPES.index(current_position) if current_position in POSITION_TYPES else 0,
-            disabled=True,
-            help="This portal is for Owner Operators only.",
+            current_value=st.session_state.form_data.get("position"),
+            help="Choose Driver or Owner Operator before continuing.",
         )
         eligible_us = selectbox_with_placeholder(
             "Are you legally eligible to provide contracted services in the United States? *",
@@ -117,25 +115,36 @@ def render_company_questions_page() -> None:
         relatives_names = st.text_input("Names of relatives", value=st.session_state.form_data.get("relatives_names", ""))
 
     st.markdown("---")
-    st.subheader("Owner Operator Equipment")
-    ocol1, ocol2 = st.columns(2)
-    with ocol1:
-        equipment_description = st.text_input(
-            "Equipment Description (Tractor)",
-            value=st.session_state.form_data.get("equipment_description", ""),
-        )
-        equipment_year = st.text_input("Year", value=st.session_state.form_data.get("equipment_year", ""))
-        equipment_make = st.text_input("Make", value=st.session_state.form_data.get("equipment_make", ""))
-        equipment_model = st.text_input("Model", value=st.session_state.form_data.get("equipment_model", ""))
-        equipment_color = st.text_input("Color", value=st.session_state.form_data.get("equipment_color", ""))
-    with ocol2:
-        equipment_vin = st.text_input("VIN", value=st.session_state.form_data.get("equipment_vin", ""))
-        equipment_weight = st.text_input("Weight", value=st.session_state.form_data.get("equipment_weight", ""))
-        equipment_mileage = st.text_input("Mileage", value=st.session_state.form_data.get("equipment_mileage", ""))
-        fifth_wheel_height = st.text_input(
-            "Fifth Wheel Height",
-            value=st.session_state.form_data.get("fifth_wheel_height", ""),
-        )
+    if position == OWNER_OPERATOR_POSITION:
+        st.subheader("Owner Operator Equipment")
+        ocol1, ocol2 = st.columns(2)
+        with ocol1:
+            equipment_description = st.text_input(
+                "Equipment Description (Tractor)",
+                value=st.session_state.form_data.get("equipment_description", ""),
+            )
+            equipment_year = st.text_input("Year", value=st.session_state.form_data.get("equipment_year", ""))
+            equipment_make = st.text_input("Make", value=st.session_state.form_data.get("equipment_make", ""))
+            equipment_model = st.text_input("Model", value=st.session_state.form_data.get("equipment_model", ""))
+            equipment_color = st.text_input("Color", value=st.session_state.form_data.get("equipment_color", ""))
+        with ocol2:
+            equipment_vin = st.text_input("VIN", value=st.session_state.form_data.get("equipment_vin", ""))
+            equipment_weight = st.text_input("Weight", value=st.session_state.form_data.get("equipment_weight", ""))
+            equipment_mileage = st.text_input("Mileage", value=st.session_state.form_data.get("equipment_mileage", ""))
+            fifth_wheel_height = st.text_input(
+                "Fifth Wheel Height",
+                value=st.session_state.form_data.get("fifth_wheel_height", ""),
+            )
+    else:
+        equipment_description = ""
+        equipment_year = ""
+        equipment_make = ""
+        equipment_model = ""
+        equipment_color = ""
+        equipment_vin = ""
+        equipment_weight = ""
+        equipment_mileage = ""
+        fifth_wheel_height = ""
 
     st.markdown("---")
     st.subheader("Driving Experience")
@@ -293,6 +302,8 @@ def render_company_questions_page() -> None:
     with bcol3:
         if st.button("Next →", key="p2_next", use_container_width=True, type="primary"):
             missing: list[str] = []
+            if not position:
+                missing.append("Position applying for")
             if not preferred_office:
                 missing.append("Preferred office for onboarding")
             if not eligible_us:
@@ -306,7 +317,7 @@ def render_company_questions_page() -> None:
 
             st.session_state.form_data.update(
                 {
-                    "position": OWNER_OPERATOR_POSITION,
+                    "position": position,
                     "eligible_us": eligible_us,
                     "read_english": read_english,
                     "currently_employed": currently_employed,

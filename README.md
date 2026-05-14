@@ -83,6 +83,19 @@ For full deployment steps and troubleshooting, see:
 - Notification emails are summary-only (no attachment payloads)
 - Test mode keeps fake data separate from production records
 
+## Copying an application to another company
+
+Use `scripts/copy_submission_company.py` to regenerate a submitted application packet for a different company profile. It loads an existing `submission.json`, switches the company metadata, regenerates the branded PDFs, and saves the copy under `companies/<target-company>/<mode>/submissions`.
+
+Examples:
+
+```bash
+python scripts/copy_submission_company.py submissions/companies/xpress/live/submissions/<submission-key> --to prestig
+python scripts/copy_submission_company.py --remote-prefix companies/xpress/live/submissions/<submission-key> --to pg --backend supabase
+```
+
+The default backend is `local` for safety. Use `--backend supabase` or `--backend both` only when Supabase secrets are configured and you intentionally want to write the generated copy there.
+
 ## Internal ownership
 
 If someone else needs to maintain this later, start with:

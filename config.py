@@ -145,6 +145,7 @@ US_STATES = [
 # Position types (independent contractor language)
 POSITION_TYPES = [
     "Owner Operator",
+    "Driver",
 ]
 
 LICENSE_COUNTRIES = ["US", "Canada", "Mexico"]
