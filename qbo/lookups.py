@@ -86,6 +86,51 @@ class EntityLookupService:
     def invalidate(self) -> None:
         self._runtime.clear()
 
+    def invalidate_entity(self, type_name: str, name: str, realm_id: str) -> None:
+        """Drop the cached lookup for one specific (realm, type, name) tuple.
+
+        Called immediately after auto-creating a Customer/Vendor so the next
+        ``resolve_entity`` call hits QBO and picks up the new Id.
+        """
+        if not name or not realm_id:
+            return
+        self._runtime.pop((realm_id, type_name, normalize_for_match(name)), None)
+
+    def create_entity(
+        self, type_name: str, display_name: str, realm_id: str
+    ) -> str | None:
+        """Create a minimal Customer or Vendor record in QBO and return its Id.
+
+        Mirrors the Apps Script ``createEntityForCompany_`` flow: posts a
+        ``{DisplayName: ...}`` payload to ``/customer`` or ``/vendor``. Only
+        Customer and Vendor support auto-creation; every other entity type
+        must be created manually in QBO before import.
+
+        Returns the new Id on success, or None on failure.
+        """
+        if type_name not in ("Customer", "Vendor"):
+            raise ValueError(
+                f"Auto-create is only supported for Customer and Vendor (got {type_name!r})."
+            )
+        name = str(display_name or "").strip()
+        if not name or not realm_id:
+            return None
+        endpoint = "/customer" if type_name == "Customer" else "/vendor"
+        try:
+            response = self._qbo.post(
+                endpoint, realm_id=realm_id, payload={"DisplayName": name}
+            ).json()
+        except RuntimeError:
+            return None
+        body = (response or {}).get(type_name) or {}
+        new_id = str(body.get("Id") or "").strip()
+        if not new_id:
+            return None
+        # Invalidate any cached "not found" entry, then prime with the new id.
+        runtime_key = (realm_id, type_name, normalize_for_match(name))
+        self._runtime[runtime_key] = new_id
+        return new_id
+
     def _query_entity(self, type_name: str, name: str, realm_id: str) -> str | None:
         field_name = "Name" if type_name in ("Item", "Term") else "DisplayName"
         safe_name = _escape_qbo_string(name)

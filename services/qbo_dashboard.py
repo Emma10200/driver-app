@@ -55,6 +55,7 @@ QBO_TEMPLATE_KEY = "qbo_selected_template"
 QBO_PARKING_SCAN_KEY = "qbo_parking_scan"
 QBO_PARKING_SELECTION_KEY = "qbo_parking_selected_ids"
 QBO_CATALOG_CACHE_KEY = "qbo_catalog_cache"
+QBO_CUSTOMER_CHECK_KEY = "qbo_customer_check"
 _DATE_USE_ROW = "Use row dates (or most recent Friday)"
 _TEMPLATE_OPTIONS = {
     "invoices": "Invoices",
@@ -495,10 +496,12 @@ def _render_importer(
 
     options = _realm_options(realms)
     if template_key == "invoices":
-        selectbox_label = (
-            "Fallback target company (used only for invoice rows whose Division "
-            "header does not match a connected company)"
+        st.info(
+            "📂 Invoice files are routed by the **Division** column on each row. "
+            "You can upload one file containing multiple companies (e.g. Prestig Inc + Xpress Inc) "
+            "and each row will be posted to its matched company automatically."
         )
+        selectbox_label = "Fallback company (only used for rows with a blank or unrecognized Division)"
     else:
         selectbox_label = "Target company"
     selected_realm_label = st.selectbox(selectbox_label, list(options.keys()), key="qbo_target_company")
@@ -526,6 +529,7 @@ def _render_importer(
     upload_hash = source_file_hash(content)
     if st.session_state.get(QBO_UPLOAD_HASH_KEY) != upload_hash:
         st.session_state.pop(QBO_PREVIEW_KEY, None)
+        st.session_state.pop(QBO_CUSTOMER_CHECK_KEY, None)
         st.session_state[QBO_UPLOAD_HASH_KEY] = upload_hash
 
     preview_col, clear_col = st.columns([0.7, 0.3])
@@ -549,6 +553,7 @@ def _render_importer(
     with clear_col:
         if st.button("Clear preview", use_container_width=True):
             st.session_state.pop(QBO_PREVIEW_KEY, None)
+            st.session_state.pop(QBO_CUSTOMER_CHECK_KEY, None)
             st.rerun()
 
     preview = st.session_state.get(QBO_PREVIEW_KEY)
@@ -562,6 +567,11 @@ def _render_importer(
     multi_realm_invoice = False
     if template_key == "invoices":
         multi_realm_invoice = _render_invoice_routing_summary(preview, selected_realm)
+        _render_missing_customer_panel(
+            preview=preview,
+            fallback_realm=selected_realm,
+            auth_service=auth_service,
+        )
 
     # Optional in-line correction of expense account assignments (the
     # "trailer vs ELD" use case). Loads the QBO chart of accounts on demand.
@@ -1224,3 +1234,182 @@ def _render_parking_pk(
 
         st.session_state.pop(QBO_PARKING_SCAN_KEY, None)
         st.session_state.pop(QBO_PARKING_SELECTION_KEY, None)
+
+
+# =============================================================================
+# Missing-customer pre-check + auto-create (invoices)
+# =============================================================================
+
+def _render_missing_customer_panel(
+    *,
+    preview: PreviewResult,
+    fallback_realm: ConnectedRealm,
+    auth_service: QboAuthService,
+) -> None:
+    """Pre-check every unique Customer name on the invoice drafts against QBO,
+    list the missing ones, and offer a one-click auto-create.
+
+    Mirrors the Apps Script ``applyApprovedMissingEntities_`` flow for the
+    Customer type (POST /customer with just ``{DisplayName: name}``).
+    """
+    drafts = preview.drafts or []
+    if not drafts:
+        return
+
+    # Collect unique (realm_id, customer_name) pairs. Unresolved-division
+    # drafts get the fallback realm so the user can still create customers
+    # for them after picking the fallback company above.
+    unique: dict[tuple[str, str], dict[str, Any]] = {}
+    for draft in drafts:
+        realm_id = str(draft.get("_realmId") or fallback_realm.realm_id or "").strip()
+        customer_name = str(draft.get("_tempCustomerName") or "").strip()
+        if not realm_id or not customer_name:
+            continue
+        key = (realm_id, customer_name)
+        if key in unique:
+            continue
+        unique[key] = {
+            "realm_id": realm_id,
+            "customer_name": customer_name,
+            "division": str(draft.get("_division") or "").strip(),
+        }
+
+    if not unique:
+        return
+
+    realm_label_map = {
+        str(draft.get("_realmId") or ""): str(draft.get("_division") or "")
+        for draft in drafts
+    }
+    realm_label_map[fallback_realm.realm_id] = fallback_realm.company_name
+
+    st.markdown("#### \U0001F464 Customer pre-check")
+    st.caption(
+        f"This file references **{len(unique)}** unique customer/company pair(s). "
+        "Check them against QBO before posting so failures like "
+        "*\"Customer 'TGR Logistics - PT' not found in QBO\"* never block the import."
+    )
+
+    check_col, refresh_col = st.columns([0.7, 0.3])
+    with check_col:
+        run_check = st.button(
+            "\U0001F50D Check customers against QBO",
+            key="qbo_customer_check_btn",
+            use_container_width=True,
+        )
+    with refresh_col:
+        if st.button(
+            "\u21BB Re-check",
+            key="qbo_customer_recheck_btn",
+            use_container_width=True,
+            help="Force re-resolution against QBO (after fixing the source file).",
+        ):
+            st.session_state.pop(QBO_CUSTOMER_CHECK_KEY, None)
+            run_check = True
+
+    if run_check:
+        qbo_client = QboClient(auth_service)
+        lookups = EntityLookupService(qbo_client)
+        results: list[dict[str, Any]] = []
+        progress = st.progress(0.0, text="Resolving customers in QBO\u2026")
+        total = len(unique)
+        for idx, info in enumerate(unique.values(), start=1):
+            try:
+                resolved_id = lookups.resolve_entity(
+                    "Customer", info["customer_name"], info["realm_id"]
+                )
+            except Exception as exc:  # noqa: BLE001 - never break the UI
+                logger.warning("Customer lookup failed: %s", exc)
+                resolved_id = None
+            results.append({**info, "resolved_id": resolved_id or ""})
+            progress.progress(idx / total, text=f"Checked {idx}/{total}\u2026")
+        progress.empty()
+        st.session_state[QBO_CUSTOMER_CHECK_KEY] = results
+
+    results = st.session_state.get(QBO_CUSTOMER_CHECK_KEY) or []
+    if not results:
+        return
+
+    missing = [r for r in results if not r.get("resolved_id")]
+    found_count = len(results) - len(missing)
+
+    if not missing:
+        st.success(f"All {found_count} customer(s) already exist in QuickBooks. \u2705")
+        return
+
+    st.warning(
+        f"{len(missing)} customer(s) are not in QuickBooks yet. "
+        f"({found_count} already exist.) Pick which ones to auto-create."
+    )
+
+    rows = [
+        {
+            "Create": True,
+            "Customer": item["customer_name"],
+            "Target company": realm_label_map.get(item["realm_id"]) or item["realm_id"],
+            "Division (from file)": item.get("division") or "",
+            "_realm_id": item["realm_id"],
+            "_customer_name": item["customer_name"],
+        }
+        for item in missing
+    ]
+    edited = st.data_editor(
+        rows,
+        key="qbo_missing_customers_editor",
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        column_config={
+            "_realm_id": None,
+            "_customer_name": None,
+            "Create": st.column_config.CheckboxColumn("Create", default=True),
+            "Customer": st.column_config.TextColumn(disabled=True),
+            "Target company": st.column_config.TextColumn(disabled=True),
+            "Division (from file)": st.column_config.TextColumn(disabled=True),
+        },
+    )
+    try:
+        edited_rows = edited.to_dict("records")  # type: ignore[attr-defined]
+    except AttributeError:
+        edited_rows = list(edited or [])
+
+    chosen = [r for r in edited_rows if r.get("Create")]
+    create_label = f"\u2795 Create {len(chosen)} customer(s) in QuickBooks"
+    if st.button(
+        create_label,
+        key="qbo_create_missing_customers",
+        type="primary",
+        disabled=not chosen,
+        use_container_width=True,
+    ):
+        qbo_client = QboClient(auth_service)
+        lookups = EntityLookupService(qbo_client)
+        created = 0
+        failed: list[str] = []
+        progress = st.progress(0.0, text="Creating customers in QuickBooks\u2026")
+        total = len(chosen)
+        for idx, item in enumerate(chosen, start=1):
+            realm_id = str(item.get("_realm_id") or "")
+            customer_name = str(item.get("_customer_name") or "")
+            try:
+                new_id = lookups.create_entity("Customer", customer_name, realm_id)
+            except Exception as exc:  # noqa: BLE001 - UI must continue
+                logger.exception("Customer create failed for %s", customer_name)
+                failed.append(f"{customer_name}: {exc}")
+                continue
+            if new_id:
+                created += 1
+            else:
+                failed.append(f"{customer_name}: QBO returned no Id (see logs).")
+            progress.progress(idx / total, text=f"Created {idx}/{total}\u2026")
+        progress.empty()
+
+        st.success(f"Created {created} customer(s).")
+        if failed:
+            with st.expander(f"View {len(failed)} failure(s)"):
+                for line in failed:
+                    st.code(line)
+
+        # Force a re-check on next render so the panel shows the new state.
+        st.session_state.pop(QBO_CUSTOMER_CHECK_KEY, None)
+        st.rerun()
