@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import importlib.util
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 from typing import Any
@@ -122,6 +123,41 @@ def _streamlit_auth_login_provider() -> tuple[bool, str | None, str]:
     return True, provider_name, ""
 
 
+def _streamlit_auth_diagnostics() -> dict[str, Any]:
+    """Return non-secret auth diagnostics for troubleshooting deployed config."""
+    diagnostics: dict[str, Any] = {
+        "Authlib installed": importlib.util.find_spec("authlib") is not None,
+        "st.login available": hasattr(st, "login"),
+        "st.user available": hasattr(st, "user"),
+    }
+    try:
+        auth_config = _mapping_get(st.secrets, "auth")
+    except _streamlit_secret_exceptions:
+        diagnostics["[auth] present"] = False
+        return diagnostics
+
+    diagnostics["[auth] present"] = bool(auth_config)
+    if not auth_config:
+        return diagnostics
+
+    redirect_uri = str(_mapping_get(auth_config, "redirect_uri") or "").strip()
+    cookie_secret = str(_mapping_get(auth_config, "cookie_secret") or "")
+    provider_config = _mapping_get(auth_config, GOOGLE_AUTH_PROVIDER)
+    diagnostics["[auth.google] present"] = isinstance(provider_config, Mapping)
+    diagnostics["redirect_uri"] = redirect_uri or "missing"
+    diagnostics["cookie_secret length"] = len(cookie_secret)
+
+    if isinstance(provider_config, Mapping):
+        client_id = str(_mapping_get(provider_config, "client_id") or "").strip()
+        client_secret = str(_mapping_get(provider_config, "client_secret") or "")
+        metadata_url = str(_mapping_get(provider_config, "server_metadata_url") or "").strip()
+        diagnostics["client_id present"] = bool(client_id)
+        diagnostics["client_id ends correctly"] = client_id.endswith(".apps.googleusercontent.com")
+        diagnostics["client_secret length"] = len(client_secret)
+        diagnostics["server_metadata_url"] = metadata_url or "missing"
+    return diagnostics
+
+
 def _render_streamlit_auth_help(reason: str) -> None:
     st.error("Google SSO is not configured correctly for this Streamlit app yet.")
     if reason:
@@ -132,20 +168,22 @@ def _render_streamlit_auth_help(reason: str) -> None:
         "different from the QuickBooks redirect URI."
     )
     st.code(
-        """[auth]
+        '''[auth]
 redirect_uri = "https://driver-application.streamlit.app/oauth2callback"
 cookie_secret = "generate-a-long-random-string"
 
 [auth.google]
 client_id = "your-google-oauth-client-id.apps.googleusercontent.com"
 client_secret = "your-google-oauth-client-secret"
-server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration""".strip(),
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"'''.strip(),
         language="toml",
     )
     st.caption(
         "Also add https://driver-application.streamlit.app/oauth2callback to the "
         "Google Cloud OAuth client's Authorized redirect URIs."
     )
+    with st.expander("Safe auth diagnostics", expanded=False):
+        st.json(_streamlit_auth_diagnostics())
 
 
 def _date_options() -> list[str]:
@@ -209,9 +247,11 @@ def _render_login() -> None:
                 st.login()
         except _streamlit_auth_exceptions as exc:
             logger.exception("Streamlit Google login failed to start")
+            detail = str(exc).strip()
             _render_streamlit_auth_help(
                 "Streamlit rejected the current auth configuration. Check the app logs for the "
                 f"full provider error. Summary: {type(exc).__name__}"
+                + (f" — {detail}" if detail else "")
             )
 
 
