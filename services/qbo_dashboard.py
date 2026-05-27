@@ -1112,17 +1112,38 @@ def _build_preview(
         parser = InvoiceParser(CompanyDirectory(realms))
         parsed = parser.parse(rows)
         drafts = parser.build_qbo_drafts(parsed)
-        preview_rows = [
-            {
-                "Doc #": row["doc_number"],
-                "Date": row["txn_date"],
-                "Customer": row["customer_name"],
-                "Amount": row["amount"],
-                "Division": row["division_name"] or "(blank)",
-                "QBO Company": _realm_name_for_id(realms, row.get("realm_id") or "") or "(unmatched)",
-            }
-            for row in parsed.get("rows") or []
-        ]
+        preview_rows: list[dict[str, Any]] = []
+        for row, draft in zip(parsed.get("rows") or [], drafts):
+            line = ((draft.get("Line") or [{}])[0] or {}) if isinstance(draft, dict) else {}
+            detail = (line.get("SalesItemLineDetail") or {}) if isinstance(line, dict) else {}
+            custom_field = ((draft.get("CustomField") or [{}])[0] or {}) if isinstance(draft, dict) else {}
+            preview_rows.append(
+                {
+                    "QBO Txn Type": "Invoice",
+                    "Doc #": row["doc_number"],
+                    "Txn Date": row["txn_date"],
+                    "Due Date": row["due_date"],
+                    "Customer": row["customer_name"],
+                    "Division": row["division_name"] or "(blank)",
+                    "QBO Company": _realm_name_for_id(realms, row.get("realm_id") or "") or "(unmatched)",
+                    "Realm ID": row.get("realm_id") or "",
+                    "PO / Broker Load #": row.get("broker_load_number") or "",
+                    "QBO Terms": draft.get("_tempTermName") or "",
+                    "QBO Item": line.get("_tempItemName") or "",
+                    "Line Qty": detail.get("Qty") or "",
+                    "Line Rate": detail.get("UnitPrice") or "",
+                    "Line Amount": line.get("Amount") or 0,
+                    "Invoice Amount": row["amount"],
+                    "Line Description": line.get("Description") or "",
+                    "Private Note": draft.get("PrivateNote") or "",
+                    "Custom Field #": custom_field.get("DefinitionId") or "",
+                    "Custom Field Value": custom_field.get("StringValue") or "",
+                    "QB Exported": row.get("qb_exported"),
+                    "Invoice Last Sent": row.get("invoice_last_sent_date") or "",
+                    "Invoice Remarks": row.get("invoice_remarks") or "",
+                    "Status": row.get("status") or "",
+                }
+            )
         warnings = [f"Row {item.get('row_number')}: {item.get('reason')}" for item in parsed.get("skipped_rows") or []]
         route_errors = [
             "Row {row}: invoice {doc} has Division {division!r}, which does not match a connected QuickBooks company.".format(
@@ -1158,17 +1179,48 @@ def _build_preview(
             override_txn_date=override_date,
         )
         drafts = parsed.get("checks") or []
-        preview_rows = [
-            {
-                "Doc #": draft.get("DocNumber"),
-                "Date": draft.get("TxnDate"),
-                "Vendor": draft.get("_tempVendorName"),
-                "Lines": len(draft.get("Line") or []),
-                "Total": _draft_amount(draft),
-                "Bank Account": (draft.get("AccountRef") or {}).get("name") or "",
-            }
-            for draft in drafts
-        ]
+        preview_rows: list[dict[str, Any]] = []
+        for draft in drafts:
+            bank_ref = draft.get("AccountRef") or {}
+            total = _draft_amount(draft)
+            lines = draft.get("Line") or []
+            for line_index, line in enumerate(lines, start=1):
+                detail = (line or {}).get("AccountBasedExpenseLineDetail") or {}
+                account_ref = detail.get("AccountRef") or {}
+                preview_rows.append(
+                    {
+                        "QBO Txn Type": "Check",
+                        "Doc #": draft.get("DocNumber"),
+                        "Txn Date": draft.get("TxnDate"),
+                        "Payment Type": draft.get("PaymentType") or "Check",
+                        "Vendor": draft.get("_tempVendorName"),
+                        "Division": draft.get("_division") or "",
+                        "Realm ID": draft.get("_realmId") or "",
+                        "Bank Account": bank_ref.get("name") or "",
+                        "Bank Account ID": bank_ref.get("value") or draft.get("_bankAccountId") or "",
+                        "Check Total": total,
+                        "Line #": line_index,
+                        "Line Amount": (line or {}).get("Amount") or 0,
+                        "Expense Account": (line or {}).get("_tempAccountName") or account_ref.get("name") or "",
+                        "Line Description": (line or {}).get("Description") or "",
+                        "Detail Type": (line or {}).get("DetailType") or "",
+                    }
+                )
+            if not lines:
+                preview_rows.append(
+                    {
+                        "QBO Txn Type": "Check",
+                        "Doc #": draft.get("DocNumber"),
+                        "Txn Date": draft.get("TxnDate"),
+                        "Payment Type": draft.get("PaymentType") or "Check",
+                        "Vendor": draft.get("_tempVendorName"),
+                        "Division": draft.get("_division") or "",
+                        "Realm ID": draft.get("_realmId") or "",
+                        "Bank Account": bank_ref.get("name") or "",
+                        "Bank Account ID": bank_ref.get("value") or draft.get("_bankAccountId") or "",
+                        "Check Total": total,
+                    }
+                )
         return PreviewResult(
             template_type=template_key,
             source_file=file_name,
@@ -1184,17 +1236,30 @@ def _build_preview(
 
     parsed = MoneyCodeParser().parse(rows, target_realm_id=selected_realm.realm_id)
     drafts = parsed.get("expenses") or []
-    preview_rows = [
-        {
-            "Code": draft.get("DocNumber"),
-            "Date": draft.get("TxnDate"),
-            "Vendor": draft.get("_tempVendorName"),
-            "CC Account": draft.get("_tempCcAccountName"),
-            "Amount": _draft_amount(draft),
-            "Expense Account": ((draft.get("Line") or [{}])[0] or {}).get("_tempAccountName"),
-        }
-        for draft in drafts
-    ]
+    preview_rows: list[dict[str, Any]] = []
+    for draft in drafts:
+        total = _draft_amount(draft)
+        for line_index, line in enumerate(draft.get("Line") or [], start=1):
+            detail = (line or {}).get("AccountBasedExpenseLineDetail") or {}
+            account_ref = detail.get("AccountRef") or {}
+            preview_rows.append(
+                {
+                    "QBO Txn Type": "CreditCard Purchase",
+                    "Code / Doc #": draft.get("DocNumber"),
+                    "Txn Date": draft.get("TxnDate"),
+                    "Payment Type": draft.get("PaymentType") or "CreditCard",
+                    "Vendor": draft.get("_tempVendorName"),
+                    "Realm ID": draft.get("_realmId") or "",
+                    "CC Account": draft.get("_tempCcAccountName") or "Fuel Card - EFS",
+                    "Memo": draft.get("_memo") or "",
+                    "Purchase Total": total,
+                    "Line #": line_index,
+                    "Line Amount": (line or {}).get("Amount") or 0,
+                    "Expense Account": (line or {}).get("_tempAccountName") or account_ref.get("name") or "",
+                    "Line Description": (line or {}).get("Description") or "",
+                    "Detail Type": (line or {}).get("DetailType") or "",
+                }
+            )
     return PreviewResult(
         template_type=template_key,
         source_file=file_name,
@@ -1210,10 +1275,11 @@ def _build_preview(
 
 
 def _render_preview(preview: PreviewResult) -> None:
-    st.subheader("Preview")
+    st.subheader("Full preview")
     st.caption(
         f"{_TEMPLATE_OPTIONS.get(preview.template_type, preview.template_type)} — "
-        f"{preview.count} importable rows from {preview.source_file}"
+        f"{preview.count} importable transaction(s) from {preview.source_file}. "
+        "The table includes source fields plus QBO-ready fields used at posting."
     )
     if preview.rows:
         st.dataframe(preview.rows, use_container_width=True, hide_index=True)
@@ -1256,8 +1322,78 @@ def _render_import_stats(stats: Any) -> None:
         st.error(error)
 
 
+def _render_recent_import_batches(rows: list[dict[str, Any]]) -> None:
+    """Summarize transaction-level audit rows into user-friendly import batches."""
+    batches: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        source_hash = str(row.get("source_file_hash") or "").strip()
+        created_at = str(row.get("created_at") or "")
+        user = str(row.get("imported_by_email") or "")
+        source_file = str(row.get("source_file_name") or "")
+        fallback_bucket = created_at[:16]
+        key = (source_hash or fallback_bucket, user, source_file)
+        bucket = batches.setdefault(
+            key,
+            {
+                "Latest": created_at,
+                "User": user,
+                "Source file": source_file,
+                "Hash": source_hash[:12] if source_hash else "",
+                "Types": set(),
+                "Companies / divisions": set(),
+                "Posted": 0,
+                "Duplicates": 0,
+                "Failed": 0,
+                "Rows": 0,
+            },
+        )
+        bucket["Rows"] += 1
+        bucket["Latest"] = max(str(bucket.get("Latest") or ""), created_at)
+        txn_type = str(row.get("txn_type") or "")
+        if txn_type:
+            bucket["Types"].add(txn_type)
+        division = str(row.get("division") or "")
+        realm_id = str(row.get("realm_id") or "")
+        if division or realm_id:
+            bucket["Companies / divisions"].add(division or realm_id)
+        status = str(row.get("status") or "").lower()
+        if status == "success":
+            bucket["Posted"] += 1
+        elif status == "duplicate":
+            bucket["Duplicates"] += 1
+        elif status == "failed":
+            bucket["Failed"] += 1
+
+    summary_rows: list[dict[str, Any]] = []
+    for bucket in batches.values():
+        summary_rows.append(
+            {
+                "Latest": bucket["Latest"],
+                "User": bucket["User"],
+                "Source file": bucket["Source file"],
+                "Types": ", ".join(sorted(bucket["Types"])),
+                "Companies / divisions": ", ".join(sorted(bucket["Companies / divisions"])),
+                "Posted": bucket["Posted"],
+                "Duplicates": bucket["Duplicates"],
+                "Failed": bucket["Failed"],
+                "Audit rows": bucket["Rows"],
+                "Hash": bucket["Hash"],
+            }
+        )
+    if not summary_rows:
+        return
+
+    st.markdown("**Recent import batches**")
+    st.caption("Use this table to quickly see who imported what. Expand the transaction audit below for row-level details.")
+    st.dataframe(
+        sorted(summary_rows, key=lambda item: str(item.get("Latest") or ""), reverse=True),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
 def _render_history(supabase: SupabaseRestClient) -> None:
-    st.title("\ud83d\udcdc Import history")
+    st.title("Import history")
     st.caption(
         "Two history sources: the live Supabase audit (per-transaction) and the legacy "
         "Google Sheet `ImportLog` (per-import summary, used by the original Apps Script app)."
@@ -1276,6 +1412,8 @@ def _render_history(supabase: SupabaseRestClient) -> None:
             if not rows:
                 st.info("No QBO audit rows yet. New imports will appear here.")
             else:
+                _render_recent_import_batches(rows)
+                st.markdown("**Transaction-level audit**")
                 st.dataframe(rows, use_container_width=True, hide_index=True)
 
     with legacy_tab:

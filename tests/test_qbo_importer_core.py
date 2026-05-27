@@ -5,7 +5,7 @@ from qbo.file_loader import FileLoader
 from qbo.lookups import EntityLookupService
 from qbo.models import ConnectedRealm, PreviewResult
 from qbo.parsers import DriverStatementParser, MoneyCodeParser
-from services.qbo_dashboard import _invoice_customer_refs
+from services.qbo_dashboard import _build_preview, _invoice_customer_refs
 from services.qbo_auth import qbo_allowed_emails
 
 
@@ -109,6 +109,36 @@ def test_invoice_customer_refs_route_by_division_without_fallback():
     assert by_customer["TGR Logistics - PT"]["target_company"] == "Xpress Trans Inc"
     assert by_customer["TGR Logistics - PT"]["invoice_count"] == 2
     assert "Unmatched Customer" not in by_customer
+
+
+def test_invoice_preview_includes_full_qbo_ready_fields():
+    realm = ConnectedRealm(realm_id="123", company_name="Prestig Inc")
+    content = (
+        "LoadNumber,Division,Customer,Broker Load Number,Date,Amount,QB Exported,"
+        "Invoice Last Sent Date,Invoice Remarks,Status\n"
+        "158591,Prestig Inc,TGR Logistics - PT,PO-77,2026-05-22,1250.50,true,"
+        "2026-05-23,Customer asked for POD,Ready\n"
+    ).encode()
+
+    preview = _build_preview(
+        template_key="invoices",
+        file_name="invoices.csv",
+        content=content,
+        realms=[realm],
+        selected_realm=None,
+        bank_account_name="",
+        override_date="",
+    )
+
+    row = preview.rows[0]
+    assert row["QBO Txn Type"] == "Invoice"
+    assert row["PO / Broker Load #"] == "PO-77"
+    assert row["QBO Terms"] == "Net 30"
+    assert row["QBO Item"] == "Freight Income"
+    assert row["Line Qty"] == 1
+    assert row["Line Rate"] == 1250.50
+    assert row["Custom Field Value"] == "PO-77"
+    assert row["Invoice Remarks"] == "Customer asked for POD"
 
 
 def test_entity_lookup_create_customer_posts_display_name_and_primes_cache():
