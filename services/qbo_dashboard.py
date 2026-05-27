@@ -506,18 +506,11 @@ def _render_importer(
     bank_account_name = ""
     override_date = ""
     selected_realm: ConnectedRealm | None = None
-    with st.container(border=True):
-        st.markdown("**Setup**")
-        if template_key == "invoices":
-            st.caption(
-                "Invoices route entirely by the **Division** column. No company picker is needed; "
-                "blank or unmatched divisions are flagged before anything posts."
-            )
-            st.caption(
-                "Connected companies: "
-                + ", ".join(realm.company_name for realm in realms)
-            )
-        else:
+    if template_key == "invoices":
+        uploaded = st.file_uploader("Upload invoice file", type=["csv", "xlsx", "xlsm", "xls"])
+    else:
+        with st.container(border=True):
+            st.markdown("**Setup**")
             setup_cols = st.columns(2)
             with setup_cols[0]:
                 selected_realm_label = st.selectbox(
@@ -542,7 +535,7 @@ def _render_importer(
                 selected_date = st.selectbox("Check date", _date_options(), help="Optional override; otherwise row dates are used.")
                 override_date = "" if selected_date == _DATE_USE_ROW else selected_date
 
-        uploaded = st.file_uploader("Source file", type=["csv", "xlsx", "xlsm", "xls"])
+            uploaded = st.file_uploader("Source file", type=["csv", "xlsx", "xlsm", "xls"])
     if not uploaded:
         st.caption("Choose a file to preview before posting anything to QBO.")
         return
@@ -554,7 +547,14 @@ def _render_importer(
         st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
         st.session_state[QBO_UPLOAD_HASH_KEY] = upload_hash
 
-    preview_col, clear_col, _spacer_col = st.columns([0.22, 0.14, 0.64])
+    preview = st.session_state.get(QBO_PREVIEW_KEY)
+    preview_ready = isinstance(preview, PreviewResult)
+    has_pending_customer_prompt = isinstance(st.session_state.get(QBO_MISSING_CUSTOMERS_KEY), dict)
+    post_disabled = not preview_ready or bool(preview.errors) or not bool(preview.drafts) or has_pending_customer_prompt
+    if template_key != "invoices" and selected_realm is None:
+        post_disabled = True
+
+    preview_col, clear_col, post_col, hint_col = st.columns([0.16, 0.12, 0.16, 0.56])
     with preview_col:
         if st.button("Preview", type="primary", use_container_width=True):
             try:
@@ -572,14 +572,61 @@ def _render_importer(
                 st.error(f"Preview failed: {exc}")
             else:
                 st.session_state[QBO_PREVIEW_KEY] = preview
+                st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
+                st.rerun()
     with clear_col:
         if st.button("Clear", use_container_width=True):
             st.session_state.pop(QBO_PREVIEW_KEY, None)
             st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
             st.rerun()
+    with post_col:
+        post_clicked = st.button(
+            "Post to QBO",
+            type="primary",
+            key="qbo_post_to_qbo",
+            disabled=post_disabled,
+            use_container_width=True,
+        )
+    with hint_col:
+        if template_key == "invoices":
+            st.caption("Ready to post: customers are checked first; missing customers can be created before posting.")
+        else:
+            st.caption("Ready to post after preview review.")
 
     preview = st.session_state.get(QBO_PREVIEW_KEY)
     if not isinstance(preview, PreviewResult):
+        return
+
+    if post_clicked:
+        _handle_post_to_qbo(
+            preview=preview,
+            target_realm=selected_realm,
+            realms=realms,
+            supabase=supabase,
+            token_repo=token_repo,
+            auth_service=auth_service,
+            email=email,
+            template_key=template_key,
+            template_label=template_label,
+            uploaded_name=uploaded.name,
+            upload_hash=upload_hash,
+            bank_account_name=bank_account_name,
+        )
+        return
+
+    if template_key == "invoices" and _render_missing_customers_prompt(
+        preview=preview,
+        realms=realms,
+        supabase=supabase,
+        token_repo=token_repo,
+        auth_service=auth_service,
+        email=email,
+        template_key=template_key,
+        template_label=template_label,
+        uploaded_name=uploaded.name,
+        upload_hash=upload_hash,
+        bank_account_name=bank_account_name,
+    ):
         return
 
     if template_key == "invoices":
@@ -610,39 +657,8 @@ def _render_importer(
         st.warning("No importable rows were found.")
         return
 
-    st.divider()
-    if template_key == "invoices" and _render_missing_customers_prompt(
-        preview=preview,
-        realms=realms,
-        supabase=supabase,
-        token_repo=token_repo,
-        auth_service=auth_service,
-        email=email,
-        template_key=template_key,
-        template_label=template_label,
-        uploaded_name=uploaded.name,
-        upload_hash=upload_hash,
-        bank_account_name=bank_account_name,
-    ):
-        return
 
-    _render_post_controls(
-        preview=preview,
-        target_realm=selected_realm,
-        realms=realms,
-        supabase=supabase,
-        token_repo=token_repo,
-        auth_service=auth_service,
-        email=email,
-        template_key=template_key,
-        template_label=template_label,
-        uploaded_name=uploaded.name,
-        upload_hash=upload_hash,
-        bank_account_name=bank_account_name,
-    )
-
-
-def _render_post_controls(
+def _handle_post_to_qbo(
     *,
     preview: PreviewResult,
     target_realm: ConnectedRealm | None,
@@ -657,30 +673,12 @@ def _render_post_controls(
     upload_hash: str,
     bank_account_name: str,
 ) -> None:
-    """Render the final compact post action.
-
-    For invoices, this is where customer validation happens: the first click
-    checks QBO by each row's resolved Division/realm. If anything is missing,
-    posting pauses and the missing-customer prompt is shown on the next render.
-    """
-    with st.container(border=True):
-        text_col, button_col = st.columns([0.72, 0.28])
-        with text_col:
-            st.markdown("**Ready to post**")
-            if template_key == "invoices":
-                st.caption("Customers are checked first; missing customers can be created before posting.")
-            else:
-                st.caption("This creates real QuickBooks financial records. Review the preview first.")
-
-        with button_col:
-            post_clicked = st.button(
-                "Post to QBO",
-                type="primary",
-                key="qbo_post_to_qbo",
-                use_container_width=True,
-            )
-
-    if not post_clicked:
+    """Run the post flow after the top-row Post button is clicked."""
+    if preview.errors:
+        st.warning("Fix preview errors before importing.")
+        return
+    if not preview.drafts:
+        st.warning("No importable rows were found.")
         return
 
     if template_key == "invoices":
@@ -1427,15 +1425,20 @@ def _render_invoice_routing_summary(preview: PreviewResult, realms: list[Connect
     resolved_realms = {realm_id for (_division, _company, realm_id), _count in counts.items() if realm_id}
     multi_realm = len(resolved_realms) > 1
     with st.container(border=True):
-        title_cols = st.columns([0.72, 0.28])
-        with title_cols[0]:
+        summary_cols = st.columns([0.28, 0.18, 0.18, 0.36])
+        with summary_cols[0]:
             st.markdown("**Division routing**")
-            st.caption(
-                f"{len(drafts)} invoice row(s) resolved to {len(resolved_realms)} connected "
-                f"compan{'y' if len(resolved_realms) == 1 else 'ies'} from the Division column."
-            )
-        with title_cols[1]:
-            st.metric("Unmatched", unresolved)
+        with summary_cols[1]:
+            st.metric("Rows", len(drafts))
+        with summary_cols[2]:
+            st.metric("Companies", len(resolved_realms))
+        with summary_cols[3]:
+            if unresolved:
+                st.error(f"{unresolved} unmatched Division row(s). Fix and re-preview.")
+            elif multi_realm:
+                st.caption("Multi-company file detected; each row posts to its matched company.")
+            else:
+                st.caption("All rows resolve to one QBO company.")
 
         table_rows = [
             {
@@ -1445,16 +1448,8 @@ def _render_invoice_routing_summary(preview: PreviewResult, realms: list[Connect
             }
             for (division, company, _realm_id), count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0][0]))
         ]
-        st.dataframe(table_rows, hide_index=True, use_container_width=True)
-        if unresolved:
-            st.error(
-                f"{unresolved} row(s) have a blank or unmatched Division. Fix the source file and re-preview; "
-                "invoice imports are Division-only."
-            )
-        elif multi_realm:
-            st.success("Multi-company file detected. Each row will post to its matched QBO company.")
-        else:
-            st.caption("All invoice rows resolve to one QBO company.")
+        with st.expander("View routing details", expanded=bool(unresolved)):
+            st.dataframe(table_rows, hide_index=True, use_container_width=True)
     return multi_realm
 
 
