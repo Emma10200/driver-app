@@ -6,6 +6,27 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import streamlit as st
+try:
+    from streamlit.errors import StreamlitAuthError as _StreamlitAuthError
+except ImportError:  # pragma: no cover - older Streamlit fallback
+    _streamlit_auth_exceptions: tuple[type[BaseException], ...] = (RuntimeError,)
+else:
+    _streamlit_auth_exceptions = (_StreamlitAuthError, RuntimeError)
+try:
+    from streamlit.errors import StreamlitSecretNotFoundError as _StreamlitSecretNotFoundError
+except ImportError:  # pragma: no cover - older Streamlit fallback
+    _streamlit_secret_exceptions: tuple[type[BaseException], ...] = (
+        FileNotFoundError,
+        AttributeError,
+        KeyError,
+    )
+else:
+    _streamlit_secret_exceptions = (
+        _StreamlitSecretNotFoundError,
+        FileNotFoundError,
+        AttributeError,
+        KeyError,
+    )
 
 from qbo.api_client import QboClient
 from qbo.company_directory import CompanyDirectory
@@ -59,6 +80,74 @@ def _qbo_access_granted() -> bool:
     return bool(_google_user_is_logged_in() and email and email in qbo_allowed_emails())
 
 
+def _streamlit_auth_login_provider() -> tuple[bool, str | None, str]:
+    """Return whether Streamlit OIDC auth is configured and which provider to use.
+
+    Streamlit supports either a flat ``[auth]`` config (called with
+    ``st.login()``) or named provider sections like ``[auth.google]`` (called
+    with ``st.login("google")``). The QBO page accepts both so it does not
+    crash if the existing driver app uses the flat Google tutorial format.
+    """
+    if not hasattr(st, "login") or not hasattr(st, "user"):
+        return False, None, "This Streamlit version does not support native login."
+    try:
+        auth_config = _mapping_get(st.secrets, "auth")
+    except _streamlit_secret_exceptions:
+        return False, None, "The [auth] Streamlit Secrets block is missing."
+    if not auth_config:
+        return False, None, "The [auth] Streamlit Secrets block is empty."
+
+    redirect_uri = str(_mapping_get(auth_config, "redirect_uri") or "").strip()
+    cookie_secret = str(_mapping_get(auth_config, "cookie_secret") or "").strip()
+    provider_config = _mapping_get(auth_config, GOOGLE_AUTH_PROVIDER)
+    provider_name: str | None = GOOGLE_AUTH_PROVIDER if provider_config else None
+    provider_config = provider_config or auth_config
+
+    client_id = str(_mapping_get(provider_config, "client_id") or "").strip()
+    client_secret = str(_mapping_get(provider_config, "client_secret") or "").strip()
+    metadata_url = str(_mapping_get(provider_config, "server_metadata_url") or "").strip()
+    missing = [
+        label
+        for label, value in (
+            ("redirect_uri", redirect_uri),
+            ("cookie_secret", cookie_secret),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("server_metadata_url", metadata_url),
+        )
+        if not value
+    ]
+    if missing:
+        return False, provider_name, "Missing Streamlit auth setting(s): " + ", ".join(missing)
+    return True, provider_name, ""
+
+
+def _render_streamlit_auth_help(reason: str) -> None:
+    st.error("Google SSO is not configured correctly for this Streamlit app yet.")
+    if reason:
+        st.caption(reason)
+    st.info(
+        "In Streamlit Cloud, open Manage app → Settings → Secrets and make sure the "
+        "[auth] / [auth.google] block is present. The Google OAuth redirect URI is "
+        "different from the QuickBooks redirect URI."
+    )
+    st.code(
+        """[auth]
+redirect_uri = "https://driver-application.streamlit.app/oauth2callback"
+cookie_secret = "generate-a-long-random-string"
+
+[auth.google]
+client_id = "your-google-oauth-client-id.apps.googleusercontent.com"
+client_secret = "your-google-oauth-client-secret"
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration""".strip(),
+        language="toml",
+    )
+    st.caption(
+        "Also add https://driver-application.streamlit.app/oauth2callback to the "
+        "Google Cloud OAuth client's Authorized redirect URIs."
+    )
+
+
 def _date_options() -> list[str]:
     today = datetime.now()
     days_since_friday = (today.weekday() - 4) % 7
@@ -108,8 +197,22 @@ def _render_login() -> None:
     if not hasattr(st, "login"):
         st.error("This Streamlit version does not support st.login().")
         return
+    auth_ready, provider_name, auth_reason = _streamlit_auth_login_provider()
+    if not auth_ready:
+        _render_streamlit_auth_help(auth_reason)
+        return
     if st.button("Continue with Google", use_container_width=True):
-        st.login(GOOGLE_AUTH_PROVIDER)
+        try:
+            if provider_name:
+                st.login(provider_name)
+            else:
+                st.login()
+        except _streamlit_auth_exceptions as exc:
+            logger.exception("Streamlit Google login failed to start")
+            _render_streamlit_auth_help(
+                "Streamlit rejected the current auth configuration. Check the app logs for the "
+                f"full provider error. Summary: {type(exc).__name__}"
+            )
 
 
 def render_qbo_dashboard() -> None:
