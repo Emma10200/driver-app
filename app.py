@@ -21,11 +21,14 @@ from runtime_context import (
     admin_dashboard_requested,
     company_slug_explicitly_provided,
     get_company_profile,
+    qbo_importer_requested,
+    qbo_oauth_callback_requested,
     resolve_company_slug,
     sync_runtime_context,
 )
 from services.admin_dashboard import render_admin_dashboard
 from services.error_log_service import log_application_error
+from services.qbo_dashboard import render_qbo_dashboard
 from state import init_session_state
 from ui.common import (
     _wire_back_button_shim,
@@ -60,6 +63,15 @@ sync_runtime_context()
 # entire application flow so the dashboard renders by itself.
 if admin_dashboard_requested():
     render_admin_dashboard(SUBMISSIONS_DIR)
+    render_version_footer()
+    st.stop()
+
+
+# Standalone QBO importer route for accounting. Reachable via ?qbo=1, plus
+# the Intuit OAuth callback query param. This short-circuits the driver
+# application flow exactly like the admin dashboard route above.
+if qbo_importer_requested() or qbo_oauth_callback_requested():
+    render_qbo_dashboard()
     render_version_footer()
     st.stop()
 
