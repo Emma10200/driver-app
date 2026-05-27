@@ -55,7 +55,7 @@ QBO_TEMPLATE_KEY = "qbo_selected_template"
 QBO_PARKING_SCAN_KEY = "qbo_parking_scan"
 QBO_PARKING_SELECTION_KEY = "qbo_parking_selected_ids"
 QBO_CATALOG_CACHE_KEY = "qbo_catalog_cache"
-QBO_CUSTOMER_CHECK_KEY = "qbo_customer_check"
+QBO_MISSING_CUSTOMERS_KEY = "qbo_missing_customers"
 _DATE_USE_ROW = "Use row dates (or most recent Friday)"
 _TEMPLATE_OPTIONS = {
     "invoices": "Invoices",
@@ -333,6 +333,7 @@ def _go_to(view: str, *, template_key: str | None = None) -> None:
     if view != "import":
         st.session_state.pop(QBO_PREVIEW_KEY, None)
         st.session_state.pop(QBO_UPLOAD_HASH_KEY, None)
+        st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
     st.rerun()
 
 
@@ -495,32 +496,48 @@ def _render_importer(
         return
 
     options = _realm_options(realms)
-    if template_key == "invoices":
-        st.info(
-            "📂 Invoice files are routed by the **Division** column on each row. "
-            "You can upload one file containing multiple companies (e.g. Prestig Inc + Xpress Inc) "
-            "and each row will be posted to its matched company automatically."
-        )
-        selectbox_label = "Fallback company (only used for rows with a blank or unrecognized Division)"
-    else:
-        selectbox_label = "Target company"
-    selected_realm_label = st.selectbox(selectbox_label, list(options.keys()), key="qbo_target_company")
-    selected_realm = options[selected_realm_label]
-
     bank_account_name = ""
     override_date = ""
-    if template_key == "driver_statements":
-        bank_account_name = st.text_input(
-            "Bank account for checks",
-            value=selected_realm.default_bank_account_name,
-            help="This should be the target company's bank account name in QBO. It will be saved as that company's default.",
-        )
-        selected_date = st.selectbox("Override check date", _date_options())
-        override_date = "" if selected_date == _DATE_USE_ROW else selected_date
-    elif template_key == "money_codes":
-        st.info("Money Codes post as CreditCard Purchases to the per-row CC Account. Only Fuel Card - EFS rows are imported.")
+    with st.container(border=True):
+        st.markdown("**Setup**")
+        if template_key == "invoices":
+            st.caption(
+                "Invoice rows route by the **Division** column. The company below is only the fallback "
+                "for blank or unmatched divisions."
+            )
+            selectbox_label = "Fallback company"
+            selectbox_help = "Used only when a row's Division is blank or cannot be matched to a connected QBO company."
+        else:
+            selectbox_label = "Company"
+            selectbox_help = "QuickBooks company to receive this import."
 
-    uploaded = st.file_uploader("Upload CSV or Excel file", type=["csv", "xlsx", "xlsm", "xls"])
+        setup_cols = st.columns(2)
+        with setup_cols[0]:
+            selected_realm_label = st.selectbox(
+                selectbox_label,
+                list(options.keys()),
+                key="qbo_target_company",
+                help=selectbox_help,
+            )
+        selected_realm = options[selected_realm_label]
+
+        with setup_cols[1]:
+            if template_key == "driver_statements":
+                bank_account_name = st.text_input(
+                    "Bank account",
+                    value=selected_realm.default_bank_account_name,
+                    help="QBO bank account for the checks. Saved as this company's default after posting.",
+                )
+            elif template_key == "money_codes":
+                st.caption("Posts as CreditCard purchases. Only Fuel Card - EFS rows are imported.")
+            else:
+                st.caption("Matched divisions post to their own company automatically.")
+
+        if template_key == "driver_statements":
+            selected_date = st.selectbox("Check date", _date_options(), help="Optional override; otherwise row dates are used.")
+            override_date = "" if selected_date == _DATE_USE_ROW else selected_date
+
+        uploaded = st.file_uploader("Source file", type=["csv", "xlsx", "xlsm", "xls"])
     if not uploaded:
         st.caption("Choose a file to preview before posting anything to QBO.")
         return
@@ -529,12 +546,12 @@ def _render_importer(
     upload_hash = source_file_hash(content)
     if st.session_state.get(QBO_UPLOAD_HASH_KEY) != upload_hash:
         st.session_state.pop(QBO_PREVIEW_KEY, None)
-        st.session_state.pop(QBO_CUSTOMER_CHECK_KEY, None)
+        st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
         st.session_state[QBO_UPLOAD_HASH_KEY] = upload_hash
 
-    preview_col, clear_col = st.columns([0.7, 0.3])
+    preview_col, clear_col, _spacer_col = st.columns([0.22, 0.14, 0.64])
     with preview_col:
-        if st.button("Preview file", type="primary", use_container_width=True):
+        if st.button("Preview", type="primary", use_container_width=True):
             try:
                 preview = _build_preview(
                     template_key=template_key,
@@ -551,9 +568,9 @@ def _render_importer(
             else:
                 st.session_state[QBO_PREVIEW_KEY] = preview
     with clear_col:
-        if st.button("Clear preview", use_container_width=True):
+        if st.button("Clear", use_container_width=True):
             st.session_state.pop(QBO_PREVIEW_KEY, None)
-            st.session_state.pop(QBO_CUSTOMER_CHECK_KEY, None)
+            st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
             st.rerun()
 
     preview = st.session_state.get(QBO_PREVIEW_KEY)
@@ -567,11 +584,6 @@ def _render_importer(
     multi_realm_invoice = False
     if template_key == "invoices":
         multi_realm_invoice = _render_invoice_routing_summary(preview, selected_realm)
-        _render_missing_customer_panel(
-            preview=preview,
-            fallback_realm=selected_realm,
-            auth_service=auth_service,
-        )
 
     # Optional in-line correction of expense account assignments (the
     # "trailer vs ELD" use case). Loads the QBO chart of accounts on demand.
@@ -594,68 +606,429 @@ def _render_importer(
         return
 
     st.divider()
-    st.warning("Posting creates real financial records in QuickBooks. Confirm only after reviewing the table above.")
-    if st.button("Confirm and post to QBO", type="primary", use_container_width=True):
-        if template_key == "driver_statements" and bank_account_name:
-            token_repo.save_realm_settings(
-                realm_id=selected_realm.realm_id,
-                company_name=selected_realm.company_name,
-                environment=selected_realm.environment,
-                default_bank_account_name=bank_account_name,
-                default_money_code_cc_account_name=selected_realm.default_money_code_cc_account_name,
-                connected_by_email=selected_realm.connected_by_email,
-            )
-        audit = SupabaseAuditLog(
-            supabase,
-            imported_by_email=email,
-            source_file_name=uploaded.name,
-            source_hash=upload_hash,
-        )
-        qbo_client = QboClient(auth_service)
-        import_service = ImportService(
-            qbo_client,
-            EntityLookupService(qbo_client),
-            DuplicateChecker(qbo_client),
-            audit,
-        )
-        with st.spinner("Posting to QuickBooks\u2026 please keep this tab open."):
-            start_ts = datetime.now(tz=timezone.utc)
+    if template_key == "invoices" and _render_missing_customers_prompt(
+        preview=preview,
+        fallback_realm=selected_realm,
+        realms=realms,
+        supabase=supabase,
+        token_repo=token_repo,
+        auth_service=auth_service,
+        email=email,
+        template_key=template_key,
+        template_label=template_label,
+        uploaded_name=uploaded.name,
+        upload_hash=upload_hash,
+        bank_account_name=bank_account_name,
+    ):
+        return
+
+    _render_post_controls(
+        preview=preview,
+        fallback_realm=selected_realm,
+        realms=realms,
+        supabase=supabase,
+        token_repo=token_repo,
+        auth_service=auth_service,
+        email=email,
+        template_key=template_key,
+        template_label=template_label,
+        uploaded_name=uploaded.name,
+        upload_hash=upload_hash,
+        bank_account_name=bank_account_name,
+        multi_realm_invoice=multi_realm_invoice,
+    )
+
+
+def _render_post_controls(
+    *,
+    preview: PreviewResult,
+    fallback_realm: ConnectedRealm,
+    realms: list[ConnectedRealm],
+    supabase: SupabaseRestClient,
+    token_repo: QboTokenRepository,
+    auth_service: QboAuthService,
+    email: str,
+    template_key: str,
+    template_label: str,
+    uploaded_name: str,
+    upload_hash: str,
+    bank_account_name: str,
+    multi_realm_invoice: bool,
+) -> None:
+    """Render the final compact post action.
+
+    For invoices, this is where customer validation happens: the first click
+    checks QBO by each row's resolved Division/realm. If anything is missing,
+    posting pauses and the missing-customer prompt is shown on the next render.
+    """
+    with st.container(border=True):
+        text_col, button_col = st.columns([0.72, 0.28])
+        with text_col:
+            st.markdown("**Ready to post**")
             if template_key == "invoices":
-                # When the file spans multiple realms, let per-draft _realmId
-                # drive routing (target_realm_id="" disables the fallback).
-                invoice_target = "" if multi_realm_invoice else selected_realm.realm_id
-                stats = import_service.post_invoices(preview.drafts, target_realm_id=invoice_target)
-            elif template_key == "driver_statements":
-                stats = import_service.post_checks(preview.drafts, target_realm_id=selected_realm.realm_id)
+                if multi_realm_invoice:
+                    st.caption("Rows will post to their matched Division company; unmatched rows use the fallback.")
+                else:
+                    st.caption("Customers are checked in QBO before any invoice posts.")
             else:
-                stats = import_service.post_money_codes(preview.drafts, target_realm_id=selected_realm.realm_id)
-            duration_ms = int((datetime.now(tz=timezone.utc) - start_ts).total_seconds() * 1000)
-        st.success(f"Done: posted {stats.posted}, duplicates {stats.skipped_duplicates}, failed {stats.failed}.")
-        _render_import_stats(stats)
+                st.caption("This creates real QuickBooks financial records. Review the preview first.")
 
-        try:
-            sheets_log = GoogleSheetsImportLog()
-            wrote = sheets_log.append_summary(
-                user_email=email,
-                action="IMPORT",
-                template=template_label,
-                company=selected_realm.company_name,
-                realm_id=selected_realm.realm_id,
-                source_sheet=uploaded.name,
-                source_count=len(preview.drafts),
-                success=getattr(stats, "posted", 0),
-                failed=getattr(stats, "failed", 0),
-                skipped=getattr(stats, "skipped_duplicates", 0),
-                duration_ms=duration_ms,
-                execution_id=upload_hash[:12] if upload_hash else "",
-                errors=[getattr(item, "error", "") for item in getattr(stats, "failures", []) or []],
+        with button_col:
+            post_clicked = st.button(
+                "Post to QBO",
+                type="primary",
+                key="qbo_post_to_qbo",
+                use_container_width=True,
             )
-            if not wrote and sheets_log.unavailable_reason:
-                logger.info("ImportLog sheet not written: %s", sheets_log.unavailable_reason)
-        except Exception as exc:  # noqa: BLE001 - never break the import flow
-            logger.warning("ImportLog sheet write failed: %s", exc)
 
-        st.session_state.pop(QBO_PREVIEW_KEY, None)
+    if not post_clicked:
+        return
+
+    if template_key == "invoices":
+        with st.spinner("Checking customers in QuickBooks…"):
+            check = _find_missing_invoice_customers(
+                preview=preview,
+                fallback_realm=fallback_realm,
+                realms=realms,
+                auth_service=auth_service,
+            )
+        if check.get("lookup_errors") or check.get("missing"):
+            st.session_state[QBO_MISSING_CUSTOMERS_KEY] = check
+            st.rerun()
+        st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
+
+    _post_preview_to_qbo(
+        preview=preview,
+        fallback_realm=fallback_realm,
+        supabase=supabase,
+        token_repo=token_repo,
+        auth_service=auth_service,
+        email=email,
+        template_key=template_key,
+        template_label=template_label,
+        uploaded_name=uploaded_name,
+        upload_hash=upload_hash,
+        bank_account_name=bank_account_name,
+    )
+
+
+def _post_preview_to_qbo(
+    *,
+    preview: PreviewResult,
+    fallback_realm: ConnectedRealm,
+    supabase: SupabaseRestClient,
+    token_repo: QboTokenRepository,
+    auth_service: QboAuthService,
+    email: str,
+    template_key: str,
+    template_label: str,
+    uploaded_name: str,
+    upload_hash: str,
+    bank_account_name: str,
+) -> None:
+    """Post the already-reviewed preview to QBO and render the result."""
+    if template_key == "driver_statements" and bank_account_name:
+        token_repo.save_realm_settings(
+            realm_id=fallback_realm.realm_id,
+            company_name=fallback_realm.company_name,
+            environment=fallback_realm.environment,
+            default_bank_account_name=bank_account_name,
+            default_money_code_cc_account_name=fallback_realm.default_money_code_cc_account_name,
+            connected_by_email=fallback_realm.connected_by_email,
+        )
+
+    audit = SupabaseAuditLog(
+        supabase,
+        imported_by_email=email,
+        source_file_name=uploaded_name,
+        source_hash=upload_hash,
+    )
+    qbo_client = QboClient(auth_service)
+    import_service = ImportService(
+        qbo_client,
+        EntityLookupService(qbo_client),
+        DuplicateChecker(qbo_client),
+        audit,
+    )
+    with st.spinner("Posting to QuickBooks… please keep this tab open."):
+        start_ts = datetime.now(tz=timezone.utc)
+        if template_key == "invoices":
+            # Per-draft _realmId routes matched Divisions; fallback_realm handles
+            # rows whose Division is blank or not recognized.
+            stats = import_service.post_invoices(
+                preview.drafts,
+                target_realm_id=fallback_realm.realm_id,
+            )
+        elif template_key == "driver_statements":
+            stats = import_service.post_checks(preview.drafts, target_realm_id=fallback_realm.realm_id)
+        else:
+            stats = import_service.post_money_codes(preview.drafts, target_realm_id=fallback_realm.realm_id)
+        duration_ms = int((datetime.now(tz=timezone.utc) - start_ts).total_seconds() * 1000)
+
+    st.success(f"Done: posted {stats.posted}, duplicates {stats.skipped_duplicates}, failed {stats.failed}.")
+    _render_import_stats(stats)
+
+    try:
+        sheets_log = GoogleSheetsImportLog()
+        wrote = sheets_log.append_summary(
+            user_email=email,
+            action="IMPORT",
+            template=template_label,
+            company=fallback_realm.company_name,
+            realm_id=fallback_realm.realm_id,
+            source_sheet=uploaded_name,
+            source_count=len(preview.drafts),
+            success=getattr(stats, "posted", 0),
+            failed=getattr(stats, "failed", 0),
+            skipped=getattr(stats, "skipped_duplicates", 0),
+            duration_ms=duration_ms,
+            execution_id=upload_hash[:12] if upload_hash else "",
+            errors=[getattr(item, "error", "") for item in getattr(stats, "failures", []) or []],
+        )
+        if not wrote and sheets_log.unavailable_reason:
+            logger.info("ImportLog sheet not written: %s", sheets_log.unavailable_reason)
+    except Exception as exc:  # noqa: BLE001 - never break the import flow
+        logger.warning("ImportLog sheet write failed: %s", exc)
+
+    st.session_state.pop(QBO_PREVIEW_KEY, None)
+    st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
+
+
+def _invoice_customer_refs(
+    *,
+    preview: PreviewResult,
+    fallback_realm: ConnectedRealm,
+    realms: list[ConnectedRealm],
+) -> list[dict[str, Any]]:
+    """Return unique invoice Customer/realm targets, resolved by Division."""
+    realm_names = {realm.realm_id: realm.company_name for realm in realms}
+    unique: dict[tuple[str, str], dict[str, Any]] = {}
+    for draft in preview.drafts or []:
+        realm_id = str(draft.get("_realmId") or fallback_realm.realm_id or "").strip()
+        customer_name = str(draft.get("_tempCustomerName") or "").strip()
+        if not realm_id or not customer_name:
+            continue
+        division = str(draft.get("_division") or "").strip()
+        key = (realm_id, customer_name)
+        if key not in unique:
+            unique[key] = {
+                "customer_name": customer_name,
+                "realm_id": realm_id,
+                "target_company": realm_names.get(realm_id) or realm_id,
+                "division": division or "(fallback)",
+                "invoice_count": 0,
+            }
+        unique[key]["invoice_count"] += 1
+    return sorted(
+        unique.values(),
+        key=lambda row: (str(row.get("target_company") or ""), str(row.get("customer_name") or "")),
+    )
+
+
+def _find_missing_invoice_customers(
+    *,
+    preview: PreviewResult,
+    fallback_realm: ConnectedRealm,
+    realms: list[ConnectedRealm],
+    auth_service: QboAuthService,
+) -> dict[str, Any]:
+    refs = _invoice_customer_refs(preview=preview, fallback_realm=fallback_realm, realms=realms)
+    qbo_client = QboClient(auth_service)
+    lookups = EntityLookupService(qbo_client)
+    missing: list[dict[str, Any]] = []
+    lookup_errors: list[dict[str, Any]] = []
+    found_count = 0
+    for ref in refs:
+        try:
+            customer_id = lookups.resolve_entity("Customer", ref["customer_name"], ref["realm_id"])
+        except Exception as exc:  # noqa: BLE001 - block posting, do not guess
+            logger.exception("Customer lookup failed for %s", ref["customer_name"])
+            lookup_errors.append({**ref, "error": str(exc)})
+            continue
+        if customer_id:
+            found_count += 1
+        else:
+            missing.append(ref)
+    return {
+        "source_hash": preview.source_hash,
+        "checked_count": len(refs),
+        "found_count": found_count,
+        "missing": missing,
+        "lookup_errors": lookup_errors,
+    }
+
+
+def _render_missing_customers_prompt(
+    *,
+    preview: PreviewResult,
+    fallback_realm: ConnectedRealm,
+    realms: list[ConnectedRealm],
+    supabase: SupabaseRestClient,
+    token_repo: QboTokenRepository,
+    auth_service: QboAuthService,
+    email: str,
+    template_key: str,
+    template_label: str,
+    uploaded_name: str,
+    upload_hash: str,
+    bank_account_name: str,
+) -> bool:
+    """Render the approval prompt after Post discovers missing customers.
+
+    Returns True while the prompt is active so the normal Post button stays
+    hidden until the user creates customers, re-checks, or cancels.
+    """
+    state = st.session_state.get(QBO_MISSING_CUSTOMERS_KEY)
+    if not isinstance(state, dict):
+        return False
+    if state.get("source_hash") != preview.source_hash:
+        st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
+        return False
+
+    missing = list(state.get("missing") or [])
+    lookup_errors = list(state.get("lookup_errors") or [])
+    creation_errors = list(state.get("creation_errors") or [])
+    if not missing and not lookup_errors and not creation_errors:
+        st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
+        return False
+
+    with st.container(border=True):
+        st.markdown("**Customers needed before posting**")
+        st.caption(
+            "No invoices have been posted yet. Customers are matched to the QBO company resolved from each row's Division."
+        )
+
+        metric_cols = st.columns(3)
+        metric_cols[0].metric("Checked", int(state.get("checked_count") or 0))
+        metric_cols[1].metric("Found", int(state.get("found_count") or 0))
+        metric_cols[2].metric("Missing", len(missing))
+
+        if lookup_errors:
+            st.error("Customer lookup failed, so posting is paused. Re-check after fixing the connection or QBO access.")
+            with st.expander("Lookup errors", expanded=False):
+                st.dataframe(
+                    [
+                        {
+                            "Customer": item.get("customer_name"),
+                            "Target company": item.get("target_company"),
+                            "Division": item.get("division"),
+                            "Error": item.get("error"),
+                        }
+                        for item in lookup_errors
+                    ],
+                    hide_index=True,
+                    use_container_width=True,
+                )
+
+        if creation_errors:
+            st.error("Some customers could not be created. Nothing was posted.")
+            with st.expander("Create errors", expanded=True):
+                st.dataframe(creation_errors, hide_index=True, use_container_width=True)
+
+        if missing:
+            table_rows = [
+                {
+                    "Customer": item.get("customer_name"),
+                    "Target company": item.get("target_company"),
+                    "Division": item.get("division"),
+                    "Invoices": item.get("invoice_count"),
+                }
+                for item in missing
+            ]
+            with st.expander("Missing customer details", expanded=len(missing) <= 5):
+                st.dataframe(table_rows, hide_index=True, use_container_width=True)
+
+        action_cols = st.columns([0.18, 0.16, 0.13, 0.53])
+        with action_cols[0]:
+            create_clicked = st.button(
+                "Create + post",
+                type="primary",
+                key="qbo_create_missing_and_post",
+                disabled=not missing or bool(lookup_errors),
+                use_container_width=True,
+            )
+        with action_cols[1]:
+            recheck_clicked = st.button("Check again", key="qbo_missing_customers_recheck", use_container_width=True)
+        with action_cols[2]:
+            cancel_clicked = st.button("Cancel", key="qbo_missing_customers_cancel", use_container_width=True)
+
+    if cancel_clicked:
+        st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
+        st.info("Import cancelled. Nothing was posted.")
+        st.rerun()
+
+    if recheck_clicked:
+        with st.spinner("Re-checking customers in QuickBooks…"):
+            st.session_state[QBO_MISSING_CUSTOMERS_KEY] = _find_missing_invoice_customers(
+                preview=preview,
+                fallback_realm=fallback_realm,
+                realms=realms,
+                auth_service=auth_service,
+            )
+        st.rerun()
+
+    if create_clicked:
+        created, failed = _create_missing_customers(missing, auth_service)
+        if failed:
+            st.session_state[QBO_MISSING_CUSTOMERS_KEY] = {
+                **state,
+                "missing": [item.get("record") or item for item in failed],
+                "creation_errors": [
+                    {
+                        "Customer": (item.get("record") or {}).get("customer_name"),
+                        "Target company": (item.get("record") or {}).get("target_company"),
+                        "Error": item.get("error"),
+                    }
+                    for item in failed
+                ],
+            }
+            st.rerun()
+
+        st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
+        st.success(f"Created {len(created)} customer(s). Continuing to post…")
+        _post_preview_to_qbo(
+            preview=preview,
+            fallback_realm=fallback_realm,
+            supabase=supabase,
+            token_repo=token_repo,
+            auth_service=auth_service,
+            email=email,
+            template_key=template_key,
+            template_label=template_label,
+            uploaded_name=uploaded_name,
+            upload_hash=upload_hash,
+            bank_account_name=bank_account_name,
+        )
+
+    return True
+
+
+def _create_missing_customers(
+    missing: list[dict[str, Any]], auth_service: QboAuthService
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    qbo_client = QboClient(auth_service)
+    lookups = EntityLookupService(qbo_client)
+    created: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    progress = st.progress(0.0, text="Creating customers in QuickBooks…")
+    total = len(missing)
+    for idx, item in enumerate(missing, start=1):
+        customer_name = str(item.get("customer_name") or "").strip()
+        realm_id = str(item.get("realm_id") or "").strip()
+        try:
+            existing_id = lookups.resolve_entity("Customer", customer_name, realm_id)
+            new_id = existing_id or lookups.create_entity("Customer", customer_name, realm_id)
+        except Exception as exc:  # noqa: BLE001 - keep the rest safe
+            logger.exception("Customer create failed for %s", customer_name)
+            failed.append({"record": item, "error": str(exc)})
+        else:
+            if new_id:
+                created.append({**item, "qbo_id": new_id})
+            else:
+                failed.append({"record": item, "error": "QBO returned no customer Id."})
+        progress.progress(idx / total, text=f"Created {idx}/{total}…")
+    progress.empty()
+    return created, failed
 
 
 def _build_preview(
@@ -1234,182 +1607,3 @@ def _render_parking_pk(
 
         st.session_state.pop(QBO_PARKING_SCAN_KEY, None)
         st.session_state.pop(QBO_PARKING_SELECTION_KEY, None)
-
-
-# =============================================================================
-# Missing-customer pre-check + auto-create (invoices)
-# =============================================================================
-
-def _render_missing_customer_panel(
-    *,
-    preview: PreviewResult,
-    fallback_realm: ConnectedRealm,
-    auth_service: QboAuthService,
-) -> None:
-    """Pre-check every unique Customer name on the invoice drafts against QBO,
-    list the missing ones, and offer a one-click auto-create.
-
-    Mirrors the Apps Script ``applyApprovedMissingEntities_`` flow for the
-    Customer type (POST /customer with just ``{DisplayName: name}``).
-    """
-    drafts = preview.drafts or []
-    if not drafts:
-        return
-
-    # Collect unique (realm_id, customer_name) pairs. Unresolved-division
-    # drafts get the fallback realm so the user can still create customers
-    # for them after picking the fallback company above.
-    unique: dict[tuple[str, str], dict[str, Any]] = {}
-    for draft in drafts:
-        realm_id = str(draft.get("_realmId") or fallback_realm.realm_id or "").strip()
-        customer_name = str(draft.get("_tempCustomerName") or "").strip()
-        if not realm_id or not customer_name:
-            continue
-        key = (realm_id, customer_name)
-        if key in unique:
-            continue
-        unique[key] = {
-            "realm_id": realm_id,
-            "customer_name": customer_name,
-            "division": str(draft.get("_division") or "").strip(),
-        }
-
-    if not unique:
-        return
-
-    realm_label_map = {
-        str(draft.get("_realmId") or ""): str(draft.get("_division") or "")
-        for draft in drafts
-    }
-    realm_label_map[fallback_realm.realm_id] = fallback_realm.company_name
-
-    st.markdown("#### \U0001F464 Customer pre-check")
-    st.caption(
-        f"This file references **{len(unique)}** unique customer/company pair(s). "
-        "Check them against QBO before posting so failures like "
-        "*\"Customer 'TGR Logistics - PT' not found in QBO\"* never block the import."
-    )
-
-    check_col, refresh_col = st.columns([0.7, 0.3])
-    with check_col:
-        run_check = st.button(
-            "\U0001F50D Check customers against QBO",
-            key="qbo_customer_check_btn",
-            use_container_width=True,
-        )
-    with refresh_col:
-        if st.button(
-            "\u21BB Re-check",
-            key="qbo_customer_recheck_btn",
-            use_container_width=True,
-            help="Force re-resolution against QBO (after fixing the source file).",
-        ):
-            st.session_state.pop(QBO_CUSTOMER_CHECK_KEY, None)
-            run_check = True
-
-    if run_check:
-        qbo_client = QboClient(auth_service)
-        lookups = EntityLookupService(qbo_client)
-        results: list[dict[str, Any]] = []
-        progress = st.progress(0.0, text="Resolving customers in QBO\u2026")
-        total = len(unique)
-        for idx, info in enumerate(unique.values(), start=1):
-            try:
-                resolved_id = lookups.resolve_entity(
-                    "Customer", info["customer_name"], info["realm_id"]
-                )
-            except Exception as exc:  # noqa: BLE001 - never break the UI
-                logger.warning("Customer lookup failed: %s", exc)
-                resolved_id = None
-            results.append({**info, "resolved_id": resolved_id or ""})
-            progress.progress(idx / total, text=f"Checked {idx}/{total}\u2026")
-        progress.empty()
-        st.session_state[QBO_CUSTOMER_CHECK_KEY] = results
-
-    results = st.session_state.get(QBO_CUSTOMER_CHECK_KEY) or []
-    if not results:
-        return
-
-    missing = [r for r in results if not r.get("resolved_id")]
-    found_count = len(results) - len(missing)
-
-    if not missing:
-        st.success(f"All {found_count} customer(s) already exist in QuickBooks. \u2705")
-        return
-
-    st.warning(
-        f"{len(missing)} customer(s) are not in QuickBooks yet. "
-        f"({found_count} already exist.) Pick which ones to auto-create."
-    )
-
-    rows = [
-        {
-            "Create": True,
-            "Customer": item["customer_name"],
-            "Target company": realm_label_map.get(item["realm_id"]) or item["realm_id"],
-            "Division (from file)": item.get("division") or "",
-            "_realm_id": item["realm_id"],
-            "_customer_name": item["customer_name"],
-        }
-        for item in missing
-    ]
-    edited = st.data_editor(
-        rows,
-        key="qbo_missing_customers_editor",
-        hide_index=True,
-        use_container_width=True,
-        num_rows="fixed",
-        column_config={
-            "_realm_id": None,
-            "_customer_name": None,
-            "Create": st.column_config.CheckboxColumn("Create", default=True),
-            "Customer": st.column_config.TextColumn(disabled=True),
-            "Target company": st.column_config.TextColumn(disabled=True),
-            "Division (from file)": st.column_config.TextColumn(disabled=True),
-        },
-    )
-    try:
-        edited_rows = edited.to_dict("records")  # type: ignore[attr-defined]
-    except AttributeError:
-        edited_rows = list(edited or [])
-
-    chosen = [r for r in edited_rows if r.get("Create")]
-    create_label = f"\u2795 Create {len(chosen)} customer(s) in QuickBooks"
-    if st.button(
-        create_label,
-        key="qbo_create_missing_customers",
-        type="primary",
-        disabled=not chosen,
-        use_container_width=True,
-    ):
-        qbo_client = QboClient(auth_service)
-        lookups = EntityLookupService(qbo_client)
-        created = 0
-        failed: list[str] = []
-        progress = st.progress(0.0, text="Creating customers in QuickBooks\u2026")
-        total = len(chosen)
-        for idx, item in enumerate(chosen, start=1):
-            realm_id = str(item.get("_realm_id") or "")
-            customer_name = str(item.get("_customer_name") or "")
-            try:
-                new_id = lookups.create_entity("Customer", customer_name, realm_id)
-            except Exception as exc:  # noqa: BLE001 - UI must continue
-                logger.exception("Customer create failed for %s", customer_name)
-                failed.append(f"{customer_name}: {exc}")
-                continue
-            if new_id:
-                created += 1
-            else:
-                failed.append(f"{customer_name}: QBO returned no Id (see logs).")
-            progress.progress(idx / total, text=f"Created {idx}/{total}\u2026")
-        progress.empty()
-
-        st.success(f"Created {created} customer(s).")
-        if failed:
-            with st.expander(f"View {len(failed)} failure(s)"):
-                for line in failed:
-                    st.code(line)
-
-        # Force a re-check on next render so the panel shows the new state.
-        st.session_state.pop(QBO_CUSTOMER_CHECK_KEY, None)
-        st.rerun()

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from qbo.duplicate_check import build_invoice_key, build_money_code_key
 from qbo.file_loader import FileLoader
+from qbo.lookups import EntityLookupService
+from qbo.models import ConnectedRealm, PreviewResult
 from qbo.parsers import DriverStatementParser, MoneyCodeParser
+from services.qbo_dashboard import _invoice_customer_refs
 from services.qbo_auth import qbo_allowed_emails
 
 
@@ -65,3 +68,66 @@ def test_qbo_duplicate_keys_are_stable():
     assert build_money_code_key("MC-1", "2026-05-22", "9", 12, "Fuel", "Truck Fuel") == (
         "creditcard|mc-1|2026-05-22|9|12.00|fuel|truck fuel"
     )
+
+
+def test_invoice_customer_refs_route_by_division_with_fallback():
+    prestige = ConnectedRealm(realm_id="pt-realm", company_name="Prestige Transportation Inc")
+    xpress = ConnectedRealm(realm_id="xpress-realm", company_name="Xpress Trans Inc")
+    preview = PreviewResult(
+        template_type="invoices",
+        source_file="invoices.csv",
+        source_hash="abc123",
+        count=3,
+        source_count=3,
+        skipped_count=0,
+        drafts=[
+            {
+                "DocNumber": "158591",
+                "_tempCustomerName": "TGR Logistics - PT",
+                "_realmId": "xpress-realm",
+                "_division": "Xpress Trans Inc",
+            },
+            {
+                "DocNumber": "158592",
+                "_tempCustomerName": "TGR Logistics - PT",
+                "_realmId": "xpress-realm",
+                "_division": "Xpress Trans Inc",
+            },
+            {
+                "DocNumber": "158593",
+                "_tempCustomerName": "Fallback Customer",
+                "_realmId": None,
+                "_division": "",
+            },
+        ],
+    )
+
+    refs = _invoice_customer_refs(preview=preview, fallback_realm=prestige, realms=[prestige, xpress])
+
+    by_customer = {row["customer_name"]: row for row in refs}
+    assert by_customer["TGR Logistics - PT"]["realm_id"] == "xpress-realm"
+    assert by_customer["TGR Logistics - PT"]["target_company"] == "Xpress Trans Inc"
+    assert by_customer["TGR Logistics - PT"]["invoice_count"] == 2
+    assert by_customer["Fallback Customer"]["realm_id"] == "pt-realm"
+    assert by_customer["Fallback Customer"]["target_company"] == "Prestige Transportation Inc"
+
+
+def test_entity_lookup_create_customer_posts_display_name_and_primes_cache():
+    class _Response:
+        def json(self):
+            return {"Customer": {"Id": "123"}}
+
+    class _FakeQbo:
+        def __init__(self):
+            self.calls = []
+
+        def post(self, path, *, realm_id, payload):
+            self.calls.append((path, realm_id, payload))
+            return _Response()
+
+    fake_qbo = _FakeQbo()
+    lookups = EntityLookupService(fake_qbo)  # type: ignore[arg-type]
+
+    assert lookups.create_entity("Customer", "TGR Logistics - PT", "realm-1") == "123"
+    assert fake_qbo.calls == [("/customer", "realm-1", {"DisplayName": "TGR Logistics - PT"})]
+    assert lookups.resolve_entity("Customer", "TGR Logistics - PT", "realm-1") == "123"
