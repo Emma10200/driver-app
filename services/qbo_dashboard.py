@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import importlib.util
 from collections.abc import Mapping
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import streamlit as st
@@ -39,6 +39,7 @@ from qbo.models import ConnectedRealm, PreviewResult
 from qbo.parsers import DriverStatementParser, InvoiceParser, MoneyCodeParser
 from services.qbo_audit import SupabaseAuditLog, source_file_hash
 from services.qbo_auth import QboAuthService, QboTokenRepository, qbo_allowed_emails
+from services.qbo_sheets_log import GoogleSheetsImportLog
 from services.qbo_supabase import SupabaseQboError, SupabaseRestClient
 
 logger = logging.getLogger(__name__)
@@ -47,12 +48,34 @@ GOOGLE_AUTH_PROVIDER = "google"
 QBO_OAUTH_STATE_KEY = "qbo_oauth_state"
 QBO_PREVIEW_KEY = "qbo_import_preview"
 QBO_UPLOAD_HASH_KEY = "qbo_upload_hash"
+QBO_VIEW_KEY = "qbo_view"
+QBO_TEMPLATE_KEY = "qbo_selected_template"
 _DATE_USE_ROW = "Use row dates (or most recent Friday)"
 _TEMPLATE_OPTIONS = {
     "invoices": "Invoices",
     "driver_statements": "Driver Statements / Checks",
     "money_codes": "Money Codes / EFS Fuel Card",
 }
+_TEMPLATE_CARDS = [
+    (
+        "invoices",
+        "🧾 Invoices",
+        "Customer invoices → QBO Accounts Receivable.",
+        "Use for the weekly customer invoice file from dispatch.",
+    ),
+    (
+        "driver_statements",
+        "🚚 Driver Statements",
+        "Driver pay statements → QBO Checks (Vendor Payments).",
+        "Use for the ProTransport driver settlement export.",
+    ),
+    (
+        "money_codes",
+        "⛽ Money Codes",
+        "EFS fuel-card codes → CreditCard Purchases.",
+        "Use for the EFS Money Code Use Report (Fuel Card - EFS only).",
+    ),
+]
 
 
 def _mapping_get(mapping: Any, key: str) -> Any:
@@ -260,9 +283,6 @@ def render_qbo_dashboard() -> None:
         _render_login()
         st.stop()
 
-    st.title("QBO Importer")
-    st.caption("Shared accounting import history powered by Supabase + QuickBooks Online.")
-
     try:
         supabase = SupabaseRestClient()
         token_repo = QboTokenRepository(supabase)
@@ -276,20 +296,80 @@ def render_qbo_dashboard() -> None:
         st.stop()
 
     email = _google_user_email()
-    col1, col2 = st.columns([0.75, 0.25])
-    with col1:
-        st.caption(f"Signed in as {email}")
-    with col2:
-        if st.button("Sign out", use_container_width=True):
+    _render_sidebar(auth_service, email)
+
+    view = st.session_state.get(QBO_VIEW_KEY) or "templates"
+
+    if view == "history":
+        _render_history(supabase)
+        return
+
+    if view == "import":
+        template_key = st.session_state.get(QBO_TEMPLATE_KEY)
+        if template_key not in _TEMPLATE_OPTIONS:
+            st.session_state[QBO_VIEW_KEY] = "templates"
+            st.rerun()
+            return
+        _render_importer(supabase, token_repo, auth_service, email, template_key)
+        return
+
+    _render_template_picker(token_repo)
+
+
+def _go_to(view: str, *, template_key: str | None = None) -> None:
+    st.session_state[QBO_VIEW_KEY] = view
+    if template_key is not None:
+        st.session_state[QBO_TEMPLATE_KEY] = template_key
+    if view != "import":
+        st.session_state.pop(QBO_PREVIEW_KEY, None)
+        st.session_state.pop(QBO_UPLOAD_HASH_KEY, None)
+    st.rerun()
+
+
+def _render_sidebar(auth_service: QboAuthService, email: str) -> None:
+    with st.sidebar:
+        st.markdown("### 📘 QBO Importer")
+        st.caption(email or "signed in")
+        st.divider()
+        if st.button("🏠 Import templates", use_container_width=True, key="qbo_nav_templates"):
+            _go_to("templates")
+        if st.button("📜 Import history", use_container_width=True, key="qbo_nav_history"):
+            _go_to("history")
+        st.divider()
+        with st.expander("⚙️ Settings — Companies", expanded=False):
+            _render_connections(auth_service)
+        st.divider()
+        if st.button("Sign out", use_container_width=True, key="qbo_nav_signout"):
             st.logout()
 
-    tabs = st.tabs(["Connect companies", "Import", "History"])
-    with tabs[0]:
-        _render_connections(auth_service)
-    with tabs[1]:
-        _render_importer(supabase, token_repo, auth_service, email)
-    with tabs[2]:
-        _render_history(supabase)
+
+def _render_template_picker(token_repo: QboTokenRepository) -> None:
+    st.title("What do you want to import?")
+    realms = token_repo.list_realms()
+    if not realms:
+        st.warning(
+            "No QuickBooks companies are connected yet. Open **⚙️ Settings — Companies** in the "
+            "sidebar and connect each company once."
+        )
+        return
+    st.caption(
+        f"{len(realms)} connected QuickBooks compan{'y' if len(realms) == 1 else 'ies'}. "
+        "Choose a template to begin."
+    )
+    cols = st.columns(len(_TEMPLATE_CARDS))
+    for col, (key, title, summary, hint) in zip(cols, _TEMPLATE_CARDS):
+        with col:
+            with st.container(border=True):
+                st.markdown(f"#### {title}")
+                st.write(summary)
+                st.caption(hint)
+                if st.button(
+                    "Start import",
+                    key=f"qbo_start_{key}",
+                    use_container_width=True,
+                    type="primary",
+                ):
+                    _go_to("import", template_key=key)
 
 
 def _is_qbo_callback() -> bool:
@@ -380,14 +460,25 @@ def _render_importer(
     token_repo: QboTokenRepository,
     auth_service: QboAuthService,
     email: str,
+    template_key: str,
 ) -> None:
+    template_label = _TEMPLATE_OPTIONS.get(template_key, template_key)
+
+    back_col, title_col = st.columns([0.18, 0.82])
+    with back_col:
+        if st.button("\u2190 Templates", use_container_width=True, key="qbo_back_to_templates"):
+            _go_to("templates")
+            return
+    with title_col:
+        st.title(f"Import \u2014 {template_label}")
+
     realms = token_repo.list_realms()
     if not realms:
-        st.warning("Connect at least one QuickBooks company before importing.")
+        st.warning(
+            "Connect at least one QuickBooks company before importing. "
+            "Open \u2699\ufe0f Settings \u2014 Companies in the sidebar."
+        )
         return
-
-    template_label = st.radio("Import template", list(_TEMPLATE_OPTIONS.values()), horizontal=True)
-    template_key = next(key for key, label in _TEMPLATE_OPTIONS.items() if label == template_label)
 
     options = _realm_options(realms)
     selected_realm_label = st.selectbox("Target company", list(options.keys()), key="qbo_target_company")
@@ -478,14 +569,39 @@ def _render_importer(
             audit,
         )
         with st.spinner("Posting to QuickBooks… please keep this tab open."):
+            start_ts = datetime.now(tz=timezone.utc)
             if template_key == "invoices":
                 stats = import_service.post_invoices(preview.drafts, target_realm_id=selected_realm.realm_id)
             elif template_key == "driver_statements":
                 stats = import_service.post_checks(preview.drafts, target_realm_id=selected_realm.realm_id)
             else:
                 stats = import_service.post_money_codes(preview.drafts, target_realm_id=selected_realm.realm_id)
+            duration_ms = int((datetime.now(tz=timezone.utc) - start_ts).total_seconds() * 1000)
         st.success(f"Done: posted {stats.posted}, duplicates {stats.skipped_duplicates}, failed {stats.failed}.")
         _render_import_stats(stats)
+
+        try:
+            sheets_log = GoogleSheetsImportLog()
+            wrote = sheets_log.append_summary(
+                user_email=email,
+                action="IMPORT",
+                template=template_label,
+                company=selected_realm.company_name,
+                realm_id=selected_realm.realm_id,
+                source_sheet=uploaded.name,
+                source_count=len(preview.drafts),
+                success=getattr(stats, "posted", 0),
+                failed=getattr(stats, "failed", 0),
+                skipped=getattr(stats, "skipped_duplicates", 0),
+                duration_ms=duration_ms,
+                execution_id=upload_hash[:12] if upload_hash else "",
+                errors=[getattr(item, "error", "") for item in getattr(stats, "failures", []) or []],
+            )
+            if not wrote and sheets_log.unavailable_reason:
+                logger.info("ImportLog sheet not written: %s", sheets_log.unavailable_reason)
+        except Exception as exc:  # noqa: BLE001 - never break the import flow
+            logger.warning("ImportLog sheet write failed: %s", exc)
+
         st.session_state.pop(QBO_PREVIEW_KEY, None)
 
 
@@ -636,15 +752,46 @@ def _render_import_stats(stats: Any) -> None:
 
 
 def _render_history(supabase: SupabaseRestClient) -> None:
-    st.subheader("Recent QBO import history")
-    limit = st.slider("Rows", min_value=25, max_value=500, value=100, step=25)
-    audit = SupabaseAuditLog(supabase, imported_by_email=_google_user_email())
-    try:
-        rows = audit.recent(limit=limit)
-    except Exception as exc:  # noqa: BLE001 - history should not crash the page
-        st.error(f"Could not load QBO history: {exc}")
-        return
-    if not rows:
-        st.info("No QBO audit rows yet.")
-        return
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.title("\ud83d\udcdc Import history")
+    st.caption(
+        "Two history sources: the live Supabase audit (per-transaction) and the legacy "
+        "Google Sheet `ImportLog` (per-import summary, used by the original Apps Script app)."
+    )
+
+    live_tab, legacy_tab = st.tabs(["Live (Supabase)", "Legacy import log (Google Sheets)"])
+
+    with live_tab:
+        limit = st.slider("Rows", min_value=25, max_value=500, value=100, step=25, key="qbo_hist_live_limit")
+        audit = SupabaseAuditLog(supabase, imported_by_email=_google_user_email())
+        try:
+            rows = audit.recent(limit=limit)
+        except Exception as exc:  # noqa: BLE001 - history should not crash the page
+            st.error(f"Could not load QBO history: {exc}")
+        else:
+            if not rows:
+                st.info("No QBO audit rows yet. New imports will appear here.")
+            else:
+                st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    with legacy_tab:
+        legacy_limit = st.slider(
+            "Rows",
+            min_value=25,
+            max_value=500,
+            value=100,
+            step=25,
+            key="qbo_hist_legacy_limit",
+        )
+        sheets_log = GoogleSheetsImportLog()
+        st.caption(
+            f"Sheet: `{sheets_log.spreadsheet_id}`  \u00b7  Tab: `{sheets_log.worksheet_name}`"
+        )
+        legacy_rows = sheets_log.recent(limit=legacy_limit)
+        if not legacy_rows:
+            reason = sheets_log.unavailable_reason or (
+                "No rows returned. Make sure the Streamlit Google service account has Viewer "
+                "access to the ImportLog spreadsheet."
+            )
+            st.info(f"Legacy ImportLog is unavailable: {reason}")
+            return
+        st.dataframe(legacy_rows, use_container_width=True, hide_index=True)

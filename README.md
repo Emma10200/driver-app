@@ -66,15 +66,45 @@ For full deployment steps and troubleshooting, see:
 
 ## Core files
 
-- `app.py` — app entry point
+- `app.py` — app entry point and route dispatcher (driver app / `?dashboard=1` admin / `?qbo=1` QBO importer)
 - `app_sections/` — page-by-page form sections
 - `ui/common.py` — shared styles/components
-- `services/` — drafts, notifications, logging
+- `services/` — drafts, notifications, logging, **QBO importer subsystem** (`qbo_dashboard.py`, `qbo_auth.py`, `qbo_audit.py`, `qbo_sheets_log.py`, `qbo_supabase.py`)
+- `qbo/` — QBO API client, parsers, and import service used by the QBO subsystem
+- `supabase/migrations/` — Supabase schema for both submissions and QBO (`qbo_realms`, `qbo_token_refs`, `qbo_audit_log`, `qbo_idempotency`, `qbo_app_settings`)
 - `pdf_generator.py` — generated PDF output
-- `submission_storage.py` — local/Supabase storage logic
+- `submission_storage.py` — local/Supabase storage logic + shared `get_runtime_secret` helper
 - `config.py` — company profile + options
 - `docs/PROJECT_MAP.md` — navigation guide for the repo layout
 - `docs/ADMIN_AUTH.md` — admin password/Google SSO setup
+
+## Repository structure (where things live)
+
+This single Streamlit app now hosts **three** routes from the same deploy:
+
+| Route | URL | Entry function | Purpose |
+| --- | --- | --- | --- |
+| Driver application | `/` (default) | `app.py` main flow | Public CDL driver application form |
+| Admin dashboard | `/?dashboard=1` | `admin_dashboard.render_admin_dashboard` | Internal review of submitted applications |
+| **QBO Importer** | `/?qbo=1` | `services.qbo_dashboard.render_qbo_dashboard` | Imports invoices / driver statements / money codes into QuickBooks Online |
+
+Live deploy: <https://driver-application.streamlit.app/>
+
+### Related/sibling repositories
+
+- **This repo (`prestige-driver-app`, GitHub: `Emma10200/driver-app`)** — the live deployed app and **the active home of the QBO Importer**. All new QBO work happens here.
+- **`QBO_App`** (sibling folder, separate repo) — the original Tkinter / Google Apps Script prototype that the QBO Importer was ported from. It is **no longer the deployed importer**, but it is kept as a reference because a few features have not been ported yet:
+  - `parking_pk` — Prestig Inc–only flow that appends `PK` to invoice DocNumbers containing the `Parking` line item. Still lives in `QBO_App/src_tkinter/qbo/parking_pk.py`.
+  - The original Apps Script `Controller.gs` defines the legacy `ImportLog` Google Sheet schema (14 columns) that the Streamlit QBO Importer now also writes to — so historic and new imports share one bookmarkable history sheet.
+
+### QBO Importer history sources
+
+Every QBO import is recorded in two places:
+
+1. **Supabase** (`qbo_audit_log`, `qbo_idempotency`) — authoritative, per-transaction. Drives the **Live (Supabase)** tab of the in-app history.
+2. **Google Sheet `ImportLog` tab** (sheet id configured via `QBO_IMPORT_LOG_SHEET_ID`) — one summary row per import, mirroring the schema written by the legacy Apps Script tool so the ~300 rows of pre-Streamlit history stay in one place. Drives the **Legacy import log (Google Sheets)** tab.
+
+Sheet writes are best-effort: if the Google service account or Sheets API is unavailable, imports still succeed and the failure is logged.
 
 ## Data handling summary
 
