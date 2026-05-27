@@ -70,7 +70,7 @@ def test_qbo_duplicate_keys_are_stable():
     )
 
 
-def test_invoice_customer_refs_route_by_division_with_fallback():
+def test_invoice_customer_refs_route_by_division_without_fallback():
     prestige = ConnectedRealm(realm_id="pt-realm", company_name="Prestige Transportation Inc")
     xpress = ConnectedRealm(realm_id="xpress-realm", company_name="Xpress Trans Inc")
     preview = PreviewResult(
@@ -95,21 +95,20 @@ def test_invoice_customer_refs_route_by_division_with_fallback():
             },
             {
                 "DocNumber": "158593",
-                "_tempCustomerName": "Fallback Customer",
+                "_tempCustomerName": "Unmatched Customer",
                 "_realmId": None,
                 "_division": "",
             },
         ],
     )
 
-    refs = _invoice_customer_refs(preview=preview, fallback_realm=prestige, realms=[prestige, xpress])
+    refs = _invoice_customer_refs(preview=preview, realms=[prestige, xpress])
 
     by_customer = {row["customer_name"]: row for row in refs}
     assert by_customer["TGR Logistics - PT"]["realm_id"] == "xpress-realm"
     assert by_customer["TGR Logistics - PT"]["target_company"] == "Xpress Trans Inc"
     assert by_customer["TGR Logistics - PT"]["invoice_count"] == 2
-    assert by_customer["Fallback Customer"]["realm_id"] == "pt-realm"
-    assert by_customer["Fallback Customer"]["target_company"] == "Prestige Transportation Inc"
+    assert "Unmatched Customer" not in by_customer
 
 
 def test_entity_lookup_create_customer_posts_display_name_and_primes_cache():

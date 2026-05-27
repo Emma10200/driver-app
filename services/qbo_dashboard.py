@@ -243,6 +243,13 @@ def _realm_options(realms: list[ConnectedRealm]) -> dict[str, ConnectedRealm]:
     return {f"{realm.company_name} ({realm.realm_id})": realm for realm in realms}
 
 
+def _realm_name_for_id(realms: list[ConnectedRealm], realm_id: str) -> str:
+    for realm in realms:
+        if realm.realm_id == realm_id:
+            return realm.company_name
+    return ""
+
+
 def _render_login() -> None:
     st.title("🔒 QBO Importer")
     st.caption("Accounting-only access. Sign in with an approved Google account.")
@@ -498,44 +505,42 @@ def _render_importer(
     options = _realm_options(realms)
     bank_account_name = ""
     override_date = ""
+    selected_realm: ConnectedRealm | None = None
     with st.container(border=True):
         st.markdown("**Setup**")
         if template_key == "invoices":
             st.caption(
-                "Invoice rows route by the **Division** column. The company below is only the fallback "
-                "for blank or unmatched divisions."
+                "Invoices route entirely by the **Division** column. No company picker is needed; "
+                "blank or unmatched divisions are flagged before anything posts."
             )
-            selectbox_label = "Fallback company"
-            selectbox_help = "Used only when a row's Division is blank or cannot be matched to a connected QBO company."
+            st.caption(
+                "Connected companies: "
+                + ", ".join(realm.company_name for realm in realms)
+            )
         else:
-            selectbox_label = "Company"
-            selectbox_help = "QuickBooks company to receive this import."
-
-        setup_cols = st.columns(2)
-        with setup_cols[0]:
-            selected_realm_label = st.selectbox(
-                selectbox_label,
-                list(options.keys()),
-                key="qbo_target_company",
-                help=selectbox_help,
-            )
-        selected_realm = options[selected_realm_label]
-
-        with setup_cols[1]:
-            if template_key == "driver_statements":
-                bank_account_name = st.text_input(
-                    "Bank account",
-                    value=selected_realm.default_bank_account_name,
-                    help="QBO bank account for the checks. Saved as this company's default after posting.",
+            setup_cols = st.columns(2)
+            with setup_cols[0]:
+                selected_realm_label = st.selectbox(
+                    "Company",
+                    list(options.keys()),
+                    key="qbo_target_company",
+                    help="QuickBooks company to receive this import.",
                 )
-            elif template_key == "money_codes":
-                st.caption("Posts as CreditCard purchases. Only Fuel Card - EFS rows are imported.")
-            else:
-                st.caption("Matched divisions post to their own company automatically.")
+            selected_realm = options[selected_realm_label]
 
-        if template_key == "driver_statements":
-            selected_date = st.selectbox("Check date", _date_options(), help="Optional override; otherwise row dates are used.")
-            override_date = "" if selected_date == _DATE_USE_ROW else selected_date
+            with setup_cols[1]:
+                if template_key == "driver_statements":
+                    bank_account_name = st.text_input(
+                        "Bank account",
+                        value=selected_realm.default_bank_account_name,
+                        help="QBO bank account for the checks. Saved as this company's default after posting.",
+                    )
+                elif template_key == "money_codes":
+                    st.caption("Posts as CreditCard purchases. Only Fuel Card - EFS rows are imported.")
+
+            if template_key == "driver_statements":
+                selected_date = st.selectbox("Check date", _date_options(), help="Optional override; otherwise row dates are used.")
+                override_date = "" if selected_date == _DATE_USE_ROW else selected_date
 
         uploaded = st.file_uploader("Source file", type=["csv", "xlsx", "xlsm", "xls"])
     if not uploaded:
@@ -577,17 +582,17 @@ def _render_importer(
     if not isinstance(preview, PreviewResult):
         return
 
-    _render_preview(preview)
-
-    # Invoice files may span multiple QBO companies (Division column on each row).
-    # Show the per-division routing so the user can confirm before posting.
-    multi_realm_invoice = False
     if template_key == "invoices":
-        multi_realm_invoice = _render_invoice_routing_summary(preview, selected_realm)
+        _render_invoice_routing_summary(preview, realms)
+
+    _render_preview(preview)
 
     # Optional in-line correction of expense account assignments (the
     # "trailer vs ELD" use case). Loads the QBO chart of accounts on demand.
     if template_key in {"driver_statements", "money_codes"}:
+        if selected_realm is None:
+            st.error("Choose a QuickBooks company before importing this file type.")
+            return
         with st.expander(
             "\u270f\ufe0f Edit expense account on individual lines (loads QBO chart of accounts)",
             expanded=False,
@@ -608,7 +613,6 @@ def _render_importer(
     st.divider()
     if template_key == "invoices" and _render_missing_customers_prompt(
         preview=preview,
-        fallback_realm=selected_realm,
         realms=realms,
         supabase=supabase,
         token_repo=token_repo,
@@ -624,7 +628,7 @@ def _render_importer(
 
     _render_post_controls(
         preview=preview,
-        fallback_realm=selected_realm,
+        target_realm=selected_realm,
         realms=realms,
         supabase=supabase,
         token_repo=token_repo,
@@ -635,14 +639,13 @@ def _render_importer(
         uploaded_name=uploaded.name,
         upload_hash=upload_hash,
         bank_account_name=bank_account_name,
-        multi_realm_invoice=multi_realm_invoice,
     )
 
 
 def _render_post_controls(
     *,
     preview: PreviewResult,
-    fallback_realm: ConnectedRealm,
+    target_realm: ConnectedRealm | None,
     realms: list[ConnectedRealm],
     supabase: SupabaseRestClient,
     token_repo: QboTokenRepository,
@@ -653,7 +656,6 @@ def _render_post_controls(
     uploaded_name: str,
     upload_hash: str,
     bank_account_name: str,
-    multi_realm_invoice: bool,
 ) -> None:
     """Render the final compact post action.
 
@@ -666,10 +668,7 @@ def _render_post_controls(
         with text_col:
             st.markdown("**Ready to post**")
             if template_key == "invoices":
-                if multi_realm_invoice:
-                    st.caption("Rows will post to their matched Division company; unmatched rows use the fallback.")
-                else:
-                    st.caption("Customers are checked in QBO before any invoice posts.")
+                st.caption("Customers are checked first; missing customers can be created before posting.")
             else:
                 st.caption("This creates real QuickBooks financial records. Review the preview first.")
 
@@ -688,7 +687,6 @@ def _render_post_controls(
         with st.spinner("Checking customers in QuickBooks…"):
             check = _find_missing_invoice_customers(
                 preview=preview,
-                fallback_realm=fallback_realm,
                 realms=realms,
                 auth_service=auth_service,
             )
@@ -699,7 +697,7 @@ def _render_post_controls(
 
     _post_preview_to_qbo(
         preview=preview,
-        fallback_realm=fallback_realm,
+        target_realm=target_realm,
         supabase=supabase,
         token_repo=token_repo,
         auth_service=auth_service,
@@ -715,7 +713,7 @@ def _render_post_controls(
 def _post_preview_to_qbo(
     *,
     preview: PreviewResult,
-    fallback_realm: ConnectedRealm,
+    target_realm: ConnectedRealm | None,
     supabase: SupabaseRestClient,
     token_repo: QboTokenRepository,
     auth_service: QboAuthService,
@@ -727,14 +725,19 @@ def _post_preview_to_qbo(
     bank_account_name: str,
 ) -> None:
     """Post the already-reviewed preview to QBO and render the result."""
+    if template_key != "invoices" and target_realm is None:
+        st.error("Choose a QuickBooks company before posting.")
+        return
+
     if template_key == "driver_statements" and bank_account_name:
+        assert target_realm is not None
         token_repo.save_realm_settings(
-            realm_id=fallback_realm.realm_id,
-            company_name=fallback_realm.company_name,
-            environment=fallback_realm.environment,
+            realm_id=target_realm.realm_id,
+            company_name=target_realm.company_name,
+            environment=target_realm.environment,
             default_bank_account_name=bank_account_name,
-            default_money_code_cc_account_name=fallback_realm.default_money_code_cc_account_name,
-            connected_by_email=fallback_realm.connected_by_email,
+            default_money_code_cc_account_name=target_realm.default_money_code_cc_account_name,
+            connected_by_email=target_realm.connected_by_email,
         )
 
     audit = SupabaseAuditLog(
@@ -753,16 +756,18 @@ def _post_preview_to_qbo(
     with st.spinner("Posting to QuickBooks… please keep this tab open."):
         start_ts = datetime.now(tz=timezone.utc)
         if template_key == "invoices":
-            # Per-draft _realmId routes matched Divisions; fallback_realm handles
-            # rows whose Division is blank or not recognized.
+            # Invoices are fully Division-routed. Preview validation blocks
+            # blank/unmatched divisions before this point.
             stats = import_service.post_invoices(
                 preview.drafts,
-                target_realm_id=fallback_realm.realm_id,
+                target_realm_id="",
             )
         elif template_key == "driver_statements":
-            stats = import_service.post_checks(preview.drafts, target_realm_id=fallback_realm.realm_id)
+            assert target_realm is not None
+            stats = import_service.post_checks(preview.drafts, target_realm_id=target_realm.realm_id)
         else:
-            stats = import_service.post_money_codes(preview.drafts, target_realm_id=fallback_realm.realm_id)
+            assert target_realm is not None
+            stats = import_service.post_money_codes(preview.drafts, target_realm_id=target_realm.realm_id)
         duration_ms = int((datetime.now(tz=timezone.utc) - start_ts).total_seconds() * 1000)
 
     st.success(f"Done: posted {stats.posted}, duplicates {stats.skipped_duplicates}, failed {stats.failed}.")
@@ -774,8 +779,8 @@ def _post_preview_to_qbo(
             user_email=email,
             action="IMPORT",
             template=template_label,
-            company=fallback_realm.company_name,
-            realm_id=fallback_realm.realm_id,
+            company=target_realm.company_name if target_realm else "Division-routed invoices",
+            realm_id=target_realm.realm_id if target_realm else "",
             source_sheet=uploaded_name,
             source_count=len(preview.drafts),
             success=getattr(stats, "posted", 0),
@@ -797,14 +802,13 @@ def _post_preview_to_qbo(
 def _invoice_customer_refs(
     *,
     preview: PreviewResult,
-    fallback_realm: ConnectedRealm,
     realms: list[ConnectedRealm],
 ) -> list[dict[str, Any]]:
     """Return unique invoice Customer/realm targets, resolved by Division."""
     realm_names = {realm.realm_id: realm.company_name for realm in realms}
     unique: dict[tuple[str, str], dict[str, Any]] = {}
     for draft in preview.drafts or []:
-        realm_id = str(draft.get("_realmId") or fallback_realm.realm_id or "").strip()
+        realm_id = str(draft.get("_realmId") or "").strip()
         customer_name = str(draft.get("_tempCustomerName") or "").strip()
         if not realm_id or not customer_name:
             continue
@@ -815,7 +819,7 @@ def _invoice_customer_refs(
                 "customer_name": customer_name,
                 "realm_id": realm_id,
                 "target_company": realm_names.get(realm_id) or realm_id,
-                "division": division or "(fallback)",
+                "division": division or "(blank)",
                 "invoice_count": 0,
             }
         unique[key]["invoice_count"] += 1
@@ -828,11 +832,10 @@ def _invoice_customer_refs(
 def _find_missing_invoice_customers(
     *,
     preview: PreviewResult,
-    fallback_realm: ConnectedRealm,
     realms: list[ConnectedRealm],
     auth_service: QboAuthService,
 ) -> dict[str, Any]:
-    refs = _invoice_customer_refs(preview=preview, fallback_realm=fallback_realm, realms=realms)
+    refs = _invoice_customer_refs(preview=preview, realms=realms)
     qbo_client = QboClient(auth_service)
     lookups = EntityLookupService(qbo_client)
     missing: list[dict[str, Any]] = []
@@ -861,7 +864,6 @@ def _find_missing_invoice_customers(
 def _render_missing_customers_prompt(
     *,
     preview: PreviewResult,
-    fallback_realm: ConnectedRealm,
     realms: list[ConnectedRealm],
     supabase: SupabaseRestClient,
     token_repo: QboTokenRepository,
@@ -961,7 +963,6 @@ def _render_missing_customers_prompt(
         with st.spinner("Re-checking customers in QuickBooks…"):
             st.session_state[QBO_MISSING_CUSTOMERS_KEY] = _find_missing_invoice_customers(
                 preview=preview,
-                fallback_realm=fallback_realm,
                 realms=realms,
                 auth_service=auth_service,
             )
@@ -988,7 +989,7 @@ def _render_missing_customers_prompt(
         st.success(f"Created {len(created)} customer(s). Continuing to post…")
         _post_preview_to_qbo(
             preview=preview,
-            fallback_realm=fallback_realm,
+            target_realm=None,
             supabase=supabase,
             token_repo=token_repo,
             auth_service=auth_service,
@@ -1037,7 +1038,7 @@ def _build_preview(
     file_name: str,
     content: bytes,
     realms: list[ConnectedRealm],
-    selected_realm: ConnectedRealm,
+    selected_realm: ConnectedRealm | None,
     bank_account_name: str,
     override_date: str,
 ) -> PreviewResult:
@@ -1052,12 +1053,21 @@ def _build_preview(
                 "Date": row["txn_date"],
                 "Customer": row["customer_name"],
                 "Amount": row["amount"],
-                "Division": row["division_name"] or selected_realm.company_name,
-                "Realm ID": row["realm_id"] or selected_realm.realm_id,
+                "Division": row["division_name"] or "(blank)",
+                "QBO Company": _realm_name_for_id(realms, row.get("realm_id") or "") or "(unmatched)",
             }
             for row in parsed.get("rows") or []
         ]
         warnings = [f"Row {item.get('row_number')}: {item.get('reason')}" for item in parsed.get("skipped_rows") or []]
+        route_errors = [
+            "Row {row}: invoice {doc} has Division {division!r}, which does not match a connected QuickBooks company.".format(
+                row=item.get("row_number"),
+                doc=item.get("doc_number"),
+                division=item.get("division_name") or "(blank)",
+            )
+            for item in parsed.get("rows") or []
+            if not item.get("realm_id")
+        ]
         return PreviewResult(
             template_type=template_key,
             source_file=file_name,
@@ -1066,9 +1076,13 @@ def _build_preview(
             source_count=max(len(rows) - 1, 0),
             skipped_count=len(parsed.get("skipped_rows") or []),
             rows=preview_rows,
+            errors=route_errors,
             warnings=warnings,
             drafts=drafts,
         )
+
+    if selected_realm is None:
+        raise ValueError("Choose a QuickBooks company before previewing this file type.")
 
     if template_key == "driver_statements":
         parsed = DriverStatementParser().parse(
@@ -1387,61 +1401,60 @@ def _render_editable_expense_lines(
 # Invoice multi-company routing summary
 # =============================================================================
 
-def _render_invoice_routing_summary(
-    preview: PreviewResult, fallback_realm: ConnectedRealm
-) -> bool:
-    """Show a per-division summary for invoice files.
+def _render_invoice_routing_summary(preview: PreviewResult, realms: list[ConnectedRealm]) -> bool:
+    """Show compact Division routing immediately after setup.
 
-    Returns True when the file spans more than one resolved realm so the
-    caller can disable the forced single-target post path.
+    Invoices are intentionally Division-only: there is no company picker.
+    Blank or unmatched divisions are preview errors and must be fixed
+    in the source file before posting.
     """
-    rows = preview.rows or []
-    if not rows:
+    drafts = preview.drafts or []
+    if not drafts:
         return False
 
-    counts: dict[tuple[str, str], int] = {}
+    counts: dict[tuple[str, str, str], int] = {}
     unresolved = 0
-    for row in rows:
-        realm_id = str(row.get("Realm ID") or "").strip()
-        division = str(row.get("Division") or "").strip()
+    for draft in drafts:
+        realm_id = str(draft.get("_realmId") or "").strip()
+        division = str(draft.get("_division") or "").strip() or "(blank)"
         if not realm_id:
             unresolved += 1
-            counts[("", division or "(no Division header)")] = (
-                counts.get(("", division or "(no Division header)"), 0) + 1
-            )
-            continue
-        bucket = (realm_id, division or fallback_realm.company_name)
-        counts[bucket] = counts.get(bucket, 0) + 1
+            key = (division, "(unmatched)", "")
+        else:
+            key = (division, _realm_name_for_id(realms, realm_id) or realm_id, realm_id)
+        counts[key] = counts.get(key, 0) + 1
 
-    resolved_realms = {realm for (realm, _div), _n in counts.items() if realm}
+    resolved_realms = {realm_id for (_division, _company, realm_id), _count in counts.items() if realm_id}
     multi_realm = len(resolved_realms) > 1
+    with st.container(border=True):
+        title_cols = st.columns([0.72, 0.28])
+        with title_cols[0]:
+            st.markdown("**Division routing**")
+            st.caption(
+                f"{len(drafts)} invoice row(s) resolved to {len(resolved_realms)} connected "
+                f"compan{'y' if len(resolved_realms) == 1 else 'ies'} from the Division column."
+            )
+        with title_cols[1]:
+            st.metric("Unmatched", unresolved)
 
-    with st.expander(
-        f"\U0001F9ED Division routing \u2014 {len(rows)} row(s) across "
-        f"{len(resolved_realms)} resolved compan{'y' if len(resolved_realms) == 1 else 'ies'}",
-        expanded=multi_realm or unresolved > 0,
-    ):
         table_rows = [
             {
-                "Division (from file)": division,
-                "Routes to (QBO realm)": realm or "(unresolved \u2014 will use fallback)",
+                "Division": division,
+                "QBO company": company,
                 "Rows": count,
             }
-            for (realm, division), count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0][1]))
+            for (division, company, _realm_id), count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0][0]))
         ]
         st.dataframe(table_rows, hide_index=True, use_container_width=True)
         if unresolved:
-            st.warning(
-                f"{unresolved} row(s) have no matching Division \u2014 they will post to the "
-                f"fallback company **{fallback_realm.company_name}**. "
-                "If that is wrong, edit the source file's Division column and re-upload."
+            st.error(
+                f"{unresolved} row(s) have a blank or unmatched Division. Fix the source file and re-preview; "
+                "invoice imports are Division-only."
             )
-        if multi_realm:
-            st.info(
-                "This file spans multiple QuickBooks companies. Each row will be posted to "
-                "its matched company \u2014 the 'Fallback target company' selector above is "
-                "only used for unresolved rows."
-            )
+        elif multi_realm:
+            st.success("Multi-company file detected. Each row will post to its matched QBO company.")
+        else:
+            st.caption("All invoice rows resolve to one QBO company.")
     return multi_realm
 
 
