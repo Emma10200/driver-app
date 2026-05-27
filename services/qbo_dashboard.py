@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import importlib.util
 from collections.abc import Mapping
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import streamlit as st
@@ -36,7 +36,9 @@ from qbo.file_loader import FileLoader
 from qbo.import_service import ImportService
 from qbo.lookups import EntityLookupService
 from qbo.models import ConnectedRealm, PreviewResult
+from qbo.parking_pk import ParkingApplyResult, ParkingMatch, ParkingPkService, ParkingScanResult
 from qbo.parsers import DriverStatementParser, InvoiceParser, MoneyCodeParser
+from qbo.catalog import EXPENSE_ACCOUNT_CLASSIFICATIONS, QboCatalog
 from services.qbo_audit import SupabaseAuditLog, source_file_hash
 from services.qbo_auth import QboAuthService, QboTokenRepository, qbo_allowed_emails
 from services.qbo_sheets_log import GoogleSheetsImportLog
@@ -50,6 +52,9 @@ QBO_PREVIEW_KEY = "qbo_import_preview"
 QBO_UPLOAD_HASH_KEY = "qbo_upload_hash"
 QBO_VIEW_KEY = "qbo_view"
 QBO_TEMPLATE_KEY = "qbo_selected_template"
+QBO_PARKING_SCAN_KEY = "qbo_parking_scan"
+QBO_PARKING_SELECTION_KEY = "qbo_parking_selected_ids"
+QBO_CATALOG_CACHE_KEY = "qbo_catalog_cache"
 _DATE_USE_ROW = "Use row dates (or most recent Friday)"
 _TEMPLATE_OPTIONS = {
     "invoices": "Invoices",
@@ -313,6 +318,10 @@ def render_qbo_dashboard() -> None:
         _render_importer(supabase, token_repo, auth_service, email, template_key)
         return
 
+    if view == "parking_pk":
+        _render_parking_pk(supabase, token_repo, auth_service, email)
+        return
+
     _render_template_picker(token_repo)
 
 
@@ -335,6 +344,10 @@ def _render_sidebar(auth_service: QboAuthService, email: str) -> None:
             _go_to("templates")
         if st.button("📜 Import history", use_container_width=True, key="qbo_nav_history"):
             _go_to("history")
+        st.divider()
+        st.markdown("#### 🔧 Maintenance")
+        if st.button("🅿️ Parking PK (Prestig)", use_container_width=True, key="qbo_nav_parking_pk"):
+            _go_to("parking_pk")
         st.divider()
         with st.expander("⚙️ Settings — Companies", expanded=False):
             _render_connections(auth_service)
@@ -481,7 +494,14 @@ def _render_importer(
         return
 
     options = _realm_options(realms)
-    selected_realm_label = st.selectbox("Target company", list(options.keys()), key="qbo_target_company")
+    if template_key == "invoices":
+        selectbox_label = (
+            "Fallback target company (used only for invoice rows whose Division "
+            "header does not match a connected company)"
+        )
+    else:
+        selectbox_label = "Target company"
+    selected_realm_label = st.selectbox(selectbox_label, list(options.keys()), key="qbo_target_company")
     selected_realm = options[selected_realm_label]
 
     bank_account_name = ""
@@ -536,6 +556,26 @@ def _render_importer(
         return
 
     _render_preview(preview)
+
+    # Invoice files may span multiple QBO companies (Division column on each row).
+    # Show the per-division routing so the user can confirm before posting.
+    multi_realm_invoice = False
+    if template_key == "invoices":
+        multi_realm_invoice = _render_invoice_routing_summary(preview, selected_realm)
+
+    # Optional in-line correction of expense account assignments (the
+    # "trailer vs ELD" use case). Loads the QBO chart of accounts on demand.
+    if template_key in {"driver_statements", "money_codes"}:
+        with st.expander(
+            "\u270f\ufe0f Edit expense account on individual lines (loads QBO chart of accounts)",
+            expanded=False,
+        ):
+            _render_editable_expense_lines(
+                preview=preview,
+                target_realm=selected_realm,
+                auth_service=auth_service,
+            )
+
     if preview.errors:
         st.warning("Fix preview errors before importing.")
         return
@@ -568,10 +608,13 @@ def _render_importer(
             DuplicateChecker(qbo_client),
             audit,
         )
-        with st.spinner("Posting to QuickBooks… please keep this tab open."):
+        with st.spinner("Posting to QuickBooks\u2026 please keep this tab open."):
             start_ts = datetime.now(tz=timezone.utc)
             if template_key == "invoices":
-                stats = import_service.post_invoices(preview.drafts, target_realm_id=selected_realm.realm_id)
+                # When the file spans multiple realms, let per-draft _realmId
+                # drive routing (target_realm_id="" disables the fallback).
+                invoice_target = "" if multi_realm_invoice else selected_realm.realm_id
+                stats = import_service.post_invoices(preview.drafts, target_realm_id=invoice_target)
             elif template_key == "driver_statements":
                 stats = import_service.post_checks(preview.drafts, target_realm_id=selected_realm.realm_id)
             else:
@@ -795,3 +838,389 @@ def _render_history(supabase: SupabaseRestClient) -> None:
             st.info(f"Legacy ImportLog is unavailable: {reason}")
             return
         st.dataframe(legacy_rows, use_container_width=True, hide_index=True)
+
+
+
+# =============================================================================
+# Editable preview helpers (expense-account dropdowns)
+# =============================================================================
+
+def _qbo_account_options(realm_id: str, auth_service: QboAuthService) -> list[str]:
+    """Return the cached list of expense-eligible account names for a realm.
+
+    Hits QBO once per session per realm. Use the "Refresh accounts" button to
+    force a re-fetch when the chart of accounts changes in QuickBooks.
+    """
+    if not realm_id:
+        return []
+    cache = st.session_state.setdefault(QBO_CATALOG_CACHE_KEY, {})
+    key = ("accounts:expense", realm_id)
+    if key in cache:
+        return cache[key]
+    try:
+        client = QboClient(auth_service)
+        accounts = QboCatalog(client).list_accounts(
+            realm_id, classifications=EXPENSE_ACCOUNT_CLASSIFICATIONS
+        )
+    except Exception as exc:  # noqa: BLE001 - UI must not crash
+        logger.warning("Failed to load QBO accounts for %s: %s", realm_id, exc)
+        st.error(f"Could not load QBO accounts for this company: {exc}")
+        accounts = []
+    cache[key] = accounts
+    return accounts
+
+
+def _render_editable_expense_lines(
+    *,
+    preview: PreviewResult,
+    target_realm: ConnectedRealm,
+    auth_service: QboAuthService,
+) -> None:
+    """Per-line expense-account editor for driver-statement and money-code drafts.
+
+    The dropdown options come from QBO's chart of accounts (Expense, COGS,
+    Other Expense, Other Current Asset, Fixed Asset) for the target company.
+    Edits mutate ``preview.drafts`` in place so the subsequent "Confirm and
+    post" call uses the corrected accounts.
+    """
+    drafts = preview.drafts or []
+    if not drafts:
+        st.caption("No draft rows to edit.")
+        return
+
+    accounts = _qbo_account_options(target_realm.realm_id, auth_service)
+    refresh_col, count_col = st.columns([0.3, 0.7])
+    with refresh_col:
+        if st.button("\U0001F501 Refresh accounts", key="qbo_refresh_accounts"):
+            cache = st.session_state.setdefault(QBO_CATALOG_CACHE_KEY, {})
+            cache.pop(("accounts:expense", target_realm.realm_id), None)
+            st.rerun()
+    with count_col:
+        if accounts:
+            st.caption(
+                f"Loaded {len(accounts)} expense-eligible accounts from {target_realm.company_name}."
+            )
+        else:
+            st.caption("No accounts loaded yet \u2014 click Refresh, or check QBO connection.")
+
+    if not accounts:
+        return
+
+    rows: list[dict[str, Any]] = []
+    for ci, draft in enumerate(drafts):
+        for li, line in enumerate(draft.get("Line") or []):
+            if not isinstance(line, dict):
+                continue
+            detail = line.get("AccountBasedExpenseLineDetail") or {}
+            ref = detail.get("AccountRef") or {}
+            current = str(ref.get("name") or line.get("_tempAccountName") or "").strip()
+            rows.append(
+                {
+                    "_ci": ci,
+                    "_li": li,
+                    "Doc #": draft.get("DocNumber") or "",
+                    "Vendor": draft.get("_tempVendorName") or "",
+                    "Date": draft.get("TxnDate") or "",
+                    "Description": line.get("Description") or "",
+                    "Amount": float(line.get("Amount") or 0.0),
+                    "Expense Account": current,
+                }
+            )
+    if not rows:
+        st.caption("No editable expense-account lines on these drafts.")
+        return
+
+    # Ensure every existing value is in the option list (so the editor doesn't
+    # silently drop unknown account names that came from the source file).
+    option_set = set(accounts)
+    for row in rows:
+        existing = row["Expense Account"]
+        if existing and existing not in option_set:
+            accounts.append(existing)
+            option_set.add(existing)
+
+    edited = st.data_editor(
+        rows,
+        key=f"qbo_edit_lines_{preview.template_type}",
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        column_config={
+            "_ci": None,
+            "_li": None,
+            "Doc #": st.column_config.TextColumn(disabled=True),
+            "Vendor": st.column_config.TextColumn(disabled=True),
+            "Date": st.column_config.TextColumn(disabled=True),
+            "Description": st.column_config.TextColumn(disabled=True),
+            "Amount": st.column_config.NumberColumn(disabled=True, format="$ %.2f"),
+            "Expense Account": st.column_config.SelectboxColumn(
+                "Expense Account",
+                help="Pick the correct QBO account for this line. Applied when you click Confirm and post.",
+                options=accounts,
+                required=True,
+            ),
+        },
+    )
+
+    try:
+        edited_rows = edited.to_dict("records")  # type: ignore[attr-defined]
+    except AttributeError:
+        edited_rows = list(edited or [])
+
+    changed = 0
+    for r in edited_rows:
+        try:
+            ci = int(r.get("_ci"))
+            li = int(r.get("_li"))
+        except (TypeError, ValueError):
+            continue
+        new_account = str(r.get("Expense Account") or "").strip()
+        if not new_account:
+            continue
+        if ci < 0 or ci >= len(drafts):
+            continue
+        draft = drafts[ci]
+        lines = draft.get("Line") or []
+        if li < 0 or li >= len(lines):
+            continue
+        line = lines[li]
+        detail = line.setdefault(
+            "AccountBasedExpenseLineDetail",
+            {"AccountRef": {"name": new_account}},
+        )
+        ref = detail.setdefault("AccountRef", {"name": new_account})
+        old_name = str(ref.get("name") or line.get("_tempAccountName") or "").strip()
+        if new_account != old_name:
+            ref["name"] = new_account
+            ref.pop("value", None)  # force re-resolution at post time
+            line["_tempAccountName"] = new_account
+            changed += 1
+
+    if changed:
+        st.success(f"Updated expense account on {changed} line(s). Click Confirm and post when ready.")
+
+
+# =============================================================================
+# Invoice multi-company routing summary
+# =============================================================================
+
+def _render_invoice_routing_summary(
+    preview: PreviewResult, fallback_realm: ConnectedRealm
+) -> bool:
+    """Show a per-division summary for invoice files.
+
+    Returns True when the file spans more than one resolved realm so the
+    caller can disable the forced single-target post path.
+    """
+    rows = preview.rows or []
+    if not rows:
+        return False
+
+    counts: dict[tuple[str, str], int] = {}
+    unresolved = 0
+    for row in rows:
+        realm_id = str(row.get("Realm ID") or "").strip()
+        division = str(row.get("Division") or "").strip()
+        if not realm_id:
+            unresolved += 1
+            counts[("", division or "(no Division header)")] = (
+                counts.get(("", division or "(no Division header)"), 0) + 1
+            )
+            continue
+        bucket = (realm_id, division or fallback_realm.company_name)
+        counts[bucket] = counts.get(bucket, 0) + 1
+
+    resolved_realms = {realm for (realm, _div), _n in counts.items() if realm}
+    multi_realm = len(resolved_realms) > 1
+
+    with st.expander(
+        f"\U0001F9ED Division routing \u2014 {len(rows)} row(s) across "
+        f"{len(resolved_realms)} resolved compan{'y' if len(resolved_realms) == 1 else 'ies'}",
+        expanded=multi_realm or unresolved > 0,
+    ):
+        table_rows = [
+            {
+                "Division (from file)": division,
+                "Routes to (QBO realm)": realm or "(unresolved \u2014 will use fallback)",
+                "Rows": count,
+            }
+            for (realm, division), count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0][1]))
+        ]
+        st.dataframe(table_rows, hide_index=True, use_container_width=True)
+        if unresolved:
+            st.warning(
+                f"{unresolved} row(s) have no matching Division \u2014 they will post to the "
+                f"fallback company **{fallback_realm.company_name}**. "
+                "If that is wrong, edit the source file's Division column and re-upload."
+            )
+        if multi_realm:
+            st.info(
+                "This file spans multiple QuickBooks companies. Each row will be posted to "
+                "its matched company \u2014 the 'Fallback target company' selector above is "
+                "only used for unresolved rows."
+            )
+    return multi_realm
+
+
+# =============================================================================
+# Parking PK view (Prestig Inc only)
+# =============================================================================
+
+def _render_parking_pk(
+    supabase: SupabaseRestClient,
+    token_repo: QboTokenRepository,
+    auth_service: QboAuthService,
+    email: str,
+) -> None:
+    back_col, title_col = st.columns([0.18, 0.82])
+    with back_col:
+        if st.button("\u2190 Templates", use_container_width=True, key="parking_back"):
+            _go_to("templates")
+            return
+    with title_col:
+        st.title("\U0001F17F\uFE0F Parking PK \u2014 Prestig Inc only")
+
+    st.caption(
+        "Scans posted invoices on **Prestig Inc** for ones that include the "
+        "**Parking** line item and appends 'PK' to their DocNumber. "
+        "Does **not** touch Prestige Transportation Inc or Xpress Trans Inc."
+    )
+
+    qbo_client = QboClient(auth_service)
+    lookups = EntityLookupService(qbo_client)
+    audit = SupabaseAuditLog(
+        supabase,
+        imported_by_email=email,
+        source_file_name="ParkingPK",
+        source_hash="",
+    )
+    service = ParkingPkService(qbo_client, token_repo, lookups, audit)
+
+    prestig_realm_id = service.resolve_prestig_realm()
+    if not prestig_realm_id:
+        st.error(
+            "No connected QuickBooks company normalizes to 'Prestig Inc'. "
+            "Open Settings \u2014 Companies and connect 'Prestig Inc' (note: no 'e' at the end)."
+        )
+        return
+    st.success(f"Resolved Prestig Inc \u2014 realm {prestig_realm_id}")
+
+    today = date.today()
+    default_start = today.replace(day=1)
+    col_start, col_end = st.columns(2)
+    with col_start:
+        start_date = st.date_input("Start date", value=default_start, key="parking_start_date")
+    with col_end:
+        end_date = st.date_input("End date", value=today, key="parking_end_date")
+
+    if st.button("\U0001F50D Scan for Parking invoices", type="primary", key="parking_scan"):
+        try:
+            with st.spinner("Scanning Prestig Inc invoices\u2026"):
+                scan = service.find_matches(start_date.isoformat(), end_date.isoformat())
+        except Exception as exc:  # noqa: BLE001 - user-facing
+            logger.exception("Parking PK scan failed")
+            st.error(f"Scan failed: {exc}")
+            return
+        st.session_state[QBO_PARKING_SCAN_KEY] = scan
+        st.session_state[QBO_PARKING_SELECTION_KEY] = {m.invoice_id for m in scan.matches}
+
+    scan = st.session_state.get(QBO_PARKING_SCAN_KEY)
+    if not isinstance(scan, ParkingScanResult):
+        return
+
+    if not scan.matches:
+        st.info("No invoices found that contain the Parking item and don't already end in 'PK'.")
+        return
+
+    st.markdown(f"**{len(scan.matches)}** invoice(s) eligible for DocNumber update.")
+    selected_ids: set[str] = set(st.session_state.get(QBO_PARKING_SELECTION_KEY) or set())
+    rows = [
+        {
+            "Apply": match.invoice_id in selected_ids,
+            "Doc #": match.doc_number,
+            "Proposed": match.proposed_doc_number,
+            "Customer": match.customer_name,
+            "Date": match.txn_date,
+            "Amount": float(match.amount),
+            "_id": match.invoice_id,
+        }
+        for match in scan.matches
+    ]
+    edited = st.data_editor(
+        rows,
+        key="parking_table",
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        column_config={
+            "_id": None,
+            "Apply": st.column_config.CheckboxColumn("Apply"),
+            "Doc #": st.column_config.TextColumn(disabled=True),
+            "Proposed": st.column_config.TextColumn(disabled=True),
+            "Customer": st.column_config.TextColumn(disabled=True),
+            "Date": st.column_config.TextColumn(disabled=True),
+            "Amount": st.column_config.NumberColumn(disabled=True, format="$ %.2f"),
+        },
+    )
+    try:
+        edited_rows = edited.to_dict("records")  # type: ignore[attr-defined]
+    except AttributeError:
+        edited_rows = list(edited or [])
+    selected_ids = {str(r.get("_id")) for r in edited_rows if r.get("Apply")}
+    st.session_state[QBO_PARKING_SELECTION_KEY] = selected_ids
+
+    st.divider()
+    st.warning(
+        ":warning: This **mutates posted invoices** on Prestig Inc. "
+        "The change cannot be undone from this app \u2014 only by manually editing each "
+        "invoice's DocNumber in QuickBooks."
+    )
+
+    if st.button(
+        f"Apply DocNumber update to {len(selected_ids)} invoice(s)",
+        type="primary",
+        disabled=not selected_ids,
+        key="parking_apply",
+    ):
+        chosen = [m for m in scan.matches if m.invoice_id in selected_ids]
+        try:
+            with st.spinner("Updating invoice DocNumbers\u2026"):
+                start_ts = datetime.now(tz=timezone.utc)
+                result = service.apply_matches(scan.realm_id, chosen)
+                duration_ms = int((datetime.now(tz=timezone.utc) - start_ts).total_seconds() * 1000)
+        except Exception as exc:  # noqa: BLE001 - user-facing
+            logger.exception("Parking PK apply failed")
+            st.error(f"Apply failed: {exc}")
+            return
+
+        st.success(
+            f"Done: updated {result.updated}, skipped {result.skipped}, failed {result.failed}."
+        )
+        if result.errors:
+            with st.expander(f"View {len(result.errors)} error(s)"):
+                for line in result.errors:
+                    st.code(line)
+
+        # Mirror to Google Sheets ImportLog so it shows up next to regular imports.
+        try:
+            sheets_log = GoogleSheetsImportLog()
+            sheets_log.append_summary(
+                user_email=email,
+                action="PARKING_PK",
+                template="Parking PK",
+                company="Prestig Inc",
+                realm_id=scan.realm_id,
+                source_sheet=f"Parking PK {start_date.isoformat()}..{end_date.isoformat()}",
+                source_count=len(chosen),
+                success=result.updated,
+                failed=result.failed,
+                skipped=result.skipped,
+                duration_ms=duration_ms,
+                execution_id="",
+                errors=list(result.errors or []),
+            )
+        except Exception as exc:  # noqa: BLE001 - never break the flow
+            logger.warning("ImportLog (Parking PK) write failed: %s", exc)
+
+        st.session_state.pop(QBO_PARKING_SCAN_KEY, None)
+        st.session_state.pop(QBO_PARKING_SELECTION_KEY, None)

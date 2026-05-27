@@ -93,9 +93,15 @@ Live deploy: <https://driver-application.streamlit.app/>
 ### Related/sibling repositories
 
 - **This repo (`prestige-driver-app`, GitHub: `Emma10200/driver-app`)** — the live deployed app and **the active home of the QBO Importer**. All new QBO work happens here.
-- **`QBO_App`** (sibling folder, separate repo) — the original Tkinter / Google Apps Script prototype that the QBO Importer was ported from. It is **no longer the deployed importer**, but it is kept as a reference because a few features have not been ported yet:
-  - `parking_pk` — Prestig Inc–only flow that appends `PK` to invoice DocNumbers containing the `Parking` line item. Still lives in `QBO_App/src_tkinter/qbo/parking_pk.py`.
-  - The original Apps Script `Controller.gs` defines the legacy `ImportLog` Google Sheet schema (14 columns) that the Streamlit QBO Importer now also writes to — so historic and new imports share one bookmarkable history sheet.
+- **`QBO_App`** (sibling folder, separate repo) — the original Tkinter / Google Apps Script prototype that the QBO Importer was ported from. It is **no longer the deployed importer**, but kept as a reference. The originally-pending `parking_pk` flow has now been ported here as [`qbo/parking_pk.py`](qbo/parking_pk.py) and is reachable from the sidebar under **🔧 Maintenance → 🅿️ Parking PK (Prestig)**. The original Apps Script `Controller.gs` defines the legacy `ImportLog` Google Sheet schema (14 columns) that the Streamlit QBO Importer now also writes to — so historic and new imports share one bookmarkable history sheet.
+
+### QBO Importer features
+
+- **Per-template imports** — Invoices, Driver Statements, Money Codes (see sidebar template picker).
+- **Editable preview** — on Driver Statements and Money Codes, an **✏️ Edit expense account on individual lines** expander loads the target company's chart of accounts (cached per session) and lets you fix mis-categorised lines (e.g. someone picked *Truck — ELD* when they meant *Truck — Trailer*) before posting. Edits mutate the draft so the post call uses the corrected accounts.
+- **Multi-company invoice files** — when an invoice file contains rows from more than one company (the `Division` column resolves to multiple connected realms), each row is routed to its matched company automatically. The "Fallback target company" selector is only used for rows with an unresolved Division. A **🧭 Division routing** expander shows the per-company row breakdown before you confirm.
+- **Parking PK maintenance flow** — Prestig Inc only. Scans a date range, lists invoices that include the `Parking` line item and don't already end in `PK`, lets you pick which ones to update, then sparse-updates each invoice's DocNumber via `POST /invoice?operation=update`. Every attempt is recorded in `qbo_audit_log` (txn_type = `ParkingPk`) and mirrored as a summary row in the Google Sheets ImportLog.
+
 
 ### QBO Importer history sources
 
