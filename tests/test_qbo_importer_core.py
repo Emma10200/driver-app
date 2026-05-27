@@ -5,7 +5,7 @@ from qbo.file_loader import FileLoader
 from qbo.lookups import EntityLookupService
 from qbo.models import ConnectedRealm, PreviewResult
 from qbo.parsers import DriverStatementParser, MoneyCodeParser
-from services.qbo_dashboard import _build_preview, _invoice_customer_refs
+from services.qbo_dashboard import _apply_retry_filter, _build_preview, _friendly_history_reason, _history_display_rows, _invoice_customer_refs
 from services.qbo_auth import qbo_allowed_emails
 
 
@@ -160,3 +160,40 @@ def test_entity_lookup_create_customer_posts_display_name_and_primes_cache():
     assert lookups.create_entity("Customer", "TGR Logistics - PT", "realm-1") == "123"
     assert fake_qbo.calls == [("/customer", "realm-1", {"DisplayName": "TGR Logistics - PT"})]
     assert lookups.resolve_entity("Customer", "TGR Logistics - PT", "realm-1") == "123"
+
+
+def test_history_reason_is_friendly_and_hides_email_column():
+    row = {
+        "created_at": "2026-05-27T10:00:00Z",
+        "imported_by_email": "someone@example.com",
+        "txn_type": "Invoice",
+        "status": "failed",
+        "message": "Customer 'TGR Logistics - PT' not found in QBO.",
+        "doc_number": "158591",
+        "entity_name": "TGR Logistics - PT",
+    }
+
+    assert _friendly_history_reason(row) == "Missing customer in QuickBooks: TGR Logistics - PT. Retry after creating the customer."
+    display = _history_display_rows([row])[0]
+    assert "imported_by_email" not in display
+    assert "someone@example.com" not in str(display)
+    assert display["Reason"].startswith("Missing customer")
+
+
+def test_retry_filter_keeps_only_selected_failed_docs():
+    preview = PreviewResult(
+        template_type="invoices",
+        source_file="invoices.csv",
+        source_hash="abc",
+        count=2,
+        source_count=2,
+        skipped_count=0,
+        rows=[{"Doc #": "100"}, {"Doc #": "200"}],
+        drafts=[{"DocNumber": "100"}, {"DocNumber": "200"}],
+    )
+
+    filtered = _apply_retry_filter(preview, {"doc_numbers": ["200"]})
+
+    assert filtered.count == 1
+    assert filtered.rows == [{"Doc #": "200"}]
+    assert filtered.drafts == [{"DocNumber": "200"}]

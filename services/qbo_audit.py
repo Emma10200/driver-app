@@ -99,7 +99,7 @@ class SupabaseAuditLog:
         return self._client.select(
             "qbo_audit_log",
             select=(
-                "id,created_at,imported_by_email,txn_type,realm_id,division,doc_number,txn_date,"
+                "id,created_at,txn_type,realm_id,division,doc_number,txn_date,"
                 "entity_name,amount,status,qbo_id,message,source_file_name,source_file_hash"
             ),
             order="created_at.desc",

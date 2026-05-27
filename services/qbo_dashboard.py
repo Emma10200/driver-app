@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import importlib.util
+import re
 from collections.abc import Mapping
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -56,6 +57,7 @@ QBO_PARKING_SCAN_KEY = "qbo_parking_scan"
 QBO_PARKING_SELECTION_KEY = "qbo_parking_selected_ids"
 QBO_CATALOG_CACHE_KEY = "qbo_catalog_cache"
 QBO_MISSING_CUSTOMERS_KEY = "qbo_missing_customers"
+QBO_RETRY_FILTER_KEY = "qbo_retry_filter"
 _DATE_USE_ROW = "Use row dates (or most recent Friday)"
 _TEMPLATE_OPTIONS = {
     "invoices": "Invoices",
@@ -406,6 +408,7 @@ def _go_to(view: str, *, template_key: str | None = None) -> None:
         st.session_state.pop(QBO_PREVIEW_KEY, None)
         st.session_state.pop(QBO_UPLOAD_HASH_KEY, None)
         st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
+        st.session_state.pop(QBO_RETRY_FILTER_KEY, None)
     st.rerun()
 
 
@@ -603,6 +606,19 @@ def _render_importer(
                 override_date = "" if selected_date == _DATE_USE_ROW else selected_date
 
             uploaded = st.file_uploader("Source file", type=["csv", "xlsx", "xlsm", "xls"])
+    retry_filter = _active_retry_filter(template_key)
+    if retry_filter:
+        doc_numbers = list(retry_filter.get("doc_numbers") or [])
+        st.info(
+            "Retry mode: upload the original source file "
+            f"`{retry_filter.get('source_file_name') or 'for the failed import'}`. "
+            f"Preview will keep only {len(doc_numbers)} failed doc(s): "
+            + ", ".join(doc_numbers[:8])
+            + ("…" if len(doc_numbers) > 8 else "")
+        )
+        if st.button("Cancel retry mode", key="qbo_cancel_retry_mode"):
+            st.session_state.pop(QBO_RETRY_FILTER_KEY, None)
+            st.rerun()
     if not uploaded:
         st.caption("Choose a file to preview before posting anything to QBO.")
         return
@@ -638,6 +654,7 @@ def _render_importer(
                 logger.exception("QBO preview failed")
                 st.error(f"Preview failed: {exc}")
             else:
+                preview = _apply_retry_filter(preview, retry_filter)
                 st.session_state[QBO_PREVIEW_KEY] = preview
                 st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
                 st.rerun()
@@ -645,6 +662,7 @@ def _render_importer(
         if st.button("Clear", use_container_width=True):
             st.session_state.pop(QBO_PREVIEW_KEY, None)
             st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
+            st.session_state.pop(QBO_RETRY_FILTER_KEY, None)
             st.rerun()
     with post_col:
         post_clicked = st.button(
@@ -862,6 +880,7 @@ def _post_preview_to_qbo(
 
     st.session_state.pop(QBO_PREVIEW_KEY, None)
     st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
+    st.session_state.pop(QBO_RETRY_FILTER_KEY, None)
 
 
 def _invoice_customer_refs(
@@ -1097,6 +1116,59 @@ def _create_missing_customers(
     return created, failed
 
 
+def _active_retry_filter(template_key: str) -> dict[str, Any] | None:
+    retry_filter = st.session_state.get(QBO_RETRY_FILTER_KEY)
+    if not isinstance(retry_filter, dict):
+        return None
+    if retry_filter.get("template_key") != template_key:
+        return None
+    doc_numbers = [str(doc).strip() for doc in retry_filter.get("doc_numbers") or [] if str(doc).strip()]
+    if not doc_numbers:
+        return None
+    retry_filter["doc_numbers"] = doc_numbers
+    return retry_filter
+
+
+def _preview_doc_number(row: dict[str, Any]) -> str:
+    return str(row.get("Doc #") or row.get("Code / Doc #") or row.get("Code") or "").strip()
+
+
+def _apply_retry_filter(preview: PreviewResult, retry_filter: dict[str, Any] | None) -> PreviewResult:
+    if not retry_filter:
+        return preview
+    wanted = {str(doc).strip().lower() for doc in retry_filter.get("doc_numbers") or [] if str(doc).strip()}
+    if not wanted:
+        return preview
+
+    filtered_drafts = [
+        draft for draft in (preview.drafts or []) if str(draft.get("DocNumber") or "").strip().lower() in wanted
+    ]
+    filtered_rows = [row for row in (preview.rows or []) if _preview_doc_number(row).lower() in wanted]
+    found = {str(draft.get("DocNumber") or "").strip().lower() for draft in filtered_drafts}
+    missing = sorted(wanted - found)
+    warnings = list(preview.warnings or [])
+    if missing:
+        warnings.append(
+            "Retry mode: these failed doc number(s) were not found in the uploaded source file: "
+            + ", ".join(missing)
+        )
+    if not filtered_drafts:
+        warnings.append("Retry mode did not find any selected failed docs in this upload. Check that this is the original source file.")
+
+    return PreviewResult(
+        template_type=preview.template_type,
+        source_file=preview.source_file,
+        source_hash=preview.source_hash,
+        count=len(filtered_drafts),
+        source_count=preview.source_count,
+        skipped_count=preview.skipped_count,
+        rows=filtered_rows,
+        errors=list(preview.errors or []),
+        warnings=warnings,
+        drafts=filtered_drafts,
+    )
+
+
 def _build_preview(
     *,
     template_key: str,
@@ -1322,21 +1394,226 @@ def _render_import_stats(stats: Any) -> None:
         st.error(error)
 
 
+def _status_label(status: Any) -> str:
+    value = str(status or "").strip().lower()
+    return {
+        "success": "Posted",
+        "duplicate": "Duplicate",
+        "failed": "Failed",
+    }.get(value, value.title() or "Unknown")
+
+
+def _template_key_for_txn_type(txn_type: Any) -> str:
+    value = str(txn_type or "").strip().lower()
+    if value == "invoice":
+        return "invoices"
+    if value == "check":
+        return "driver_statements"
+    if value in {"moneycode", "money code", "creditcard", "creditcard purchase"}:
+        return "money_codes"
+    return ""
+
+
+def _friendly_history_reason(row: dict[str, Any]) -> str:
+    status = str(row.get("status") or "").strip().lower()
+    message = str(row.get("message") or "").strip()
+    if status == "success":
+        qbo_id = str(row.get("qbo_id") or "").strip()
+        return f"Posted to QuickBooks{f' (QBO ID {qbo_id})' if qbo_id else ''}."
+    if status == "duplicate":
+        return "Skipped because this transaction already exists in QuickBooks."
+    if not message:
+        return "QuickBooks rejected this transaction. Open the row details or retry after reviewing the source file."
+
+    patterns = [
+        (r"Customer '([^']+)' not found", "Missing customer in QuickBooks: {name}. Retry after creating the customer."),
+        (r"Vendor '([^']+)' not found", "Missing vendor in QuickBooks: {name}. Create the vendor, then retry."),
+        (r"Item '([^']+)' not found", "Missing QBO item: {name}. Create or map this item, then retry."),
+        (r"Expense account '([^']+)' not found", "Missing expense account in QuickBooks: {name}. Fix the account name or create it, then retry."),
+        (r"CC account '([^']+)' not found", "Missing credit-card account in QuickBooks: {name}. Fix the CC account mapping, then retry."),
+    ]
+    for pattern, template in patterns:
+        match = re.search(pattern, message, flags=re.IGNORECASE)
+        if match:
+            return template.format(name=match.group(1))
+    lower = message.lower()
+    if "no bank account" in lower:
+        return "No bank account was selected/resolved for this check. Pick the correct bank account and retry."
+    if "duplicate" in lower:
+        return "QuickBooks says this transaction may already exist. Review before retrying."
+    if "http 401" in lower or "authentication" in lower:
+        return "QuickBooks authorization failed. Reconnect the company, then retry."
+    if "http 429" in lower or "rate limit" in lower:
+        return "QuickBooks rate-limited the request. Wait a minute, then retry."
+    if any(token in lower for token in ("http 500", "http 502", "http 503", "http 504")):
+        return "QuickBooks had a temporary server error. Retry is usually safe."
+    if "business validation error" in lower:
+        return "QuickBooks business validation failed. Check required fields/accounts and retry."
+    if "qbo post" in lower and "failed:" in lower:
+        return message.split("failed:", 1)[-1].strip()[:240]
+    return message[:240]
+
+
+def _history_display_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    display: list[dict[str, Any]] = []
+    for row in rows:
+        display.append(
+            {
+                "Created": row.get("created_at") or "",
+                "Status": _status_label(row.get("status")),
+                "Type": row.get("txn_type") or "",
+                "Source file": row.get("source_file_name") or "",
+                "Doc #": row.get("doc_number") or "",
+                "Date": row.get("txn_date") or "",
+                "Customer / Vendor": row.get("entity_name") or "",
+                "Division": row.get("division") or "",
+                "Amount": row.get("amount"),
+                "QBO ID": row.get("qbo_id") or "",
+                "Reason": _friendly_history_reason(row),
+                "Realm ID": row.get("realm_id") or "",
+                "_status_raw": str(row.get("status") or "").strip().lower(),
+                "_source_hash": row.get("source_file_hash") or "",
+                "_template_key": _template_key_for_txn_type(row.get("txn_type")),
+            }
+        )
+    return display
+
+
+def _filtered_history_rows(display_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not display_rows:
+        return []
+    status_options = sorted({str(row.get("Status") or "") for row in display_rows if row.get("Status")})
+    type_options = sorted({str(row.get("Type") or "") for row in display_rows if row.get("Type")})
+    filter_cols = st.columns([0.22, 0.22, 0.26, 0.18, 0.12])
+    with filter_cols[0]:
+        statuses = st.multiselect("Status", status_options, default=status_options, key="qbo_hist_status_filter")
+    with filter_cols[1]:
+        txn_types = st.multiselect("Type", type_options, default=type_options, key="qbo_hist_type_filter")
+    with filter_cols[2]:
+        search = st.text_input("Search doc/customer/source/reason", key="qbo_hist_search")
+    with filter_cols[3]:
+        sort_by = st.selectbox(
+            "Sort",
+            ["Newest first", "Failed first", "Duplicates first", "Source file", "Doc #"],
+            key="qbo_hist_sort",
+        )
+    with filter_cols[4]:
+        failed_only = st.toggle("Failed only", key="qbo_hist_failed_only")
+
+    status_set = set(statuses)
+    type_set = set(txn_types)
+    terms = [part for part in search.lower().split() if part]
+    filtered: list[dict[str, Any]] = []
+    for row in display_rows:
+        if failed_only and row.get("Status") != "Failed":
+            continue
+        if status_set and row.get("Status") not in status_set:
+            continue
+        if type_set and row.get("Type") not in type_set:
+            continue
+        haystack = " ".join(
+            str(row.get(key) or "")
+            for key in ("Source file", "Doc #", "Customer / Vendor", "Division", "Reason", "Realm ID")
+        ).lower()
+        if terms and not all(term in haystack for term in terms):
+            continue
+        filtered.append(row)
+
+    if sort_by == "Failed first":
+        filtered.sort(key=lambda r: (0 if r.get("Status") == "Failed" else 1, str(r.get("Created") or "")), reverse=False)
+    elif sort_by == "Duplicates first":
+        filtered.sort(key=lambda r: (0 if r.get("Status") == "Duplicate" else 1, str(r.get("Created") or "")), reverse=False)
+    elif sort_by == "Source file":
+        filtered.sort(key=lambda r: (str(r.get("Source file") or ""), str(r.get("Created") or "")), reverse=True)
+    elif sort_by == "Doc #":
+        filtered.sort(key=lambda r: str(r.get("Doc #") or ""))
+    else:
+        filtered.sort(key=lambda r: str(r.get("Created") or ""), reverse=True)
+    return filtered
+
+
+def _public_history_columns(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    hidden = {"_status_raw", "_source_hash", "_template_key"}
+    return [{key: value for key, value in row.items() if key not in hidden} for row in rows]
+
+
+def _render_failed_retry_panel(filtered_rows: list[dict[str, Any]]) -> None:
+    failed_rows = [row for row in filtered_rows if row.get("Status") == "Failed" and row.get("Doc #")]
+    if not failed_rows:
+        st.caption("No failed rows in the current filter to retry.")
+        return
+
+    with st.expander("Retry failed rows", expanded=False):
+        st.caption(
+            "Select failed docs, then upload the same source file on the import page. "
+            "The importer will preview only those docs before posting again."
+        )
+        retry_rows = [
+            {
+                "Retry": True,
+                "Type": row.get("Type"),
+                "Source file": row.get("Source file"),
+                "Doc #": row.get("Doc #"),
+                "Customer / Vendor": row.get("Customer / Vendor"),
+                "Reason": row.get("Reason"),
+                "_template_key": row.get("_template_key"),
+                "_source_hash": row.get("_source_hash"),
+            }
+            for row in failed_rows[:200]
+        ]
+        edited = st.data_editor(
+            retry_rows,
+            key="qbo_retry_failed_editor",
+            hide_index=True,
+            use_container_width=True,
+            num_rows="fixed",
+            column_config={
+                "_template_key": None,
+                "_source_hash": None,
+                "Retry": st.column_config.CheckboxColumn("Retry"),
+                "Reason": st.column_config.TextColumn(disabled=True),
+            },
+        )
+        try:
+            edited_rows = edited.to_dict("records")  # type: ignore[attr-defined]
+        except AttributeError:
+            edited_rows = list(edited or [])
+        selected = [row for row in edited_rows if row.get("Retry")]
+        template_keys = {str(row.get("_template_key") or "") for row in selected if row.get("_template_key")}
+        source_files = {str(row.get("Source file") or "") for row in selected}
+        can_retry = bool(selected) and len(template_keys) == 1 and len(source_files) == 1
+        if selected and not can_retry:
+            st.warning("Select failed rows from one import type and one source file at a time.")
+        if st.button("Retry selected failed docs", type="primary", disabled=not can_retry, key="qbo_retry_selected_failed"):
+            template_key = next(iter(template_keys))
+            doc_numbers = sorted({str(row.get("Doc #") or "").strip() for row in selected if str(row.get("Doc #") or "").strip()})
+            st.session_state[QBO_RETRY_FILTER_KEY] = {
+                "template_key": template_key,
+                "doc_numbers": doc_numbers,
+                "source_file_name": next(iter(source_files)) if source_files else "",
+                "source_hash": str((selected[0] or {}).get("_source_hash") or ""),
+            }
+            st.session_state[QBO_VIEW_KEY] = "import"
+            st.session_state[QBO_TEMPLATE_KEY] = template_key
+            st.session_state.pop(QBO_PREVIEW_KEY, None)
+            st.session_state.pop(QBO_UPLOAD_HASH_KEY, None)
+            st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
+            st.rerun()
+
+
 def _render_recent_import_batches(rows: list[dict[str, Any]]) -> None:
     """Summarize transaction-level audit rows into user-friendly import batches."""
     batches: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in rows:
         source_hash = str(row.get("source_file_hash") or "").strip()
         created_at = str(row.get("created_at") or "")
-        user = str(row.get("imported_by_email") or "")
         source_file = str(row.get("source_file_name") or "")
         fallback_bucket = created_at[:16]
-        key = (source_hash or fallback_bucket, user, source_file)
+        key = (source_hash or fallback_bucket, source_file)
         bucket = batches.setdefault(
             key,
             {
                 "Latest": created_at,
-                "User": user,
                 "Source file": source_file,
                 "Hash": source_hash[:12] if source_hash else "",
                 "Types": set(),
@@ -1369,7 +1646,6 @@ def _render_recent_import_batches(rows: list[dict[str, Any]]) -> None:
         summary_rows.append(
             {
                 "Latest": bucket["Latest"],
-                "User": bucket["User"],
                 "Source file": bucket["Source file"],
                 "Types": ", ".join(sorted(bucket["Types"])),
                 "Companies / divisions": ", ".join(sorted(bucket["Companies / divisions"])),
@@ -1384,7 +1660,7 @@ def _render_recent_import_batches(rows: list[dict[str, Any]]) -> None:
         return
 
     st.markdown("**Recent import batches**")
-    st.caption("Use this table to quickly see who imported what. Expand the transaction audit below for row-level details.")
+    st.caption("Use this table to quickly see recent import files and outcomes. Expand the transaction audit below for row-level details.")
     st.dataframe(
         sorted(summary_rows, key=lambda item: str(item.get("Latest") or ""), reverse=True),
         use_container_width=True,
@@ -1403,7 +1679,7 @@ def _render_history(supabase: SupabaseRestClient) -> None:
 
     with live_tab:
         limit = st.slider("Rows", min_value=25, max_value=500, value=100, step=25, key="qbo_hist_live_limit")
-        audit = SupabaseAuditLog(supabase, imported_by_email=_google_user_email())
+        audit = SupabaseAuditLog(supabase)
         try:
             rows = audit.recent(limit=limit)
         except Exception as exc:  # noqa: BLE001 - history should not crash the page
@@ -1414,7 +1690,11 @@ def _render_history(supabase: SupabaseRestClient) -> None:
             else:
                 _render_recent_import_batches(rows)
                 st.markdown("**Transaction-level audit**")
-                st.dataframe(rows, use_container_width=True, hide_index=True)
+                display_rows = _history_display_rows(rows)
+                filtered_rows = _filtered_history_rows(display_rows)
+                st.caption(f"Showing {len(filtered_rows)} of {len(display_rows)} audit row(s).")
+                _render_failed_retry_panel(filtered_rows)
+                st.dataframe(_public_history_columns(filtered_rows), use_container_width=True, hide_index=True)
 
     with legacy_tab:
         legacy_limit = st.slider(
@@ -1437,7 +1717,8 @@ def _render_history(supabase: SupabaseRestClient) -> None:
             )
             st.info(f"Legacy ImportLog is unavailable: {reason}")
             return
-        st.dataframe(legacy_rows, use_container_width=True, hide_index=True)
+        legacy_display = [{key: value for key, value in row.items() if key.lower() != "user"} for row in legacy_rows]
+        st.dataframe(legacy_display, use_container_width=True, hide_index=True)
 
 
 
