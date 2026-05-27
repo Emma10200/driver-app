@@ -100,6 +100,16 @@ def admin_dashboard_requested() -> bool:
     return _truthy(_query_param_value("dashboard"))
 
 
+def qbo_importer_requested() -> bool:
+    """True when the URL carries ``?qbo=1`` for the accounting importer."""
+    return _truthy(_query_param_value("qbo"))
+
+
+def qbo_oauth_callback_requested() -> bool:
+    """True when Intuit redirects back to the Streamlit app after QBO OAuth."""
+    return _truthy(_query_param_value("qbo_oauth_callback")) or bool(_query_param_value("code"))
+
+
 def admin_tools_enabled() -> bool:
     if not admin_tools_requested():
         return False
