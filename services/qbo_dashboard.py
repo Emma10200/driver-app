@@ -250,6 +250,71 @@ def _realm_name_for_id(realms: list[ConnectedRealm], realm_id: str) -> str:
     return ""
 
 
+def _render_qbo_upload_styles() -> None:
+    """Make the QBO file uploader read as an intentional upload target."""
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stFileUploader"] {
+            background: linear-gradient(135deg, #eef6ff 0%, #f8fbff 55%, #ffffff 100%);
+            border: 1px solid rgba(37, 99, 235, 0.24);
+            border-radius: 16px;
+            padding: 1rem 1.15rem 1.15rem;
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+        }
+        div[data-testid="stFileUploader"] label p {
+            color: #0f2f57;
+            font-size: 1rem;
+            font-weight: 750;
+        }
+        div[data-testid="stFileUploaderDropzone"] {
+            background: rgba(255, 255, 255, 0.82);
+            border: 2px dashed rgba(37, 99, 235, 0.5);
+            border-radius: 14px;
+            min-height: 4.5rem;
+            transition: border-color 120ms ease, background 120ms ease, box-shadow 120ms ease;
+        }
+        div[data-testid="stFileUploaderDropzone"]:hover {
+            background: #ffffff;
+            border-color: #2563eb;
+            box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.12);
+        }
+        div[data-testid="stFileUploaderDropzone"] button,
+        div[data-testid="stFileUploader"] button[kind="secondary"],
+        div[data-testid="stFileUploader"] button[data-testid="baseButton-secondary"] {
+            background: linear-gradient(135deg, #2563eb 0%, #0ea5e9 100%);
+            border: 1px solid rgba(37, 99, 235, 0.78);
+            border-radius: 10px;
+            color: #ffffff;
+            font-weight: 700;
+            box-shadow: 0 6px 16px rgba(37, 99, 235, 0.26);
+        }
+        div[data-testid="stFileUploaderDropzone"] button:hover,
+        div[data-testid="stFileUploader"] button[kind="secondary"]:hover,
+        div[data-testid="stFileUploader"] button[data-testid="baseButton-secondary"]:hover {
+            background: linear-gradient(135deg, #1d4ed8 0%, #0284c7 100%);
+            border-color: #1d4ed8;
+            color: #ffffff;
+        }
+        div[data-testid="stFileUploader"] button[title*="Remove"],
+        div[data-testid="stFileUploader"] button[title*="Delete"],
+        div[data-testid="stFileUploader"] button[aria-label*="Remove"],
+        div[data-testid="stFileUploader"] button[aria-label*="Delete"] {
+            background: transparent;
+            border: 0;
+            box-shadow: none;
+            color: #64748b;
+        }
+        div[data-testid="stFileUploaderDropzone"] small,
+        div[data-testid="stFileUploaderDropzone"] [data-testid="stMarkdownContainer"] p {
+            color: #475569;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _render_login() -> None:
     st.title("🔒 QBO Importer")
     st.caption("Accounting-only access. Sign in with an approved Google account.")
@@ -501,6 +566,8 @@ def _render_importer(
             "Open \u2699\ufe0f Settings \u2014 Companies in the sidebar."
         )
         return
+
+    _render_qbo_upload_styles()
 
     options = _realm_options(realms)
     bank_account_name = ""
