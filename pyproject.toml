@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.11"
 dependencies = [
+    "Authlib>=1.3.2",
     "fpdf2>=2.8.7",
     "google-auth>=2.29.0",
     "gspread>=6.0.0",
