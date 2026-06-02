@@ -1651,8 +1651,8 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
 
     st.info(
         "Driver statement preview is editable, but changes only apply when you click **Confirm changes**. "
-        "Edit cells or uncheck **Post?** to skip rows — nothing is locked in until you confirm. "
-        "Use **Uncheck all** to clear every Post? box, then re-check just the rows you want to post. "
+        "Edit cells freely, or use the left checkbox column to multi-select rows and press **Delete** "
+        "(or right-click → Delete row) to drop them — nothing is locked in until you confirm. "
         "Use **Discard changes** to undo everything you just did."
     )
     notice = _driver_edit_notice(preview.source_hash)
@@ -1670,21 +1670,16 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
 
     reset_counter = int(st.session_state.get(QBO_DRIVER_RESET_KEY, 0) or 0)
     editor_key = f"qbo_full_preview_editor_{preview.source_hash}_{reset_counter}"
-    hidden_columns = {"_draft_index": None, "_line_index": None}
+    hidden_columns = {"_draft_index": None, "_line_index": None, "Post?": None}
     hidden_columns.update({key: None for key in _DRIVER_PREVIEW_ORIGINAL_KEYS})
     edited = st.data_editor(
         rows,
         key=editor_key,
         hide_index=True,
         use_container_width=True,
-        num_rows="fixed",
+        num_rows="dynamic",
         column_config={
             **hidden_columns,
-            "Post?": st.column_config.CheckboxColumn(
-                "Post?",
-                help="Keep checked to post this row. Uncheck to remove it from this import.",
-                required=True,
-            ),
             "QBO Txn Type": st.column_config.TextColumn(disabled=True),
             "Doc #": st.column_config.TextColumn("Doc #", help="Check number / document number to post."),
             "Txn Date": st.column_config.TextColumn("Txn Date", help="Check date, usually YYYY-MM-DD."),
@@ -1711,7 +1706,7 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
     pending_total = int(pending.get("fields") or 0) + int(pending.get("removed") or 0)
     _set_driver_pending(preview.source_hash, pending if pending_total else None)
 
-    confirm_col, discard_col, uncheck_col, status_col = st.columns([0.20, 0.20, 0.18, 0.42])
+    confirm_col, discard_col, status_col = st.columns([0.22, 0.22, 0.56])
     with confirm_col:
         confirm_clicked = st.button(
             "✅ Confirm changes",
@@ -1727,14 +1722,7 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
             disabled=pending_total == 0,
             use_container_width=True,
             key=f"qbo_discard_driver_edits_{preview.source_hash}",
-            help="Undo every edit/uncheck/delete since the last confirm. Original rows come back.",
-        )
-    with uncheck_col:
-        uncheck_all_clicked = st.button(
-            "☐ Uncheck all",
-            use_container_width=True,
-            key=f"qbo_uncheck_all_driver_{preview.source_hash}",
-            help="Clear every Post? box. Re-check only the rows you want, then click Confirm changes.",
+            help="Undo every edit/delete since the last confirm. Original rows come back.",
         )
     with status_col:
         if pending_total:
@@ -1750,11 +1738,6 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
             )
         else:
             st.caption("No pending changes. Posting will use the rows shown above.")
-
-    if uncheck_all_clicked:
-        _set_driver_uncheck_all(preview.source_hash, True)
-        st.session_state[QBO_DRIVER_RESET_KEY] = reset_counter + 1
-        st.rerun()
 
     if discard_clicked:
         st.session_state[QBO_DRIVER_RESET_KEY] = reset_counter + 1
