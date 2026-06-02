@@ -465,12 +465,50 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
     }
     _set_driver_selected_refs(preview.source_hash, active_selected_refs)
 
-    edited_records: list[dict[str, Any]] = []
+    editor_key = f"qbo_full_preview_editor_{preview.source_hash}_{reset_counter}"
+    editor_seed: list[dict[str, Any]] = []
     for row in rows:
-        record = dict(row)
+        seed_row = dict(row)
+        ref = _driver_statement_row_ref(seed_row)
+        seed_row["Post?"] = ref in active_selected_refs if ref is not None else False
+        editor_seed.append(seed_row)
+
+    hidden_columns: dict[str, None] = {
+        "Post?": None,
+        "_draft_index": None,
+        "_line_index": None,
+    }
+    hidden_columns.update({key: None for key in _DRIVER_PREVIEW_ORIGINAL_KEYS})
+    st.caption("✏️ Double-click any editable cell below to change Line Amount, Expense Account, or Line Description. Edits stay pending until you click **Confirm changes**.")
+    edited = st.data_editor(
+        editor_seed,
+        key=editor_key,
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        column_config={
+            **hidden_columns,
+            "QBO Txn Type": st.column_config.TextColumn(disabled=True),
+            "Doc #": st.column_config.TextColumn(disabled=True),
+            "Txn Date": st.column_config.TextColumn(disabled=True),
+            "Payment Type": st.column_config.TextColumn(disabled=True),
+            "Vendor": st.column_config.TextColumn(disabled=True),
+            "Division": st.column_config.TextColumn(disabled=True),
+            "Realm ID": st.column_config.TextColumn(disabled=True),
+            "Bank Account": st.column_config.TextColumn(disabled=True),
+            "Bank Account ID": st.column_config.TextColumn(disabled=True),
+            "Check Total": st.column_config.NumberColumn(disabled=True, format="$ %.2f"),
+            "Line #": st.column_config.NumberColumn(disabled=True),
+            "Line Amount": st.column_config.NumberColumn("Line Amount", format="$ %.2f"),
+            "Expense Account": st.column_config.TextColumn("Expense Account"),
+            "Line Description": st.column_config.TextColumn("Line Description", width="large"),
+            "Detail Type": st.column_config.TextColumn(disabled=True),
+        },
+    )
+    edited_records = _editor_records(edited)
+    for record in edited_records:
         ref = _driver_statement_row_ref(record)
         record["Post?"] = ref in active_selected_refs if ref is not None else False
-        edited_records.append(record)
 
     pending = _pending_driver_statement_changes(preview, edited_records)
     pending_total = int(pending.get("fields") or 0) + int(pending.get("removed") or 0)
