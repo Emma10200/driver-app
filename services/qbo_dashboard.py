@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import importlib.util
 import re
@@ -59,6 +60,8 @@ QBO_CATALOG_CACHE_KEY = "qbo_catalog_cache"
 QBO_MISSING_CUSTOMERS_KEY = "qbo_missing_customers"
 QBO_RETRY_FILTER_KEY = "qbo_retry_filter"
 QBO_DRIVER_EDIT_NOTICE_KEY = "qbo_driver_preview_edit_notice"
+QBO_DRIVER_PENDING_KEY = "qbo_driver_preview_pending"
+QBO_DRIVER_RESET_KEY = "qbo_driver_preview_reset_counter"
 _DATE_USE_ROW = "Use row dates (or most recent Friday)"
 _DRIVER_PREVIEW_ORIGINAL_KEYS = (
     "_original_doc_number",
@@ -671,12 +674,15 @@ def _render_importer(
         st.session_state.pop(QBO_PREVIEW_KEY, None)
         st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
         st.session_state.pop(QBO_DRIVER_EDIT_NOTICE_KEY, None)
+        st.session_state.pop(QBO_DRIVER_PENDING_KEY, None)
+        st.session_state.pop(QBO_DRIVER_RESET_KEY, None)
         st.session_state[QBO_UPLOAD_HASH_KEY] = upload_hash
 
     preview = st.session_state.get(QBO_PREVIEW_KEY)
     preview_ready = isinstance(preview, PreviewResult)
     has_pending_customer_prompt = isinstance(st.session_state.get(QBO_MISSING_CUSTOMERS_KEY), dict)
-    post_disabled = not preview_ready or bool(preview.errors) or not bool(preview.drafts) or has_pending_customer_prompt
+    has_pending_driver_edits = bool(_driver_pending_for(preview))
+    post_disabled = not preview_ready or bool(preview.errors) or not bool(preview.drafts) or has_pending_customer_prompt or has_pending_driver_edits
     if template_key != "invoices" and selected_realm is None:
         post_disabled = True
 
@@ -707,6 +713,8 @@ def _render_importer(
             st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
             st.session_state.pop(QBO_RETRY_FILTER_KEY, None)
             st.session_state.pop(QBO_DRIVER_EDIT_NOTICE_KEY, None)
+            st.session_state.pop(QBO_DRIVER_PENDING_KEY, None)
+            st.session_state.pop(QBO_DRIVER_RESET_KEY, None)
             st.rerun()
     with post_col:
         post_clicked = st.button(
@@ -719,6 +727,8 @@ def _render_importer(
     with hint_col:
         if template_key == "invoices":
             st.caption("Ready to post: customers are checked first; missing customers can be created before posting.")
+        elif has_pending_driver_edits:
+            st.caption("Lock in pending preview edits below before posting.")
         else:
             st.caption("Ready to post after preview review.")
 
@@ -1628,12 +1638,13 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
     rows = _driver_statement_preview_rows_from_drafts(preview.drafts or [], include_edit_keys=True)
     if not rows:
         st.dataframe(preview.rows, use_container_width=True, hide_index=True)
+        _set_driver_pending(preview.source_hash, None)
         return
 
     st.info(
-        "Driver statement preview is editable. Change the cells below, then click **Post to QBO**. "
-        "To skip lines/checks, uncheck **Post?** or delete rows from the table. "
-        "For example, change `Statement Deductions:ELD New` to `ELD New` in **Expense Account** before posting."
+        "Driver statement preview is editable, but changes only apply when you click **Confirm changes**. "
+        "Edit cells, uncheck **Post?**, or delete rows freely — nothing is locked in until you confirm. "
+        "Use **Discard changes** to undo everything you just did."
     )
     notice = _driver_edit_notice(preview.source_hash)
     if notice:
@@ -1643,20 +1654,18 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
         if int(notice.get("removed") or 0):
             parts.append(f"{notice.get('removed')} row(s) removed")
         st.success(
-            "✅ Preview edits applied — "
+            "✅ Last confirmed edit — "
             f"{', '.join(parts) or 'changes saved'} at {notice.get('time', '')}. "
-            "The refreshed rows below are exactly what will post to QBO."
+            "The rows below are exactly what will post to QBO."
         )
-    else:
-        st.caption(
-            "Tip: after you edit, uncheck Post?, or delete a row, the preview refreshes and shows a green confirmation. "
-            "New rows added here are ignored; upload/edit the source file if you need to add lines."
-        )
+
+    reset_counter = int(st.session_state.get(QBO_DRIVER_RESET_KEY, 0) or 0)
+    editor_key = f"qbo_full_preview_editor_{preview.source_hash}_{reset_counter}"
     hidden_columns = {"_draft_index": None, "_line_index": None}
     hidden_columns.update({key: None for key in _DRIVER_PREVIEW_ORIGINAL_KEYS})
     edited = st.data_editor(
         rows,
-        key=f"qbo_full_preview_editor_{preview.source_hash}",
+        key=editor_key,
         hide_index=True,
         use_container_width=True,
         num_rows="dynamic",
@@ -1664,7 +1673,7 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
             **hidden_columns,
             "Post?": st.column_config.CheckboxColumn(
                 "Post?",
-                help="Keep checked to post this row. Uncheck or delete the row to remove it from this import.",
+                help="Keep checked to post this row. Uncheck (or delete the row) to remove it from this import.",
                 required=True,
             ),
             "QBO Txn Type": st.column_config.TextColumn(disabled=True),
@@ -1687,10 +1696,93 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
             "Detail Type": st.column_config.TextColumn(disabled=True),
         },
     )
-    result = _apply_driver_statement_preview_edits(preview, _editor_records(edited))
-    if result.get("fields") or result.get("removed"):
-        _remember_driver_edit_notice(preview.source_hash, result)
+
+    edited_records = _editor_records(edited)
+    pending = _pending_driver_statement_changes(preview, edited_records)
+    pending_total = int(pending.get("fields") or 0) + int(pending.get("removed") or 0)
+    _set_driver_pending(preview.source_hash, pending if pending_total else None)
+
+    confirm_col, discard_col, status_col = st.columns([0.22, 0.22, 0.56])
+    with confirm_col:
+        confirm_clicked = st.button(
+            "✅ Confirm changes",
+            type="primary",
+            disabled=pending_total == 0,
+            use_container_width=True,
+            key=f"qbo_confirm_driver_edits_{preview.source_hash}",
+            help="Apply your pending edits/deletions to the post payload.",
+        )
+    with discard_col:
+        discard_clicked = st.button(
+            "↩️ Discard changes",
+            disabled=pending_total == 0,
+            use_container_width=True,
+            key=f"qbo_discard_driver_edits_{preview.source_hash}",
+            help="Undo every edit/uncheck/delete since the last confirm. Original rows come back.",
+        )
+    with status_col:
+        if pending_total:
+            pieces = []
+            if pending.get("fields"):
+                pieces.append(f"{pending['fields']} field change(s)")
+            if pending.get("removed"):
+                pieces.append(f"{pending['removed']} row(s) to remove")
+            st.warning(
+                "Pending: "
+                + ", ".join(pieces)
+                + ". Click **Confirm changes** to lock them in, or **Discard changes** to undo."
+            )
+        else:
+            st.caption("No pending changes. Posting will use the rows shown above.")
+
+    if discard_clicked:
+        st.session_state[QBO_DRIVER_RESET_KEY] = reset_counter + 1
+        _set_driver_pending(preview.source_hash, None)
         st.rerun()
+
+    if confirm_clicked:
+        result = _apply_driver_statement_preview_edits(preview, edited_records)
+        if result.get("fields") or result.get("removed"):
+            _remember_driver_edit_notice(preview.source_hash, result)
+        st.session_state[QBO_DRIVER_RESET_KEY] = reset_counter + 1
+        _set_driver_pending(preview.source_hash, None)
+        st.rerun()
+
+
+def _pending_driver_statement_changes(
+    preview: PreviewResult, edited_rows: list[dict[str, Any]]
+) -> dict[str, int]:
+    """Return field/row change counts without mutating the actual preview."""
+    snapshot = copy.deepcopy(preview)
+    return _apply_driver_statement_preview_edits(snapshot, edited_rows)
+
+
+def _set_driver_pending(source_hash: str, pending: dict[str, int] | None) -> None:
+    store = st.session_state.setdefault(QBO_DRIVER_PENDING_KEY, {})
+    if not isinstance(store, dict):
+        store = {}
+        st.session_state[QBO_DRIVER_PENDING_KEY] = store
+    if pending:
+        store[source_hash] = {
+            "fields": int(pending.get("fields") or 0),
+            "removed": int(pending.get("removed") or 0),
+        }
+    else:
+        store.pop(source_hash, None)
+
+
+def _driver_pending_for(preview: Any) -> dict[str, int] | None:
+    if not isinstance(preview, PreviewResult) or preview.template_type != "driver_statements":
+        return None
+    store = st.session_state.get(QBO_DRIVER_PENDING_KEY)
+    if not isinstance(store, dict):
+        return None
+    pending = store.get(preview.source_hash)
+    if not isinstance(pending, dict):
+        return None
+    if int(pending.get("fields") or 0) + int(pending.get("removed") or 0) == 0:
+        return None
+    return pending
 
 
 def _driver_edit_notice(source_hash: str) -> dict[str, Any] | None:
