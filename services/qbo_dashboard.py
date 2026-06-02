@@ -1772,9 +1772,9 @@ def _render_driver_statement_aggrid(
     grid_rows = [{"Post": "", **row} for row in rows]
     display_df = pd.DataFrame(grid_rows)
     selected_refs = _driver_selected_refs(source_hash)
-    pre_selected_rows = None
-    pre_select_all_rows = selected_refs is None
-    if selected_refs is not None:
+    if selected_refs is None:
+        pre_selected_rows = list(range(len(rows)))
+    else:
         pre_selected_rows = [
             index for index, row in enumerate(rows) if _driver_statement_row_ref(row) in selected_refs
         ]
@@ -1792,7 +1792,6 @@ def _render_driver_statement_aggrid(
         use_checkbox=True,
         header_checkbox=True,
         header_checkbox_filtered_only=False,
-        pre_select_all_rows=pre_select_all_rows,
         pre_selected_rows=pre_selected_rows,
         rowMultiSelectWithClick=True,
         suppressRowDeselection=False,
@@ -1818,12 +1817,13 @@ def _render_driver_statement_aggrid(
         gridOptions=grid_options_builder.build(),
         height=min(720, max(280, 36 * (len(rows) + 2))),
         data_return_mode=DataReturnMode.AS_INPUT,
-        update_mode=GridUpdateMode.MANUAL,
+        update_mode=GridUpdateMode.MODEL_CHANGED,
         allow_unsafe_jscode=False,
         theme="streamlit",
         key=editor_key,
         show_search=False,
         show_download_button=False,
+        use_json_serialization=True,
     )
 
     raw_selected_rows = getattr(grid_response, "selected_rows", None)
