@@ -5,7 +5,15 @@ from qbo.file_loader import FileLoader
 from qbo.lookups import EntityLookupService
 from qbo.models import ConnectedRealm, PreviewResult
 from qbo.parsers import DriverStatementParser, MoneyCodeParser
-from services.qbo_dashboard import _apply_retry_filter, _build_preview, _friendly_history_reason, _history_display_rows, _invoice_customer_refs
+from services.qbo_dashboard import (
+    _apply_driver_statement_preview_edits,
+    _apply_retry_filter,
+    _build_preview,
+    _driver_statement_preview_rows_from_drafts,
+    _friendly_history_reason,
+    _history_display_rows,
+    _invoice_customer_refs,
+)
 from services.qbo_auth import qbo_allowed_emails
 
 
@@ -46,6 +54,193 @@ def test_driver_statement_parser_groups_lines_by_check():
     assert check["_tempVendorName"] == "Driver A"
     assert len(check["Line"]) == 2
     assert check["AccountRef"]["name"] == "Main Checking"
+
+
+def test_driver_statement_preview_edits_update_posted_draft():
+    preview = PreviewResult(
+        template_type="driver_statements",
+        source_file="driver.csv",
+        source_hash="abc",
+        count=1,
+        source_count=1,
+        skipped_count=0,
+        drafts=[
+            {
+                "DocNumber": "CHK-1",
+                "TxnDate": "2026-05-22",
+                "PaymentType": "Check",
+                "AccountRef": {"name": "Old Checking", "value": "123"},
+                "Line": [
+                    {
+                        "Amount": 20.0,
+                        "DetailType": "AccountBasedExpenseLineDetail",
+                        "Description": "Original description",
+                        "AccountBasedExpenseLineDetail": {
+                            "AccountRef": {"name": "Statement Deductions:ELD New", "value": "999"}
+                        },
+                        "_tempAccountName": "Statement Deductions:ELD New",
+                    }
+                ],
+                "_tempVendorName": "Driver A",
+                "_realmId": "realm-1",
+                "_division": "Prestig Inc",
+                "_bankAccountId": "123",
+            }
+        ],
+    )
+    preview.rows = _driver_statement_preview_rows_from_drafts(preview.drafts)
+    edited_rows = _driver_statement_preview_rows_from_drafts(preview.drafts, include_edit_keys=True)
+    edited_rows[0]["Expense Account"] = "ELD New"
+    edited_rows[0]["Line Description"] = "Clean ELD description"
+    edited_rows[0]["Line Amount"] = "12.50"
+
+    result = _apply_driver_statement_preview_edits(preview, edited_rows)
+
+    assert result["fields"] >= 3
+    assert result["removed"] == 0
+    line = preview.drafts[0]["Line"][0]
+    account_ref = line["AccountBasedExpenseLineDetail"]["AccountRef"]
+    assert line["_tempAccountName"] == "ELD New"
+    assert account_ref == {"name": "ELD New"}
+    assert line["Description"] == "Clean ELD description"
+    assert line["Amount"] == 12.5
+    assert preview.rows[0]["Expense Account"] == "ELD New"
+    assert preview.rows[0]["Check Total"] == 12.5
+
+
+def test_driver_statement_preview_multi_line_doc_edit_does_not_revert():
+    preview = PreviewResult(
+        template_type="driver_statements",
+        source_file="driver.csv",
+        source_hash="abc",
+        count=1,
+        source_count=2,
+        skipped_count=0,
+        drafts=[
+            {
+                "DocNumber": "CHK-1",
+                "TxnDate": "2026-05-22",
+                "PaymentType": "Check",
+                "AccountRef": {"name": "Checking"},
+                "Line": [
+                    {
+                        "Amount": 20.0,
+                        "DetailType": "AccountBasedExpenseLineDetail",
+                        "Description": "Line 1",
+                        "AccountBasedExpenseLineDetail": {"AccountRef": {"name": "Fuel"}},
+                        "_tempAccountName": "Fuel",
+                    },
+                    {
+                        "Amount": 10.0,
+                        "DetailType": "AccountBasedExpenseLineDetail",
+                        "Description": "Line 2",
+                        "AccountBasedExpenseLineDetail": {"AccountRef": {"name": "Tolls"}},
+                        "_tempAccountName": "Tolls",
+                    },
+                ],
+                "_tempVendorName": "Driver A",
+                "_realmId": "realm-1",
+                "_division": "Prestig Inc",
+            }
+        ],
+    )
+    edited_rows = _driver_statement_preview_rows_from_drafts(preview.drafts, include_edit_keys=True)
+    edited_rows[0]["Vendor"] = "Driver B"
+
+    _apply_driver_statement_preview_edits(preview, edited_rows)
+
+    assert preview.drafts[0]["_tempVendorName"] == "Driver B"
+    assert preview.rows[0]["Vendor"] == "Driver B"
+    assert preview.rows[1]["Vendor"] == "Driver B"
+
+
+def test_driver_statement_preview_deleted_rows_are_removed_from_posted_drafts():
+    preview = PreviewResult(
+        template_type="driver_statements",
+        source_file="driver.csv",
+        source_hash="abc",
+        count=5,
+        source_count=5,
+        skipped_count=0,
+        drafts=[
+            {
+                "DocNumber": f"CHK-{idx}",
+                "TxnDate": "2026-05-22",
+                "PaymentType": "Check",
+                "AccountRef": {"name": "Checking"},
+                "Line": [
+                    {
+                        "Amount": float(idx),
+                        "DetailType": "AccountBasedExpenseLineDetail",
+                        "Description": f"Line {idx}",
+                        "AccountBasedExpenseLineDetail": {"AccountRef": {"name": "Fuel"}},
+                        "_tempAccountName": "Fuel",
+                    }
+                ],
+                "_tempVendorName": f"Driver {idx}",
+                "_realmId": "realm-1",
+                "_division": "Prestig Inc",
+            }
+            for idx in range(1, 6)
+        ],
+    )
+    edited_rows = _driver_statement_preview_rows_from_drafts(preview.drafts, include_edit_keys=True)
+    edited_rows = [row for row in edited_rows if row["Doc #"] == "CHK-3"]
+
+    result = _apply_driver_statement_preview_edits(preview, edited_rows)
+
+    assert result == {"fields": 0, "removed": 4}
+    assert [draft["DocNumber"] for draft in preview.drafts] == ["CHK-3"]
+    assert preview.count == 1
+    assert preview.rows[0]["Doc #"] == "CHK-3"
+
+
+def test_driver_statement_preview_unchecked_post_row_is_removed():
+    preview = PreviewResult(
+        template_type="driver_statements",
+        source_file="driver.csv",
+        source_hash="abc",
+        count=1,
+        source_count=2,
+        skipped_count=0,
+        drafts=[
+            {
+                "DocNumber": "CHK-1",
+                "TxnDate": "2026-05-22",
+                "PaymentType": "Check",
+                "AccountRef": {"name": "Checking"},
+                "Line": [
+                    {
+                        "Amount": 20.0,
+                        "DetailType": "AccountBasedExpenseLineDetail",
+                        "Description": "Keep",
+                        "AccountBasedExpenseLineDetail": {"AccountRef": {"name": "Fuel"}},
+                        "_tempAccountName": "Fuel",
+                    },
+                    {
+                        "Amount": 10.0,
+                        "DetailType": "AccountBasedExpenseLineDetail",
+                        "Description": "Remove",
+                        "AccountBasedExpenseLineDetail": {"AccountRef": {"name": "Tolls"}},
+                        "_tempAccountName": "Tolls",
+                    },
+                ],
+                "_tempVendorName": "Driver A",
+                "_realmId": "realm-1",
+                "_division": "Prestig Inc",
+            }
+        ],
+    )
+    edited_rows = _driver_statement_preview_rows_from_drafts(preview.drafts, include_edit_keys=True)
+    edited_rows[1]["Post?"] = False
+
+    result = _apply_driver_statement_preview_edits(preview, edited_rows)
+
+    assert result == {"fields": 0, "removed": 1}
+    assert len(preview.drafts) == 1
+    assert len(preview.drafts[0]["Line"]) == 1
+    assert preview.drafts[0]["Line"][0]["Description"] == "Keep"
+    assert preview.rows[0]["Check Total"] == 20.0
 
 
 def test_money_code_parser_only_imports_fuel_card_efs_rows():
