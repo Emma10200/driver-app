@@ -10,7 +10,16 @@ from typing import Any
 
 import pandas as pd
 import streamlit as st
-from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder, GridUpdateMode
+try:
+    from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder, GridUpdateMode
+except ImportError:  # pragma: no cover - deployed fallback when optional component is unavailable
+    AgGrid = None
+    DataReturnMode = None
+    GridOptionsBuilder = None
+    GridUpdateMode = None
+    _AGGRID_AVAILABLE = False
+else:
+    _AGGRID_AVAILABLE = True
 try:
     from streamlit.errors import StreamlitAuthError as _StreamlitAuthError
 except ImportError:  # pragma: no cover - older Streamlit fallback
@@ -1676,7 +1685,14 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
 
     reset_counter = int(st.session_state.get(QBO_DRIVER_RESET_KEY, 0) or 0)
     editor_key = f"qbo_full_preview_editor_{preview.source_hash}_{reset_counter}"
-    edited_records = _render_driver_statement_aggrid(rows, preview.source_hash, editor_key)
+    if _AGGRID_AVAILABLE:
+        edited_records = _render_driver_statement_aggrid(rows, preview.source_hash, editor_key)
+    else:
+        st.warning(
+            "Enhanced multi-select grid is not installed in this environment, so this preview is using "
+            "the safe fallback editor. **Uncheck all**, individual Post? checkboxes, Confirm, and Discard still work."
+        )
+        edited_records = _render_driver_statement_streamlit_fallback(rows, preview.source_hash, editor_key)
     pending = _pending_driver_statement_changes(preview, edited_records)
     pending_total = int(pending.get("fields") or 0) + int(pending.get("removed") or 0)
     _set_driver_pending(preview.source_hash, pending if pending_total else None)
@@ -1747,6 +1763,9 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
 def _render_driver_statement_aggrid(
     rows: list[dict[str, Any]], source_hash: str, editor_key: str
 ) -> list[dict[str, Any]]:
+    if not _AGGRID_AVAILABLE or AgGrid is None or DataReturnMode is None or GridOptionsBuilder is None or GridUpdateMode is None:
+        return _render_driver_statement_streamlit_fallback(rows, source_hash, editor_key)
+
     grid_rows = [{"Post": "", **row} for row in rows]
     display_df = pd.DataFrame(grid_rows)
     selected_refs = _driver_selected_refs(source_hash)
@@ -1828,6 +1847,62 @@ def _render_driver_statement_aggrid(
         normalized_row["Post?"] = ref in active_selected_refs if ref is not None else False
         normalized_records.append(normalized_row)
     return normalized_records
+
+
+def _render_driver_statement_streamlit_fallback(
+    rows: list[dict[str, Any]], source_hash: str, editor_key: str
+) -> list[dict[str, Any]]:
+    selected_refs = _driver_selected_refs(source_hash)
+    fallback_rows: list[dict[str, Any]] = []
+    for row in rows:
+        fallback_row = dict(row)
+        ref = _driver_statement_row_ref(fallback_row)
+        fallback_row["Post?"] = True if selected_refs is None else ref in selected_refs
+        fallback_rows.append(fallback_row)
+
+    hidden_columns = {"_draft_index": None, "_line_index": None}
+    hidden_columns.update({key: None for key in _DRIVER_PREVIEW_ORIGINAL_KEYS})
+    edited = st.data_editor(
+        fallback_rows,
+        key=f"{editor_key}_fallback",
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        column_config={
+            **hidden_columns,
+            "Post?": st.column_config.CheckboxColumn(
+                "Post?",
+                help="Keep checked to post this row. Uncheck to remove it from this import.",
+                required=True,
+            ),
+            "QBO Txn Type": st.column_config.TextColumn(disabled=True),
+            "Doc #": st.column_config.TextColumn("Doc #", help="Check number / document number to post."),
+            "Txn Date": st.column_config.TextColumn("Txn Date", help="Check date, usually YYYY-MM-DD."),
+            "Payment Type": st.column_config.TextColumn(disabled=True),
+            "Vendor": st.column_config.TextColumn("Vendor", help="Vendor name to look up in QuickBooks."),
+            "Division": st.column_config.TextColumn("Division"),
+            "Realm ID": st.column_config.TextColumn("Realm ID"),
+            "Bank Account": st.column_config.TextColumn("Bank Account"),
+            "Bank Account ID": st.column_config.TextColumn("Bank Account ID"),
+            "Check Total": st.column_config.NumberColumn(disabled=True, format="$ %.2f"),
+            "Line #": st.column_config.NumberColumn(disabled=True),
+            "Line Amount": st.column_config.NumberColumn("Line Amount", format="$ %.2f"),
+            "Expense Account": st.column_config.TextColumn(
+                "Expense Account",
+                help="Type the exact QBO account name to use for this line.",
+            ),
+            "Line Description": st.column_config.TextColumn("Line Description", width="large"),
+            "Detail Type": st.column_config.TextColumn(disabled=True),
+        },
+    )
+    edited_records = _editor_records(edited)
+    active_selected_refs = {
+        ref
+        for row in edited_records
+        if _driver_statement_row_should_post(row) and (ref := _driver_statement_row_ref(row)) is not None
+    }
+    _set_driver_selected_refs(source_hash, active_selected_refs)
+    return edited_records
 
 
 def _pending_driver_statement_changes(
