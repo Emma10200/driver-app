@@ -62,6 +62,7 @@ QBO_RETRY_FILTER_KEY = "qbo_retry_filter"
 QBO_DRIVER_EDIT_NOTICE_KEY = "qbo_driver_preview_edit_notice"
 QBO_DRIVER_PENDING_KEY = "qbo_driver_preview_pending"
 QBO_DRIVER_RESET_KEY = "qbo_driver_preview_reset_counter"
+QBO_DRIVER_UNCHECK_KEY = "qbo_driver_preview_uncheck_all"
 _DATE_USE_ROW = "Use row dates (or most recent Friday)"
 _DRIVER_PREVIEW_ORIGINAL_KEYS = (
     "_original_doc_number",
@@ -676,6 +677,7 @@ def _render_importer(
         st.session_state.pop(QBO_DRIVER_EDIT_NOTICE_KEY, None)
         st.session_state.pop(QBO_DRIVER_PENDING_KEY, None)
         st.session_state.pop(QBO_DRIVER_RESET_KEY, None)
+        st.session_state.pop(QBO_DRIVER_UNCHECK_KEY, None)
         st.session_state[QBO_UPLOAD_HASH_KEY] = upload_hash
 
     preview = st.session_state.get(QBO_PREVIEW_KEY)
@@ -715,6 +717,7 @@ def _render_importer(
             st.session_state.pop(QBO_DRIVER_EDIT_NOTICE_KEY, None)
             st.session_state.pop(QBO_DRIVER_PENDING_KEY, None)
             st.session_state.pop(QBO_DRIVER_RESET_KEY, None)
+            st.session_state.pop(QBO_DRIVER_UNCHECK_KEY, None)
             st.rerun()
     with post_col:
         post_clicked = st.button(
@@ -1639,11 +1642,17 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
     if not rows:
         st.dataframe(preview.rows, use_container_width=True, hide_index=True)
         _set_driver_pending(preview.source_hash, None)
+        _set_driver_uncheck_all(preview.source_hash, False)
         return
+
+    if _driver_uncheck_all_pending(preview.source_hash):
+        for row in rows:
+            row["Post?"] = False
 
     st.info(
         "Driver statement preview is editable, but changes only apply when you click **Confirm changes**. "
         "Edit cells, uncheck **Post?**, or delete rows freely — nothing is locked in until you confirm. "
+        "Use **Uncheck all** to clear every Post? box, then re-check just the rows you want to post. "
         "Use **Discard changes** to undo everything you just did."
     )
     notice = _driver_edit_notice(preview.source_hash)
@@ -1702,7 +1711,7 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
     pending_total = int(pending.get("fields") or 0) + int(pending.get("removed") or 0)
     _set_driver_pending(preview.source_hash, pending if pending_total else None)
 
-    confirm_col, discard_col, status_col = st.columns([0.22, 0.22, 0.56])
+    confirm_col, discard_col, uncheck_col, status_col = st.columns([0.20, 0.20, 0.18, 0.42])
     with confirm_col:
         confirm_clicked = st.button(
             "✅ Confirm changes",
@@ -1720,6 +1729,13 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
             key=f"qbo_discard_driver_edits_{preview.source_hash}",
             help="Undo every edit/uncheck/delete since the last confirm. Original rows come back.",
         )
+    with uncheck_col:
+        uncheck_all_clicked = st.button(
+            "☐ Uncheck all",
+            use_container_width=True,
+            key=f"qbo_uncheck_all_driver_{preview.source_hash}",
+            help="Clear every Post? box. Re-check only the rows you want, then click Confirm changes.",
+        )
     with status_col:
         if pending_total:
             pieces = []
@@ -1735,9 +1751,15 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
         else:
             st.caption("No pending changes. Posting will use the rows shown above.")
 
+    if uncheck_all_clicked:
+        _set_driver_uncheck_all(preview.source_hash, True)
+        st.session_state[QBO_DRIVER_RESET_KEY] = reset_counter + 1
+        st.rerun()
+
     if discard_clicked:
         st.session_state[QBO_DRIVER_RESET_KEY] = reset_counter + 1
         _set_driver_pending(preview.source_hash, None)
+        _set_driver_uncheck_all(preview.source_hash, False)
         st.rerun()
 
     if confirm_clicked:
@@ -1746,6 +1768,7 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
             _remember_driver_edit_notice(preview.source_hash, result)
         st.session_state[QBO_DRIVER_RESET_KEY] = reset_counter + 1
         _set_driver_pending(preview.source_hash, None)
+        _set_driver_uncheck_all(preview.source_hash, False)
         st.rerun()
 
 
@@ -1783,6 +1806,22 @@ def _driver_pending_for(preview: Any) -> dict[str, int] | None:
     if int(pending.get("fields") or 0) + int(pending.get("removed") or 0) == 0:
         return None
     return pending
+
+
+def _driver_uncheck_all_pending(source_hash: str) -> bool:
+    store = st.session_state.get(QBO_DRIVER_UNCHECK_KEY)
+    return isinstance(store, dict) and bool(store.get(source_hash))
+
+
+def _set_driver_uncheck_all(source_hash: str, value: bool) -> None:
+    store = st.session_state.setdefault(QBO_DRIVER_UNCHECK_KEY, {})
+    if not isinstance(store, dict):
+        store = {}
+        st.session_state[QBO_DRIVER_UNCHECK_KEY] = store
+    if value:
+        store[source_hash] = True
+    else:
+        store.pop(source_hash, None)
 
 
 def _driver_edit_notice(source_hash: str) -> dict[str, Any] | None:
