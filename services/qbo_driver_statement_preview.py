@@ -383,20 +383,7 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
         )
 
     reset_counter = int(st.session_state.get(QBO_DRIVER_RESET_KEY, 0) or 0)
-    selection_state_key = f"qbo_driver_select_{preview.source_hash}_{reset_counter}"
-
-    prior_refs = _driver_selected_refs(preview.source_hash)
-    if selection_state_key not in st.session_state:
-        if prior_refs is None:
-            initial_indices = list(range(len(rows)))
-        else:
-            initial_indices = [
-                index for index, row in enumerate(rows)
-                if _driver_statement_row_ref(row) in prior_refs
-            ]
-        st.session_state[selection_state_key] = {
-            "selection": {"rows": initial_indices, "columns": []}
-        }
+    editor_key = f"qbo_full_preview_editor_{preview.source_hash}_{reset_counter}"
 
     confirm_col, discard_col, uncheck_col, _info_col = st.columns([0.18, 0.18, 0.16, 0.48])
     with confirm_col:
@@ -405,14 +392,14 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
             type="primary",
             use_container_width=True,
             key=f"qbo_confirm_driver_edits_{preview.source_hash}_{reset_counter}",
-            help="Apply your selection to the QBO post payload.",
+            help="Apply checked rows and cell edits to the QBO post payload.",
         )
     with discard_col:
         discard_clicked = st.button(
             "↩️ Discard changes",
             use_container_width=True,
             key=f"qbo_discard_driver_edits_{preview.source_hash}_{reset_counter}",
-            help="Revert selection to the last confirmed state.",
+            help="Revert row checks and cell edits to the last confirmed state.",
         )
     with uncheck_col:
         uncheck_all_clicked = st.button(
@@ -424,91 +411,17 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
 
     with st.popover("ℹ️ How this preview works", use_container_width=True):
         st.markdown(
-            "- Rows are pre-selected; **Shift+Click** to select/clear a range.\n"
-            "- **Confirm changes** applies your selection; **Discard changes** reverts to the last confirm.\n"
-            "- **Uncheck all** clears the selection so nothing posts until you re-select."
+            "- Keep **Post?** checked for rows you want to send; uncheck rows to skip/remove them from this import.\n"
+            "- Double-click editable cells in this same grid to change line amounts, expense accounts, descriptions, or routing fields.\n"
+            "- **Confirm changes** applies the checked rows and edits; **Discard changes** reverts to the last confirm.\n"
+            "- **Uncheck all** clears every Post? checkbox so nothing posts until you re-check rows."
         )
 
-    selection_event = st.dataframe(
+    edited_records = _render_driver_statement_streamlit_fallback(
         rows,
-        key=selection_state_key,
-        on_select="rerun",
-        selection_mode="multi-row",
-        use_container_width=True,
-        hide_index=True,
-        column_order=[
-            col for col in (
-                "QBO Txn Type", "Doc #", "Txn Date", "Payment Type", "Vendor",
-                "Division", "Realm ID", "Bank Account", "Bank Account ID",
-                "Check Total", "Line #", "Line Amount", "Expense Account",
-                "Line Description", "Detail Type",
-            )
-            if any(col in row for row in rows)
-        ],
+        preview.source_hash,
+        editor_key,
     )
-
-    selected_indices: list[int] = []
-    selection = getattr(selection_event, "selection", None)
-    if selection is not None:
-        raw_rows = getattr(selection, "rows", None)
-        if raw_rows is None and isinstance(selection, Mapping):
-            raw_rows = selection.get("rows")
-        for value in raw_rows or []:
-            try:
-                selected_indices.append(int(value))
-            except (TypeError, ValueError):
-                continue
-    selected_index_set = set(selected_indices)
-    active_selected_refs = {
-        ref for index, row in enumerate(rows)
-        if index in selected_index_set and (ref := _driver_statement_row_ref(row)) is not None
-    }
-    _set_driver_selected_refs(preview.source_hash, active_selected_refs)
-
-    editor_key = f"qbo_full_preview_editor_{preview.source_hash}_{reset_counter}"
-    editor_seed: list[dict[str, Any]] = []
-    for row in rows:
-        seed_row = dict(row)
-        ref = _driver_statement_row_ref(seed_row)
-        seed_row["Post?"] = ref in active_selected_refs if ref is not None else False
-        editor_seed.append(seed_row)
-
-    hidden_columns: dict[str, None] = {
-        "Post?": None,
-        "_draft_index": None,
-        "_line_index": None,
-    }
-    hidden_columns.update({key: None for key in _DRIVER_PREVIEW_ORIGINAL_KEYS})
-    st.caption("✏️ Double-click any editable cell below to change Line Amount, Expense Account, or Line Description. Edits stay pending until you click **Confirm changes**.")
-    edited = st.data_editor(
-        editor_seed,
-        key=editor_key,
-        hide_index=True,
-        use_container_width=True,
-        num_rows="fixed",
-        column_config={
-            **hidden_columns,
-            "QBO Txn Type": st.column_config.TextColumn(disabled=True),
-            "Doc #": st.column_config.TextColumn(disabled=True),
-            "Txn Date": st.column_config.TextColumn(disabled=True),
-            "Payment Type": st.column_config.TextColumn(disabled=True),
-            "Vendor": st.column_config.TextColumn(disabled=True),
-            "Division": st.column_config.TextColumn(disabled=True),
-            "Realm ID": st.column_config.TextColumn(disabled=True),
-            "Bank Account": st.column_config.TextColumn(disabled=True),
-            "Bank Account ID": st.column_config.TextColumn(disabled=True),
-            "Check Total": st.column_config.NumberColumn(disabled=True, format="$ %.2f"),
-            "Line #": st.column_config.NumberColumn(disabled=True),
-            "Line Amount": st.column_config.NumberColumn("Line Amount", format="$ %.2f"),
-            "Expense Account": st.column_config.TextColumn("Expense Account"),
-            "Line Description": st.column_config.TextColumn("Line Description", width="large"),
-            "Detail Type": st.column_config.TextColumn(disabled=True),
-        },
-    )
-    edited_records = _editor_records(edited)
-    for record in edited_records:
-        ref = _driver_statement_row_ref(record)
-        record["Post?"] = ref in active_selected_refs if ref is not None else False
 
     pending = _pending_driver_statement_changes(preview, edited_records)
     pending_total = int(pending.get("fields") or 0) + int(pending.get("removed") or 0)
