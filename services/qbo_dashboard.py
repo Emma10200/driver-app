@@ -1664,12 +1664,6 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
         _set_driver_selected_refs(preview.source_hash, set())
         _set_driver_uncheck_all(preview.source_hash, False)
 
-    st.info(
-        "Driver statement preview is editable, but changes only apply when you click **Confirm changes**. "
-        "Rows are checked to post by default. Uncheck rows you want to skip, use the **Post?** header checkbox "
-        "or **Uncheck all** for bulk changes, then confirm when it looks right. "
-        "Use **Discard changes** to undo everything you just did."
-    )
     notice = _driver_edit_notice(preview.source_hash)
     if notice:
         parts = []
@@ -1685,32 +1679,23 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
 
     reset_counter = int(st.session_state.get(QBO_DRIVER_RESET_KEY, 0) or 0)
     editor_key = f"qbo_full_preview_editor_{preview.source_hash}_{reset_counter}"
-    if _AGGRID_AVAILABLE:
-        edited_records = _render_driver_statement_aggrid(rows, preview.source_hash, editor_key)
-    else:
-        st.warning(
-            "Enhanced multi-select grid is not installed in this environment, so this preview is using "
-            "the safe fallback editor. **Uncheck all**, individual Post? checkboxes, Confirm, and Discard still work."
-        )
-        edited_records = _render_driver_statement_streamlit_fallback(rows, preview.source_hash, editor_key)
-    pending = _pending_driver_statement_changes(preview, edited_records)
-    pending_total = int(pending.get("fields") or 0) + int(pending.get("removed") or 0)
-    _set_driver_pending(preview.source_hash, pending if pending_total else None)
 
-    confirm_col, discard_col, uncheck_col, status_col = st.columns([0.20, 0.20, 0.18, 0.42])
+    prior_pending = _driver_pending_for(preview) or {}
+    prior_total = int(prior_pending.get("fields") or 0) + int(prior_pending.get("removed") or 0)
+    confirm_col, discard_col, uncheck_col, info_col = st.columns([0.18, 0.18, 0.16, 0.48])
     with confirm_col:
         confirm_clicked = st.button(
             "✅ Confirm changes",
             type="primary",
-            disabled=pending_total == 0,
+            disabled=prior_total == 0,
             use_container_width=True,
             key=f"qbo_confirm_driver_edits_{preview.source_hash}",
-            help="Apply your pending edits/deletions to the post payload.",
+            help="Apply your pending edits/unchecks to the post payload.",
         )
     with discard_col:
         discard_clicked = st.button(
             "↩️ Discard changes",
-            disabled=pending_total == 0,
+            disabled=prior_total == 0,
             use_container_width=True,
             key=f"qbo_discard_driver_edits_{preview.source_hash}",
             help="Undo every edit/uncheck since the last confirm. Original rows come back.",
@@ -1722,20 +1707,38 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
             key=f"qbo_uncheck_all_driver_{preview.source_hash}",
             help="Clear every Post? checkbox. Re-check only the rows you want, then confirm.",
         )
-    with status_col:
-        if pending_total:
-            pieces = []
-            if pending.get("fields"):
-                pieces.append(f"{pending['fields']} field change(s)")
-            if pending.get("removed"):
-                pieces.append(f"{pending['removed']} row(s) to remove")
-            st.warning(
-                "Pending: "
-                + ", ".join(pieces)
-                + ". Click **Confirm changes** to lock them in, or **Discard changes** to undo."
+    with info_col:
+        with st.popover("ℹ️ How this preview works", use_container_width=True):
+            st.markdown(
+                "- Rows are **checked to post** by default; uncheck the ones you want to skip.\n"
+                "- Use the **Post? header checkbox** or **☐ Uncheck all** for bulk changes.\n"
+                "- **Shift+Click** a checkbox to toggle a range of rows.\n"
+                "- Edits/unchecks only apply after **Confirm changes**; **Discard changes** wipes pending edits."
+                + ("" if _AGGRID_AVAILABLE else
+                   "\n- _Enhanced grid not installed here — using safe fallback editor; same buttons still work._")
             )
-        else:
-            st.caption("No pending changes. Posting will use the rows shown above.")
+
+    if _AGGRID_AVAILABLE:
+        edited_records = _render_driver_statement_aggrid(rows, preview.source_hash, editor_key)
+    else:
+        edited_records = _render_driver_statement_streamlit_fallback(rows, preview.source_hash, editor_key)
+    pending = _pending_driver_statement_changes(preview, edited_records)
+    pending_total = int(pending.get("fields") or 0) + int(pending.get("removed") or 0)
+    _set_driver_pending(preview.source_hash, pending if pending_total else None)
+
+    if pending_total:
+        pieces = []
+        if pending.get("fields"):
+            pieces.append(f"{pending['fields']} field change(s)")
+        if pending.get("removed"):
+            pieces.append(f"{pending['removed']} row(s) to remove")
+        st.caption(
+            "Pending: "
+            + ", ".join(pieces)
+            + ". Click **Confirm changes** above to lock them in, or **Discard changes** to undo."
+        )
+    else:
+        st.caption("No pending changes. Posting will use the rows shown above.")
 
     if uncheck_all_clicked:
         _set_driver_uncheck_all(preview.source_hash, True)
@@ -1815,7 +1818,7 @@ def _render_driver_statement_aggrid(
         gridOptions=grid_options_builder.build(),
         height=min(720, max(280, 36 * (len(rows) + 2))),
         data_return_mode=DataReturnMode.AS_INPUT,
-        update_mode=GridUpdateMode.VALUE_CHANGED | GridUpdateMode.SELECTION_CHANGED,
+        update_mode=GridUpdateMode.MANUAL,
         allow_unsafe_jscode=False,
         theme="streamlit",
         key=editor_key,
