@@ -14,11 +14,12 @@ class InvoiceParser:
         if not data or len(data) < 2:
             raise ValueError("Invoice sheet is empty or missing headers.")
 
-        header_map = self._build_header_map(data[0] or [])
+        header_index = self._detect_header_row(data)
+        header_map = self._build_header_map(data[header_index] or [])
         rows: list[dict[str, Any]] = []
         skipped_rows: list[dict[str, Any]] = []
 
-        for row_number, row in enumerate(data[1:], start=2):
+        for row_number, row in enumerate(data[header_index + 1:], start=header_index + 2):
             if self._is_blank_row(row):
                 continue
 
@@ -30,6 +31,25 @@ class InvoiceParser:
                 rows.append(parsed_row)
 
         return {"rows": rows, "skipped_rows": skipped_rows, "header_map": header_map}
+
+    @classmethod
+    def _detect_header_row(cls, data: list[list[Any]]) -> int:
+        # Scan the first 20 rows for the first row that exposes every required header
+        # alias. This lets ERP exports include title/preamble rows above the headers.
+        scan_limit = min(len(data) - 1, 20)
+        for index in range(scan_limit + 1):
+            row = data[index] or []
+            normalized = {normalize_key(value) for value in row}
+            if all(any(alias in normalized for alias in aliases) for aliases in cls._REQUIRED_ALIASES):
+                return index
+        return 0
+
+    _REQUIRED_ALIASES: tuple[tuple[str, ...], ...] = (
+        ("loadnumber", "loadnum", "invoicenumber", "invoice", "docnumber", "docnum", "invoiceno", "invoicenbr"),
+        ("customer", "customername", "billto", "billtocustomer", "billtoname", "client", "clientname"),
+        ("date", "invoicedate", "txndate", "transactiondate", "invdate"),
+        ("amount", "invoiceamount", "totalamount", "total", "invoicetotal", "invtotal", "grandtotal"),
+    )
 
     def build_qbo_drafts(self, parsed: dict[str, Any]) -> list[dict[str, Any]]:
         return [self._build_qbo_invoice_payload(row) for row in parsed.get("rows") or []]
@@ -127,15 +147,15 @@ class InvoiceParser:
     def _build_header_map(self, headers: Iterable[Any]) -> dict[str, int]:
         normalized = {normalize_key(value): index for index, value in enumerate(headers) if normalize_key(value)}
         return {
-            "doc_number": self._find_header(normalized, ["loadnumber", "loadnum", "invoicenumber", "invoice", "docnumber", "docnum"], True, "Invoice number / load number"),
-            "qb_exported": self._find_header(normalized, ["qbexported", "exportedtoqbo", "quickbooksexported"], False, "QB Exported"),
-            "division": self._find_header(normalized, ["division", "company", "qbcompany", "quickbookscompany", "ownercompany"], False, "Division / company"),
-            "customer": self._find_header(normalized, ["customer", "customername", "billto", "billtocustomer"], True, "Customer"),
-            "broker_load_number": self._find_header(normalized, ["brokerloadnumber", "brokerloadnum", "brokerload", "ponumber", "pnumber", "po", "brokerloadno"], False, "Broker load / PO number"),
-            "txn_date": self._find_header(normalized, ["date", "invoicedate", "txndate", "transactiondate"], True, "Invoice date"),
-            "amount": self._find_header(normalized, ["amount", "invoiceamount", "totalamount", "total"], True, "Amount"),
-            "invoice_last_sent_date": self._find_header(normalized, ["invoicelastsentdate", "lastsentdate", "lastsent"], False, "Invoice Last Sent Date"),
-            "invoice_remarks": self._find_header(normalized, ["invoiceremarks", "remarks", "notes", "comment"], False, "Invoice Remarks"),
+            "doc_number": self._find_header(normalized, ["loadnumber", "loadnum", "invoicenumber", "invoice", "docnumber", "docnum", "invoiceno", "invoicenbr"], True, "Invoice number / load number"),
+            "qb_exported": self._find_header(normalized, ["qbexported", "exportedtoqbo", "quickbooksexported", "exported"], False, "QB Exported"),
+            "division": self._find_header(normalized, ["division", "company", "qbcompany", "quickbookscompany", "ownercompany", "branch", "office"], False, "Division / company"),
+            "customer": self._find_header(normalized, ["customer", "customername", "billto", "billtocustomer", "billtoname", "client", "clientname"], True, "Customer"),
+            "broker_load_number": self._find_header(normalized, ["brokerloadnumber", "brokerloadnum", "brokerload", "ponumber", "pnumber", "po", "brokerloadno", "ponum", "purchaseorder"], False, "Broker load / PO number"),
+            "txn_date": self._find_header(normalized, ["date", "invoicedate", "txndate", "transactiondate", "invdate"], True, "Invoice date"),
+            "amount": self._find_header(normalized, ["amount", "invoiceamount", "totalamount", "total", "invoicetotal", "invtotal", "grandtotal"], True, "Amount"),
+            "invoice_last_sent_date": self._find_header(normalized, ["invoicelastsentdate", "lastsentdate", "lastsent", "sentdate"], False, "Invoice Last Sent Date"),
+            "invoice_remarks": self._find_header(normalized, ["invoiceremarks", "remarks", "notes", "comment", "comments", "memo"], False, "Invoice Remarks"),
             "status": self._find_header(normalized, ["status", "invoicestatus"], False, "Status"),
         }
 
