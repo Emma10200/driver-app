@@ -1651,7 +1651,7 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
 
     st.info(
         "Driver statement preview is editable, but changes only apply when you click **Confirm changes**. "
-        "Edit cells, uncheck **Post?**, or delete rows freely — nothing is locked in until you confirm. "
+        "Edit cells or uncheck **Post?** to skip rows — nothing is locked in until you confirm. "
         "Use **Uncheck all** to clear every Post? box, then re-check just the rows you want to post. "
         "Use **Discard changes** to undo everything you just did."
     )
@@ -1677,12 +1677,12 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
         key=editor_key,
         hide_index=True,
         use_container_width=True,
-        num_rows="dynamic",
+        num_rows="fixed",
         column_config={
             **hidden_columns,
             "Post?": st.column_config.CheckboxColumn(
                 "Post?",
-                help="Keep checked to post this row. Uncheck (or delete the row) to remove it from this import.",
+                help="Keep checked to post this row. Uncheck to remove it from this import.",
                 required=True,
             ),
             "QBO Txn Type": st.column_config.TextColumn(disabled=True),
