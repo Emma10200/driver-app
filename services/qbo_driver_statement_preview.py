@@ -9,12 +9,11 @@ import pandas as pd
 import streamlit as st
 
 try:
-    from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder, GridUpdateMode
+    from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder
 except ImportError:  # pragma: no cover - deployed fallback when optional component is unavailable
     AgGrid = None
     DataReturnMode = None
     GridOptionsBuilder = None
-    GridUpdateMode = None
     _AGGRID_AVAILABLE = False
 else:
     _AGGRID_AVAILABLE = True
@@ -386,48 +385,45 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
     reset_counter = int(st.session_state.get(QBO_DRIVER_RESET_KEY, 0) or 0)
     editor_key = f"qbo_full_preview_editor_{preview.source_hash}_{reset_counter}"
 
-    prior_pending = _driver_pending_for(preview) or {}
-    prior_total = int(prior_pending.get("fields") or 0) + int(prior_pending.get("removed") or 0)
-    confirm_col, discard_col, uncheck_col, info_col = st.columns([0.18, 0.18, 0.16, 0.48])
-    with confirm_col:
-        confirm_clicked = st.button(
-            "✅ Confirm changes",
-            type="primary",
-            disabled=prior_total == 0,
-            use_container_width=True,
-            key=f"qbo_confirm_driver_edits_{preview.source_hash}",
-            help="Apply your pending edits/unchecks to the post payload.",
+    with st.popover("ℹ️ How this preview works", use_container_width=True):
+        st.markdown(
+            "- Rows are **checked to post** by default; uncheck the ones you want to skip.\n"
+            "- **Shift+Click** a row/checkbox to select or clear a whole range.\n"
+            "- Use the **Post? header checkbox** or **☐ Uncheck all** for all rows at once.\n"
+            "- Grid clicks/edits stay on-screen and do **not** sync until you submit below.\n"
+            "- **Confirm changes** applies the current grid state; **Discard changes** reloads the original rows."
+            + ("" if _AGGRID_AVAILABLE else
+               "\n- _Enhanced grid not installed here — using safe fallback editor; same buttons still work._")
         )
-    with discard_col:
-        discard_clicked = st.button(
-            "↩️ Discard changes",
-            disabled=prior_total == 0,
-            use_container_width=True,
-            key=f"qbo_discard_driver_edits_{preview.source_hash}",
-            help="Undo every edit/uncheck since the last confirm. Original rows come back.",
-        )
-    with uncheck_col:
-        uncheck_all_clicked = st.button(
-            "☐ Uncheck all",
-            use_container_width=True,
-            key=f"qbo_uncheck_all_driver_{preview.source_hash}",
-            help="Clear every Post? checkbox. Re-check only the rows you want, then confirm.",
-        )
-    with info_col:
-        with st.popover("ℹ️ How this preview works", use_container_width=True):
-            st.markdown(
-                "- Rows are **checked to post** by default; uncheck the ones you want to skip.\n"
-                "- **Shift+Click** a row/checkbox to select or clear a whole range.\n"
-                "- Use the **Post? header checkbox** or **☐ Uncheck all** for all rows at once.\n"
-                "- Edits/unchecks only apply after **Confirm changes**; **Discard changes** wipes pending edits."
-                + ("" if _AGGRID_AVAILABLE else
-                   "\n- _Enhanced grid not installed here — using safe fallback editor; same buttons still work._")
-            )
 
-    if _AGGRID_AVAILABLE:
-        edited_records = _render_driver_statement_aggrid(rows, preview.source_hash, editor_key)
-    else:
-        edited_records = _render_driver_statement_streamlit_fallback(rows, preview.source_hash, editor_key)
+    with st.form(f"qbo_driver_preview_form_{preview.source_hash}_{reset_counter}"):
+        confirm_col, discard_col, uncheck_col, info_col = st.columns([0.18, 0.18, 0.16, 0.48])
+        with confirm_col:
+            confirm_clicked = st.form_submit_button(
+                "✅ Confirm changes",
+                type="primary",
+                use_container_width=True,
+                help="Sync this grid state and apply your edits/unchecks to the post payload.",
+            )
+        with discard_col:
+            discard_clicked = st.form_submit_button(
+                "↩️ Discard changes",
+                use_container_width=True,
+                help="Reload the last confirmed rows and clear unsaved grid edits/unchecks.",
+            )
+        with uncheck_col:
+            uncheck_all_clicked = st.form_submit_button(
+                "☐ Uncheck all",
+                use_container_width=True,
+                help="Clear every Post? checkbox. Re-check only the rows you want, then confirm.",
+            )
+        with info_col:
+            st.caption("Selections and edits are batched here — no refresh until one of these buttons is submitted.")
+
+        if _AGGRID_AVAILABLE:
+            edited_records = _render_driver_statement_aggrid(rows, preview.source_hash, editor_key)
+        else:
+            edited_records = _render_driver_statement_streamlit_fallback(rows, preview.source_hash, editor_key)
     pending = _pending_driver_statement_changes(preview, edited_records)
     pending_total = int(pending.get("fields") or 0) + int(pending.get("removed") or 0)
     _set_driver_pending(preview.source_hash, pending if pending_total else None)
@@ -472,7 +468,7 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
 def _render_driver_statement_aggrid(
     rows: list[dict[str, Any]], source_hash: str, editor_key: str
 ) -> list[dict[str, Any]]:
-    if not _AGGRID_AVAILABLE or AgGrid is None or DataReturnMode is None or GridOptionsBuilder is None or GridUpdateMode is None:
+    if not _AGGRID_AVAILABLE or AgGrid is None or DataReturnMode is None or GridOptionsBuilder is None:
         return _render_driver_statement_streamlit_fallback(rows, source_hash, editor_key)
 
     grid_rows = [{"Post": "", **row} for row in rows]
@@ -529,7 +525,7 @@ def _render_driver_statement_aggrid(
         gridOptions=grid_options_builder.build(),
         height=min(720, max(280, 36 * (len(rows) + 2))),
         data_return_mode=DataReturnMode.AS_INPUT,
-        update_mode=GridUpdateMode.MODEL_CHANGED,
+        update_on=["cellValueChanged", "selectionChanged", "filterChanged", "sortChanged"],
         allow_unsafe_jscode=False,
         theme="streamlit",
         key=editor_key,
