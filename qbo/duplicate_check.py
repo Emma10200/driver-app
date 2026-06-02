@@ -152,19 +152,20 @@ class DuplicateChecker:
             return False
         safe_doc = doc_number.replace("'", "\\'")
         safe_tx = txn_date.replace("'", "\\'")
-        safe_vendor = vendor_id.replace("'", "\\'")
-        sql = "SELECT Id FROM Purchase WHERE PaymentType = 'Check' " + f"AND DocNumber = '{safe_doc}' AND TxnDate = '{safe_tx}' AND EntityRef = '{safe_vendor}'"
+        # EntityRef is not queryable in WHERE; filter vendor client-side.
+        sql = "SELECT * FROM Purchase WHERE PaymentType = 'Check' " + f"AND DocNumber = '{safe_doc}' AND TxnDate = '{safe_tx}'"
         rows = (self._qbo.query(sql, realm_id=realm_id).get("QueryResponse") or {}).get("Purchase") or []
-        return bool(rows)
+        return any((row.get("EntityRef") or {}).get("value") == vendor_id for row in rows)
 
     def money_code_exists(self, doc_number: str, txn_date: str, vendor_id: str, realm_id: str, amount: Any, memo: Any, expense_account: Any) -> bool:
         if not (doc_number and txn_date and vendor_id and realm_id):
             return False
         safe_doc = doc_number.replace("'", "\\'")
         safe_tx = txn_date.replace("'", "\\'")
-        safe_vendor = vendor_id.replace("'", "\\'")
-        sql = "SELECT * FROM Purchase WHERE PaymentType = 'CreditCard' " + f"AND DocNumber = '{safe_doc}' AND TxnDate = '{safe_tx}' AND EntityRef = '{safe_vendor}'"
+        # EntityRef is not queryable in WHERE; filter vendor client-side.
+        sql = "SELECT * FROM Purchase WHERE PaymentType = 'CreditCard' " + f"AND DocNumber = '{safe_doc}' AND TxnDate = '{safe_tx}'"
         rows = (self._qbo.query(sql, realm_id=realm_id).get("QueryResponse") or {}).get("Purchase") or []
+        rows = [row for row in rows if (row.get("EntityRef") or {}).get("value") == vendor_id]
         target_amount = _norm_amount(amount)
         target_memo = _norm_text(memo)
         target_account = _norm_text(expense_account)
