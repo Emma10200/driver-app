@@ -8,7 +8,9 @@ from collections.abc import Mapping
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+import pandas as pd
 import streamlit as st
+from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder, GridUpdateMode
 try:
     from streamlit.errors import StreamlitAuthError as _StreamlitAuthError
 except ImportError:  # pragma: no cover - older Streamlit fallback
@@ -63,6 +65,7 @@ QBO_DRIVER_EDIT_NOTICE_KEY = "qbo_driver_preview_edit_notice"
 QBO_DRIVER_PENDING_KEY = "qbo_driver_preview_pending"
 QBO_DRIVER_RESET_KEY = "qbo_driver_preview_reset_counter"
 QBO_DRIVER_UNCHECK_KEY = "qbo_driver_preview_uncheck_all"
+QBO_DRIVER_SELECTION_KEY = "qbo_driver_preview_selected_refs"
 _DATE_USE_ROW = "Use row dates (or most recent Friday)"
 _DRIVER_PREVIEW_ORIGINAL_KEYS = (
     "_original_doc_number",
@@ -678,6 +681,7 @@ def _render_importer(
         st.session_state.pop(QBO_DRIVER_PENDING_KEY, None)
         st.session_state.pop(QBO_DRIVER_RESET_KEY, None)
         st.session_state.pop(QBO_DRIVER_UNCHECK_KEY, None)
+        st.session_state.pop(QBO_DRIVER_SELECTION_KEY, None)
         st.session_state[QBO_UPLOAD_HASH_KEY] = upload_hash
 
     preview = st.session_state.get(QBO_PREVIEW_KEY)
@@ -718,6 +722,7 @@ def _render_importer(
             st.session_state.pop(QBO_DRIVER_PENDING_KEY, None)
             st.session_state.pop(QBO_DRIVER_RESET_KEY, None)
             st.session_state.pop(QBO_DRIVER_UNCHECK_KEY, None)
+            st.session_state.pop(QBO_DRIVER_SELECTION_KEY, None)
             st.rerun()
     with post_col:
         post_clicked = st.button(
@@ -1643,16 +1648,17 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
         st.dataframe(preview.rows, use_container_width=True, hide_index=True)
         _set_driver_pending(preview.source_hash, None)
         _set_driver_uncheck_all(preview.source_hash, False)
+        _set_driver_selected_refs(preview.source_hash, None)
         return
 
     if _driver_uncheck_all_pending(preview.source_hash):
-        for row in rows:
-            row["Post?"] = False
+        _set_driver_selected_refs(preview.source_hash, set())
+        _set_driver_uncheck_all(preview.source_hash, False)
 
     st.info(
         "Driver statement preview is editable, but changes only apply when you click **Confirm changes**. "
-        "Edit cells freely, or use the left checkbox column to multi-select rows and press **Delete** "
-        "(or right-click → Delete row) to drop them — nothing is locked in until you confirm. "
+        "Rows are checked to post by default. Uncheck rows you want to skip, use the **Post?** header checkbox "
+        "or **Uncheck all** for bulk changes, then confirm when it looks right. "
         "Use **Discard changes** to undo everything you just did."
     )
     notice = _driver_edit_notice(preview.source_hash)
@@ -1670,43 +1676,12 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
 
     reset_counter = int(st.session_state.get(QBO_DRIVER_RESET_KEY, 0) or 0)
     editor_key = f"qbo_full_preview_editor_{preview.source_hash}_{reset_counter}"
-    hidden_columns = {"_draft_index": None, "_line_index": None, "Post?": None}
-    hidden_columns.update({key: None for key in _DRIVER_PREVIEW_ORIGINAL_KEYS})
-    edited = st.data_editor(
-        rows,
-        key=editor_key,
-        hide_index=True,
-        use_container_width=True,
-        num_rows="dynamic",
-        column_config={
-            **hidden_columns,
-            "QBO Txn Type": st.column_config.TextColumn(disabled=True),
-            "Doc #": st.column_config.TextColumn("Doc #", help="Check number / document number to post."),
-            "Txn Date": st.column_config.TextColumn("Txn Date", help="Check date, usually YYYY-MM-DD."),
-            "Payment Type": st.column_config.TextColumn(disabled=True),
-            "Vendor": st.column_config.TextColumn("Vendor", help="Vendor name to look up in QuickBooks."),
-            "Division": st.column_config.TextColumn("Division"),
-            "Realm ID": st.column_config.TextColumn("Realm ID"),
-            "Bank Account": st.column_config.TextColumn("Bank Account"),
-            "Bank Account ID": st.column_config.TextColumn("Bank Account ID"),
-            "Check Total": st.column_config.NumberColumn(disabled=True, format="$ %.2f"),
-            "Line #": st.column_config.NumberColumn(disabled=True),
-            "Line Amount": st.column_config.NumberColumn("Line Amount", format="$ %.2f"),
-            "Expense Account": st.column_config.TextColumn(
-                "Expense Account",
-                help="Type the exact QBO account name to use for this line.",
-            ),
-            "Line Description": st.column_config.TextColumn("Line Description", width="large"),
-            "Detail Type": st.column_config.TextColumn(disabled=True),
-        },
-    )
-
-    edited_records = _editor_records(edited)
+    edited_records = _render_driver_statement_aggrid(rows, preview.source_hash, editor_key)
     pending = _pending_driver_statement_changes(preview, edited_records)
     pending_total = int(pending.get("fields") or 0) + int(pending.get("removed") or 0)
     _set_driver_pending(preview.source_hash, pending if pending_total else None)
 
-    confirm_col, discard_col, status_col = st.columns([0.22, 0.22, 0.56])
+    confirm_col, discard_col, uncheck_col, status_col = st.columns([0.20, 0.20, 0.18, 0.42])
     with confirm_col:
         confirm_clicked = st.button(
             "✅ Confirm changes",
@@ -1722,7 +1697,14 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
             disabled=pending_total == 0,
             use_container_width=True,
             key=f"qbo_discard_driver_edits_{preview.source_hash}",
-            help="Undo every edit/delete since the last confirm. Original rows come back.",
+            help="Undo every edit/uncheck since the last confirm. Original rows come back.",
+        )
+    with uncheck_col:
+        uncheck_all_clicked = st.button(
+            "☐ Uncheck all",
+            use_container_width=True,
+            key=f"qbo_uncheck_all_driver_{preview.source_hash}",
+            help="Clear every Post? checkbox. Re-check only the rows you want, then confirm.",
         )
     with status_col:
         if pending_total:
@@ -1739,10 +1721,16 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
         else:
             st.caption("No pending changes. Posting will use the rows shown above.")
 
+    if uncheck_all_clicked:
+        _set_driver_uncheck_all(preview.source_hash, True)
+        st.session_state[QBO_DRIVER_RESET_KEY] = reset_counter + 1
+        st.rerun()
+
     if discard_clicked:
         st.session_state[QBO_DRIVER_RESET_KEY] = reset_counter + 1
         _set_driver_pending(preview.source_hash, None)
         _set_driver_uncheck_all(preview.source_hash, False)
+        _set_driver_selected_refs(preview.source_hash, None)
         st.rerun()
 
     if confirm_clicked:
@@ -1752,7 +1740,94 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
         st.session_state[QBO_DRIVER_RESET_KEY] = reset_counter + 1
         _set_driver_pending(preview.source_hash, None)
         _set_driver_uncheck_all(preview.source_hash, False)
+        _set_driver_selected_refs(preview.source_hash, None)
         st.rerun()
+
+
+def _render_driver_statement_aggrid(
+    rows: list[dict[str, Any]], source_hash: str, editor_key: str
+) -> list[dict[str, Any]]:
+    grid_rows = [{"Post": "", **row} for row in rows]
+    display_df = pd.DataFrame(grid_rows)
+    selected_refs = _driver_selected_refs(source_hash)
+    pre_selected_rows = None
+    pre_select_all_rows = selected_refs is None
+    if selected_refs is not None:
+        pre_selected_rows = [
+            index for index, row in enumerate(rows) if _driver_statement_row_ref(row) in selected_refs
+        ]
+
+    grid_options_builder = GridOptionsBuilder.from_dataframe(display_df)
+    grid_options_builder.configure_default_column(
+        editable=True,
+        filter=True,
+        resizable=True,
+        sortable=True,
+        wrapText=True,
+    )
+    grid_options_builder.configure_selection(
+        selection_mode="multiple",
+        use_checkbox=True,
+        header_checkbox=True,
+        header_checkbox_filtered_only=False,
+        pre_select_all_rows=pre_select_all_rows,
+        pre_selected_rows=pre_selected_rows,
+        rowMultiSelectWithClick=True,
+        suppressRowDeselection=False,
+    )
+    for column in ("Post?", "_draft_index", "_line_index", *_DRIVER_PREVIEW_ORIGINAL_KEYS):
+        if column in display_df.columns:
+            grid_options_builder.configure_column(column, hide=True)
+    for column in ("Post", "QBO Txn Type", "Payment Type", "Check Total", "Line #", "Detail Type"):
+        if column in display_df.columns:
+            grid_options_builder.configure_column(column, editable=False)
+    if "Post" in display_df.columns:
+        grid_options_builder.configure_column(
+            "Post",
+            headerName="Post?",
+            width=90,
+            pinned="left",
+            editable=False,
+            checkboxSelection=True,
+            headerCheckboxSelection=True,
+        )
+    grid_response = AgGrid(
+        display_df,
+        gridOptions=grid_options_builder.build(),
+        height=min(720, max(280, 36 * (len(rows) + 2))),
+        data_return_mode=DataReturnMode.AS_INPUT,
+        update_mode=GridUpdateMode.VALUE_CHANGED | GridUpdateMode.SELECTION_CHANGED,
+        allow_unsafe_jscode=False,
+        theme="streamlit",
+        key=editor_key,
+        show_search=False,
+        show_download_button=False,
+    )
+
+    raw_selected_rows = getattr(grid_response, "selected_rows", None)
+    selected_records = _table_records(raw_selected_rows)
+    if raw_selected_rows is None:
+        if selected_refs is None:
+            active_selected_refs = {
+                ref for row in rows if (ref := _driver_statement_row_ref(row)) is not None
+            }
+        else:
+            active_selected_refs = selected_refs
+    else:
+        active_selected_refs = {
+            ref for row in selected_records if (ref := _driver_statement_row_ref(row)) is not None
+        }
+    _set_driver_selected_refs(source_hash, active_selected_refs)
+
+    edited_records = _table_records(getattr(grid_response, "data", None)) or grid_rows
+    normalized_records: list[dict[str, Any]] = []
+    for row in edited_records:
+        normalized_row = dict(row)
+        normalized_row.pop("Post", None)
+        ref = _driver_statement_row_ref(normalized_row)
+        normalized_row["Post?"] = ref in active_selected_refs if ref is not None else False
+        normalized_records.append(normalized_row)
+    return normalized_records
 
 
 def _pending_driver_statement_changes(
@@ -1775,6 +1850,45 @@ def _set_driver_pending(source_hash: str, pending: dict[str, int] | None) -> Non
         }
     else:
         store.pop(source_hash, None)
+
+
+def _table_records(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if hasattr(value, "to_dict"):
+        try:
+            records = value.to_dict("records")
+        except TypeError:
+            records = []
+        return [dict(row) for row in records if isinstance(row, Mapping)]
+    if isinstance(value, list):
+        return [dict(row) for row in value if isinstance(row, Mapping)]
+    return []
+
+
+def _driver_selected_refs(source_hash: str) -> set[tuple[int, int]] | None:
+    store = st.session_state.get(QBO_DRIVER_SELECTION_KEY)
+    if not isinstance(store, dict) or source_hash not in store:
+        return None
+    refs: set[tuple[int, int]] = set()
+    for item in store.get(source_hash) or []:
+        try:
+            draft_index, line_index = item
+            refs.add((int(draft_index), int(line_index)))
+        except (TypeError, ValueError):
+            continue
+    return refs
+
+
+def _set_driver_selected_refs(source_hash: str, refs: set[tuple[int, int]] | None) -> None:
+    store = st.session_state.setdefault(QBO_DRIVER_SELECTION_KEY, {})
+    if not isinstance(store, dict):
+        store = {}
+        st.session_state[QBO_DRIVER_SELECTION_KEY] = store
+    if refs is None:
+        store.pop(source_hash, None)
+    else:
+        store[source_hash] = sorted((int(draft_index), int(line_index)) for draft_index, line_index in refs)
 
 
 def _driver_pending_for(preview: Any) -> dict[str, int] | None:
