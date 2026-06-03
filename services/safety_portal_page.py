@@ -8,6 +8,7 @@ phases.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import streamlit as st
@@ -20,6 +21,16 @@ from services.safety_paperwork import (
     RecipientBundle,
     ReviewIssue,
     build_preview,
+    load_driver_details,
+    load_truck_owner_details,
+)
+from services.safety_reference_db import (
+    UpsertResult,
+    load_drivers,
+    load_trucks,
+    reference_summary,
+    upsert_drivers,
+    upsert_trucks,
 )
 
 
@@ -188,19 +199,110 @@ def _render_excluded_doc_types() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Reference DB section
+# ---------------------------------------------------------------------------
+
+
+def _format_upsert_result(result: UpsertResult) -> str:
+    return (
+        f"Added **{result.added}**, updated **{result.updated}**, "
+        f"unchanged **{result.unchanged}** (of {result.total} rows in the file)."
+    )
+
+
+def _render_reference_section(submissions_dir: Path) -> None:
+    summary = reference_summary(submissions_dir)
+    st.subheader("Reference data (drivers & truck owners)")
+    cols = st.columns(2)
+    with cols[0]:
+        st.metric("Drivers on file", summary["driver_count"])
+        last = summary["drivers_last_updated"] or "never"
+        st.caption(f"Last refreshed: {last}")
+    with cols[1]:
+        st.metric("Trucks on file", summary["truck_count"])
+        last = summary["trucks_last_updated"] or "never"
+        st.caption(f"Last refreshed: {last}")
+
+    with st.expander("Refresh / grow reference data", expanded=summary["driver_count"] == 0):
+        st.caption(
+            "Upload either or both detail files to add new drivers/trucks and "
+            "refresh existing ones. Re-uploading the same file is safe — "
+            "duplicates are detected by Driver Personal Id (or normalized name) "
+            "and Unit #. Records that aren't present in the latest file are NOT "
+            "deleted; they keep their previous data."
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            driver_details_file = st.file_uploader(
+                "Driver details list (XLS/XLSX)",
+                type=["xls", "xlsx"],
+                key="safety_ref_driver_details",
+            )
+        with c2:
+            truck_owner_file = st.file_uploader(
+                "Truck owner details (XLS/XLSX)",
+                type=["xls", "xlsx"],
+                key="safety_ref_truck_owner",
+            )
+
+        if st.button("Save to reference database", type="primary", key="safety_ref_save"):
+            if driver_details_file is None and truck_owner_file is None:
+                st.warning("Pick at least one file.")
+            else:
+                if driver_details_file is not None:
+                    try:
+                        details = load_driver_details(driver_details_file.getvalue())
+                        result = upsert_drivers(
+                            details,
+                            submissions_dir=submissions_dir,
+                            source_name=driver_details_file.name,
+                        )
+                        st.success(f"Drivers — {_format_upsert_result(result)}")
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"Driver details upload failed: {exc}")
+                if truck_owner_file is not None:
+                    try:
+                        details = load_truck_owner_details(truck_owner_file.getvalue())
+                        result = upsert_trucks(
+                            details,
+                            submissions_dir=submissions_dir,
+                            source_name=truck_owner_file.name,
+                        )
+                        st.success(f"Trucks — {_format_upsert_result(result)}")
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"Truck owner details upload failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 
-def render_safety_portal_page() -> None:
+def render_safety_portal_page(submissions_dir: Path) -> None:
     if not _render_sso_gate():
         return
 
     st.title("🛡️ Safety Paperwork Portal")
     st.caption(
-        "Phase 1 — upload the four ProTransport exports to preview who would "
-        "be contacted. No emails are sent and nothing is saved yet."
+        "Phase 1 — staff workspace. The reference database stores drivers and "
+        "truck owners over time. Each preview run only needs the two warnings "
+        "CSVs from ProTransport. No emails are sent yet."
     )
+
+    _render_reference_section(submissions_dir)
+    st.divider()
+
+    summary = reference_summary(submissions_dir)
+    can_preview = summary["driver_count"] > 0 and summary["truck_count"] > 0
+
+    st.subheader("Run a warnings preview")
+    if not can_preview:
+        st.info(
+            "Add at least one driver details file and one truck owner details "
+            "file to the reference database before running a preview."
+        )
+        _render_excluded_doc_types()
+        return
 
     with st.form("safety_ingest_form", clear_on_submit=False):
         c1, c2 = st.columns(2)
@@ -210,22 +312,17 @@ def render_safety_portal_page() -> None:
                 type=["csv"],
                 key="safety_driver_warnings",
             )
-            driver_details = st.file_uploader(
-                "Driver details list (XLS/XLSX)",
-                type=["xls", "xlsx"],
-                key="safety_driver_details",
-            )
         with c2:
             truck_warnings = st.file_uploader(
                 "Truck warnings (CSV)",
                 type=["csv"],
                 key="safety_truck_warnings",
             )
-            truck_owner = st.file_uploader(
-                "Truck owner details (XLS/XLSX)",
-                type=["xls", "xlsx"],
-                key="safety_truck_owner",
-            )
+        st.caption(
+            "The preview joins these warnings against the stored reference "
+            "database above. To use a one-off detail file instead of the stored "
+            "data, refresh the reference database first."
+        )
         submitted = st.form_submit_button("Build preview", type="primary")
 
     _render_excluded_doc_types()
@@ -238,21 +335,19 @@ def render_safety_portal_page() -> None:
         for label, value in (
             ("Driver warnings CSV", driver_warnings),
             ("Truck warnings CSV", truck_warnings),
-            ("Driver details list", driver_details),
-            ("Truck owner details", truck_owner),
         )
         if value is None
     ]
     if missing:
-        st.error("Please upload all four files: " + ", ".join(missing))
+        st.error("Please upload: " + ", ".join(missing))
         return
 
     try:
         preview = build_preview(
             driver_warnings_csv=driver_warnings.getvalue(),
             truck_warnings_csv=truck_warnings.getvalue(),
-            driver_details_xls=driver_details.getvalue(),
-            truck_owner_xls=truck_owner.getvalue(),
+            driver_details=load_drivers(submissions_dir),
+            truck_details=load_trucks(submissions_dir),
         )
     except Exception as exc:  # noqa: BLE001 - surface parser failures to staff
         st.error(f"Could not build preview: {exc}")

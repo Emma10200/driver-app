@@ -277,6 +277,25 @@ def test_build_preview_review_queue_categories() -> None:
     assert all(r.severity == "warning" for r in bad_dates)
 
 
+def test_build_preview_accepts_preloaded_detail_lists() -> None:
+    """Reference-DB path: pass DriverDetail/TruckOwnerDetail directly."""
+    from services.safety_paperwork import load_driver_details, load_truck_owner_details
+
+    drivers = load_driver_details(_driver_details_xlsx())
+    trucks = load_truck_owner_details(_truck_owner_xlsx())
+
+    preview = build_preview(
+        driver_warnings_csv=_driver_warnings_csv(),
+        truck_warnings_csv=_truck_warnings_csv(),
+        driver_details=drivers,
+        truck_details=trucks,
+        today=date(2026, 6, 1),
+    )
+    by_email = {b.email: b for b in preview.recipients}
+    assert "suppicichj@gmail.com" in by_email
+    assert by_email["suppicichj@gmail.com"].kind == "driver_owner"
+
+
 def test_build_preview_against_real_attachments_if_available() -> None:
     """If the local Downloads exports are present, smoke-test against them."""
     downloads = Path.home() / "Downloads"

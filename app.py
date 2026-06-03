@@ -128,7 +128,7 @@ if _document_upload_requested():
 if _safety_portal_requested():
     from services.safety_portal_page import render_safety_portal_page
 
-    render_safety_portal_page()
+    render_safety_portal_page(SUBMISSIONS_DIR)
     render_version_footer()
     st.stop()
 

@@ -403,14 +403,35 @@ def build_preview(
     *,
     driver_warnings_csv: bytes | str,
     truck_warnings_csv: bytes | str,
-    driver_details_xls: bytes | str,
-    truck_owner_xls: bytes | str,
+    driver_details_xls: bytes | str | None = None,
+    truck_owner_xls: bytes | str | None = None,
+    driver_details: Iterable[DriverDetail] | None = None,
+    truck_details: Iterable[TruckOwnerDetail] | None = None,
     today: date | None = None,
 ) -> ImportPreview:
+    """Build an ImportPreview.
+
+    Either pass raw export bytes (``driver_details_xls`` / ``truck_owner_xls``)
+    or already-loaded detail lists from the reference DB
+    (``driver_details`` / ``truck_details``). At least one source must be
+    provided per side.
+    """
     today = today or date.today()
 
-    driver_details = load_driver_details(driver_details_xls)
-    truck_details = load_truck_owner_details(truck_owner_xls)
+    if driver_details is None:
+        if driver_details_xls is None:
+            raise ValueError("driver_details_xls or driver_details must be provided")
+        driver_details = load_driver_details(driver_details_xls)
+    else:
+        driver_details = list(driver_details)
+
+    if truck_details is None:
+        if truck_owner_xls is None:
+            raise ValueError("truck_owner_xls or truck_details must be provided")
+        truck_details = load_truck_owner_details(truck_owner_xls)
+    else:
+        truck_details = list(truck_details)
+
     driver_warnings = _read_csv(driver_warnings_csv)
     truck_warnings = _read_csv(truck_warnings_csv)
 
