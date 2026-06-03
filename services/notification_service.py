@@ -469,6 +469,100 @@ def send_internal_document_upload_notification(
     }
 
 
+def _safety_upload_url() -> str:
+    override = (get_runtime_secret("SAFETY_UPLOAD_URL", "") or "").strip()
+    if override:
+        return override
+    base_url = (get_runtime_secret("APP_BASE_URL", "") or "").strip() or "https://driver-application.streamlit.app"
+    return f"{base_url.rstrip('/')}/?documents=1"
+
+
+def send_safety_document_request_email(
+    *,
+    to_email: str,
+    recipient_name: str,
+    division: str,
+    items: list[dict[str, Any]],
+    test_mode: bool | None = None,
+) -> dict[str, Any]:
+    """Send a driver/owner-facing safety paperwork request.
+
+    The safety portal's first outbound version uses the existing SMTP settings
+    and sends from the normal statements mailbox. The recipient is the driver
+    or owner; internal safety/statement recipients are CC'd using the existing
+    notification settings so staff can see exactly what went out.
+    """
+    to_email = str(to_email or "").strip()
+    if not to_email:
+        return {"status": "error", "message": "Missing recipient email."}
+    items = [dict(item) for item in items if item]
+    if not items:
+        return {"status": "skipped", "message": "No selected safety paperwork items to send."}
+
+    company_slug = DEFAULT_COMPANY_SLUG
+    resolved_test_mode = is_test_mode_active() if test_mode is None else bool(test_mode)
+    if not notifications_enabled(company_slug, test_mode=resolved_test_mode):
+        return {
+            "status": "disabled",
+            "message": "Email is not configured on this deployment.",
+        }
+
+    settings = _notification_settings(company_slug, test_mode=resolved_test_mode)
+    cc_recipients = _internal_recipients_only(settings["recipients"], to_email)
+    recipient_name = str(recipient_name or "Driver/Owner").strip() or "Driver/Owner"
+    division = str(division or "").strip()
+    upload_url = _safety_upload_url()
+
+    message = EmailMessage()
+    subject_prefix = "[TEST] " if resolved_test_mode else ""
+    division_suffix = f" - {division}" if division else ""
+    message["Subject"] = f"{subject_prefix}Safety paperwork needed{division_suffix}"
+    message["From"] = settings["from_email"]
+    message["To"] = to_email
+    if cc_recipients:
+        message["Cc"] = ", ".join(cc_recipients)
+
+    body_lines = [
+        f"Hello {recipient_name},",
+        "",
+        "Our safety records show that we need updated paperwork for the item(s) below.",
+        "Please upload the requested document(s) using this secure upload link:",
+        f"  {upload_url}",
+        "",
+        "Requested item(s):",
+    ]
+    for item in items:
+        unit = str(item.get("unit") or item.get("Unit") or "").strip()
+        document = str(item.get("document") or item.get("Document") or "Document").strip()
+        expires = str(item.get("expires") or item.get("Expires") or "—").strip() or "—"
+        status = str(item.get("status") or item.get("Status") or "").strip()
+        unit_part = f"Unit {unit}: " if unit and unit != "—" else ""
+        status_part = f" ({status})" if status else ""
+        body_lines.append(f"  - {unit_part}{document} — current expiration: {expires}{status_part}")
+
+    body_lines.extend(
+        [
+            "",
+            "If one of these items does not apply to you, please reply to this email and let safety know.",
+            "",
+            "Thank you,",
+            "Safety Department",
+        ]
+    )
+    message.set_content("\n".join(body_lines))
+
+    try:
+        _deliver_message(message, settings)
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+    cc_note = f"; cc: {', '.join(cc_recipients)}" if cc_recipients else ""
+    return {
+        "status": "sent",
+        "message": f"Safety paperwork request sent to {to_email}{cc_note}.",
+    }
+
+
 def send_resume_link_email(
     *,
     to_email: str,

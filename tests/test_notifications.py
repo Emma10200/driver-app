@@ -194,6 +194,75 @@ def test_send_internal_submission_notification_uses_tls_and_reply_to(monkeypatch
     assert "Supporting document count: 1" in text_part.get_content()
 
 
+def test_send_safety_document_request_email_sends_to_recipient_and_ccs_internal(monkeypatch):
+    smtp_instance: FakeSMTP | None = None
+
+    def fake_smtp(host: str, port: int, timeout: int = 30):
+        nonlocal smtp_instance
+        smtp_instance = FakeSMTP(host, port, timeout)
+        return smtp_instance
+
+    monkeypatch.setattr(
+        notification_service,
+        "_notification_settings",
+        lambda company_slug, test_mode: {
+            "host": "smtp.example.com",
+            "port": 587,
+            "username": "mailer",
+            "password": "secret",
+            "from_email": "statements@example.com",
+            "recipients": ["safety@example.com", "dann@example.com"],
+            "use_tls": True,
+            "use_ssl": False,
+        },
+    )
+    monkeypatch.setattr(notification_service, "_safety_upload_url", lambda: "https://example.com/?documents=1")
+    monkeypatch.setattr(notification_service.smtplib, "SMTP", fake_smtp)
+
+    result = notification_service.send_safety_document_request_email(
+        to_email="owner@example.com",
+        recipient_name="ABRAHAM PEREZ",
+        division="Prestige Transportation Inc",
+        items=[
+            {
+                "unit": "802",
+                "document": "Insurance Certificate",
+                "expires": "2026-06-01",
+                "status": "🔴 Expired",
+            }
+        ],
+        test_mode=False,
+    )
+
+    assert result["status"] == "sent"
+    assert smtp_instance is not None
+    assert smtp_instance.sent_message is not None
+    msg = smtp_instance.sent_message
+    assert msg["From"] == "statements@example.com"
+    assert msg["To"] == "owner@example.com"
+    assert msg["Cc"] == "safety@example.com, dann@example.com"
+    body = msg.get_content()
+    assert "ABRAHAM PEREZ" in body
+    assert "Unit 802: Insurance Certificate" in body
+    assert "https://example.com/?documents=1" in body
+
+
+def test_send_safety_document_request_email_skips_empty_items(monkeypatch):
+    calls = []
+    monkeypatch.setattr(notification_service, "_deliver_message", lambda *args, **kwargs: calls.append("sent"))
+
+    result = notification_service.send_safety_document_request_email(
+        to_email="owner@example.com",
+        recipient_name="Owner",
+        division="Prestige Transportation Inc",
+        items=[],
+        test_mode=False,
+    )
+
+    assert result["status"] == "skipped"
+    assert calls == []
+
+
 def test_attempt_submission_notification_retries_after_error(monkeypatch):
     fake_state = FakeSessionState(
         form_data={"first_name": "Emma", "last_name": "Driver"},
