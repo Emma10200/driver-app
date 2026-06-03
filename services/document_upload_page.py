@@ -10,7 +10,15 @@ from typing import Any
 
 import streamlit as st
 
-from runtime_context import get_document_upload_storage_namespace, is_test_mode_active
+try:
+    from runtime_context import get_document_upload_storage_namespace, is_test_mode_active
+except ImportError:  # pragma: no cover - defensive during Streamlit Cloud deploy/import races
+    from runtime_context import is_test_mode_active
+
+    def get_document_upload_storage_namespace() -> str:
+        mode_segment = "test-mode" if is_test_mode_active() else "live"
+        return f"document-uploads/{mode_segment}"
+
 from services.error_log_service import log_application_error
 from services.notification_service import send_internal_document_upload_notification
 from submission_storage import save_document_upload_bundle

@@ -20,7 +20,6 @@ from app_sections.review_submit import render_review_submit_page, render_submiss
 from runtime_context import (
     admin_dashboard_requested,
     company_slug_explicitly_provided,
-    document_upload_requested,
     get_company_profile,
     qbo_importer_requested,
     qbo_oauth_callback_requested,
@@ -28,7 +27,6 @@ from runtime_context import (
     sync_runtime_context,
 )
 from services.admin_dashboard import render_admin_dashboard
-from services.document_upload_page import render_document_upload_page
 from services.error_log_service import log_application_error
 from services.qbo_dashboard import render_qbo_dashboard
 from state import init_session_state
@@ -60,6 +58,32 @@ init_session_state()
 sync_runtime_context()
 
 
+def _truthy_query_param(value: object) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on", "test", "admin"}
+
+
+def _query_param_value(name: str) -> str:
+    try:
+        value = st.query_params.get(name, "")
+    except Exception:
+        return ""
+    if isinstance(value, list):
+        return str(value[0]) if value else ""
+    return str(value or "")
+
+
+def _document_upload_requested() -> bool:
+    """Local route check so stale Cloud imports cannot break app startup."""
+    route = _query_param_value("route").strip().lower().replace("_", "-")
+    upload = _query_param_value("upload").strip().lower().replace("_", "-")
+    return (
+        _truthy_query_param(_query_param_value("documents"))
+        or _truthy_query_param(_query_param_value("docs"))
+        or route in {"documents", "document-upload", "driver-documents"}
+        or upload in {"documents", "document-upload", "driver-documents"}
+    )
+
+
 # Standalone admin dashboard route. Reachable via ?dashboard=1; gated by admin
 # auth config (Google SSO, password fallback, or both). Short-circuits the
 # entire application flow so the dashboard renders by itself.
@@ -81,7 +105,9 @@ if qbo_importer_requested() or qbo_oauth_callback_requested():
 # Standalone driver document upload route. Reachable via ?documents=1 (also
 # ?docs=1 / ?route=document-upload). This intentionally bypasses the company
 # application flow and does not require a company slug.
-if document_upload_requested():
+if _document_upload_requested():
+    from services.document_upload_page import render_document_upload_page
+
     render_document_upload_page(SUBMISSIONS_DIR)
     render_version_footer()
     st.stop()
