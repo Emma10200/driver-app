@@ -241,10 +241,23 @@ def test_send_safety_document_request_email_sends_to_recipient_and_ccs_internal(
     assert msg["From"] == "statements@example.com"
     assert msg["To"] == "owner@example.com"
     assert msg["Cc"] == "safety@example.com, dann@example.com"
-    body = msg.get_content()
+    text_part = msg.get_body(preferencelist=("plain",))
+    assert text_part is not None
+    body = text_part.get_content()
     assert "ABRAHAM PEREZ" in body
+    assert "Requested item(s):" in body
     assert "Unit 802: Insurance Certificate" in body
+    assert "current expiration: 2026-06-01 (🔴 Expired)" in body
+    assert "If one of these items does not apply to you" in body
+    assert "Thank you,\nSafety Department" in body
     assert "https://example.com/?documents=1" in body
+
+    html_part = msg.get_body(preferencelist=("html",))
+    assert html_part is not None
+    html_body = html_part.get_content()
+    assert "Upload requested documents" in html_body
+    assert "<strong>Requested item(s):</strong>" in html_body
+    assert "Unit 802: Insurance Certificate" in html_body
 
 
 def test_send_safety_document_request_email_skips_empty_items(monkeypatch):

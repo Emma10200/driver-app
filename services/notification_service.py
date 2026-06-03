@@ -525,6 +525,24 @@ def send_safety_document_request_email(
     if cc_recipients:
         message["Cc"] = ", ".join(cc_recipients)
 
+    requested_lines: list[str] = []
+    requested_html: list[str] = []
+    for item in items:
+        unit = str(item.get("unit") or item.get("Unit") or "").strip()
+        document = str(item.get("document") or item.get("Document") or "Document").strip()
+        expires = str(item.get("expires") or item.get("Expires") or "—").strip() or "—"
+        status = str(item.get("status") or item.get("Status") or "").strip()
+        unit_part = f"Unit {unit}: " if unit and unit != "—" else ""
+        status_part = f" ({status})" if status else ""
+        requested_lines.append(f"  - {unit_part}{document} — current expiration: {expires}{status_part}")
+        requested_html.append(
+            "<li>"
+            f"<strong>{html.escape(unit_part + document)}</strong>"
+            f" — current expiration: {html.escape(expires)}"
+            f"{html.escape(status_part)}"
+            "</li>"
+        )
+
     body_lines = [
         f"Hello {recipient_name},",
         "",
@@ -534,14 +552,7 @@ def send_safety_document_request_email(
         "",
         "Requested item(s):",
     ]
-    for item in items:
-        unit = str(item.get("unit") or item.get("Unit") or "").strip()
-        document = str(item.get("document") or item.get("Document") or "Document").strip()
-        expires = str(item.get("expires") or item.get("Expires") or "—").strip() or "—"
-        status = str(item.get("status") or item.get("Status") or "").strip()
-        unit_part = f"Unit {unit}: " if unit and unit != "—" else ""
-        status_part = f" ({status})" if status else ""
-        body_lines.append(f"  - {unit_part}{document} — current expiration: {expires}{status_part}")
+    body_lines.extend(requested_lines)
 
     body_lines.extend(
         [
@@ -553,6 +564,34 @@ def send_safety_document_request_email(
         ]
     )
     message.set_content("\n".join(body_lines))
+    safe_upload_url = html.escape(upload_url, quote=True)
+    safe_name = html.escape(recipient_name)
+    safe_division = html.escape(division)
+    division_line = f"<p><strong>Division:</strong> {safe_division}</p>" if safe_division else ""
+    message.add_alternative(
+        f"""
+<html>
+    <body style="font-family: Arial, sans-serif; color: #172033; line-height: 1.5;">
+        <p>Hello {safe_name},</p>
+        {division_line}
+        <p>Our safety records show that we need updated paperwork for the item(s) below.</p>
+        <p>
+            <a href="{safe_upload_url}" style="background:#0f766e;color:#ffffff;padding:10px 14px;text-decoration:none;border-radius:8px;font-weight:700;display:inline-block;">
+                Upload requested documents
+            </a>
+        </p>
+        <p style="font-size: 13px; color: #475569;">If the button does not open, copy and paste this link:<br>{safe_upload_url}</p>
+        <p><strong>Requested item(s):</strong></p>
+        <ul>
+            {''.join(requested_html)}
+        </ul>
+        <p>If one of these items does not apply to you, please reply to this email and let safety know.</p>
+        <p>Thank you,<br>Safety Department</p>
+    </body>
+</html>
+""".strip(),
+        subtype="html",
+    )
 
     try:
         _deliver_message(message, settings)
