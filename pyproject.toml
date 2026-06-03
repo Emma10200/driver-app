@@ -14,7 +14,7 @@ dependencies = [
     "requests>=2.32.0",
     "streamlit>=1.56.0",
     "streamlit-aggrid>=1.2.1.post2",
-    "xlrd==1.2.0",
+    "xlrd>=2.0.1",
 ]
 
 [project.optional-dependencies]
