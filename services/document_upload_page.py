@@ -28,6 +28,7 @@ DOCUMENT_UPLOAD_OPTIONS: tuple[str, ...] = (
     "Owner IFTA (if applicable)",
     "Owner registration",
     "Owner's insurance",
+    "DOT inspections (truck and trailer if applicable)",
     "CDL",
     "W9",
     "Direct deposit info",

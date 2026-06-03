@@ -31,6 +31,10 @@ def test_normalize_document_uploads_keeps_document_type_and_dedupes():
     assert normalized[1]["file_name"] == "registration.png"
 
 
+def test_document_upload_options_include_dot_inspections():
+    assert "DOT inspections (truck and trailer if applicable)" in document_upload_page.DOCUMENT_UPLOAD_OPTIONS
+
+
 def test_normalize_document_uploads_rejects_invalid_extension():
     normalized, errors = document_upload_page._normalize_document_uploads(
         {"CDL": [MockUploadedFile("cdl.exe", 123, "application/octet-stream", b"bad")]}
