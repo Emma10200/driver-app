@@ -473,8 +473,10 @@ def _safety_upload_url() -> str:
     override = (get_runtime_secret("SAFETY_UPLOAD_URL", "") or "").strip()
     if override:
         return override
-    base_url = (get_runtime_secret("APP_BASE_URL", "") or "").strip() or "https://driver-application.streamlit.app"
-    return f"{base_url.rstrip('/')}/?documents=1"
+    # Intentionally do NOT read APP_BASE_URL here. That secret has pointed at
+    # the old hashed Streamlit domain before, and safety emails should always
+    # use the stable public app URL unless SAFETY_UPLOAD_URL is explicitly set.
+    return "https://driver-application.streamlit.app/?documents=1"
 
 
 def send_safety_document_request_email(
@@ -483,6 +485,7 @@ def send_safety_document_request_email(
     recipient_name: str,
     division: str,
     items: list[dict[str, Any]],
+    upload_url: str | None = None,
     test_mode: bool | None = None,
 ) -> dict[str, Any]:
     """Send a driver/owner-facing safety paperwork request.
@@ -511,7 +514,7 @@ def send_safety_document_request_email(
     cc_recipients = _internal_recipients_only(settings["recipients"], to_email)
     recipient_name = str(recipient_name or "Driver/Owner").strip() or "Driver/Owner"
     division = str(division or "").strip()
-    upload_url = _safety_upload_url()
+    upload_url = str(upload_url or "").strip() or _safety_upload_url()
 
     message = EmailMessage()
     subject_prefix = "[TEST] " if resolved_test_mode else ""

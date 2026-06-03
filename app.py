@@ -93,6 +93,20 @@ def _safety_portal_requested() -> bool:
     )
 
 
+def _safety_upload_token() -> str:
+    """Return a recipient-specific safety upload token, if present."""
+    for key in ("safety_upload", "safety_token"):
+        token = _query_param_value(key).strip()
+        if token:
+            return token
+
+    # Also support ?safety=<token>; ?safety=1 remains the staff portal.
+    safety_value = _query_param_value("safety").strip()
+    if safety_value and not _truthy_query_param(safety_value):
+        return safety_value
+    return ""
+
+
 # Standalone admin dashboard route. Reachable via ?dashboard=1; gated by admin
 # auth config (Google SSO, password fallback, or both). Short-circuits the
 # entire application flow so the dashboard renders by itself.
@@ -118,6 +132,18 @@ if _document_upload_requested():
     from services.document_upload_page import render_document_upload_page
 
     render_document_upload_page(SUBMISSIONS_DIR)
+    render_version_footer()
+    st.stop()
+
+
+# Recipient-specific Safety Paperwork upload link. Reachable via
+# ?safety_upload=<token> (or ?safety=<token>). This is public-by-link and
+# intentionally does not require staff Google SSO.
+_recipient_safety_token = _safety_upload_token()
+if _recipient_safety_token:
+    from services.safety_upload_page import render_safety_upload_page
+
+    render_safety_upload_page(SUBMISSIONS_DIR, _recipient_safety_token)
     render_version_footer()
     st.stop()
 

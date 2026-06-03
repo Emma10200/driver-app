@@ -263,6 +263,16 @@ def test_send_safety_document_request_email_skips_empty_items(monkeypatch):
     assert calls == []
 
 
+def test_safety_upload_url_default_uses_new_stable_domain(monkeypatch):
+    monkeypatch.setattr(
+        notification_service,
+        "get_runtime_secret",
+        _fake_secrets({"APP_BASE_URL": "https://driver-app-9gjny6fgidefjx6wrxsuwa.streamlit.app"}),
+    )
+
+    assert notification_service._safety_upload_url() == "https://driver-application.streamlit.app/?documents=1"
+
+
 def test_attempt_submission_notification_retries_after_error(monkeypatch):
     fake_state = FakeSessionState(
         form_data={"first_name": "Emma", "last_name": "Driver"},

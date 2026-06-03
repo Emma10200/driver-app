@@ -16,6 +16,7 @@ import streamlit as st
 
 from services.notification_service import send_safety_document_request_email
 from services.qbo_auth import qbo_allowed_emails
+from services.safety_link_store import create_safety_upload_link
 from services.safety_paperwork import (
     DOC_TYPE_LABELS,
     EXCLUDED_FROM_OUTBOUND,
@@ -188,7 +189,7 @@ def _group_selected_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]
     return grouped
 
 
-def _render_send_queue(recipients: list[RecipientBundle], *, preview_version: int) -> None:
+def _render_send_queue(recipients: list[RecipientBundle], *, preview_version: int, submissions_dir: Path) -> None:
     if not recipients:
         st.info("No clean recipients to contact from this import.")
         return
@@ -259,13 +260,28 @@ def _render_send_queue(recipients: list[RecipientBundle], *, preview_version: in
         progress = st.progress(0, text="Sending safety paperwork emails...")
         total = max(1, len(grouped))
         for idx, bundle in enumerate(grouped.values(), start=1):
+            link = create_safety_upload_link(
+                submissions_dir=submissions_dir,
+                recipient_email=bundle["email"],
+                recipient_name=bundle["recipient_name"],
+                division=bundle["division"],
+                items=bundle["items"],
+            )
             result = send_safety_document_request_email(
                 to_email=bundle["email"],
                 recipient_name=bundle["recipient_name"],
                 division=bundle["division"],
                 items=bundle["items"],
+                upload_url=str(link.get("url") or ""),
             )
-            results.append({"Email": bundle["email"], "Status": result["status"], "Message": result["message"]})
+            results.append(
+                {
+                    "Email": bundle["email"],
+                    "Status": result["status"],
+                    "Message": result["message"],
+                    "Unique link": link.get("url"),
+                }
+            )
             progress.progress(idx / total, text=f"Sent {idx} of {total} email(s)...")
         progress.empty()
         sent = sum(1 for r in results if r["Status"] == "sent")
@@ -487,5 +503,5 @@ def render_safety_portal_page(submissions_dir: Path) -> None:
 
     preview_version = int(st.session_state.get("safety_preview_version", 1) or 1)
     _render_summary(preview)
-    _render_send_queue(preview.recipients, preview_version=preview_version)
+    _render_send_queue(preview.recipients, preview_version=preview_version, submissions_dir=submissions_dir)
     _render_review(preview.review)
