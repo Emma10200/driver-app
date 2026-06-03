@@ -20,6 +20,7 @@ from app_sections.review_submit import render_review_submit_page, render_submiss
 from runtime_context import (
     admin_dashboard_requested,
     company_slug_explicitly_provided,
+    document_upload_requested,
     get_company_profile,
     qbo_importer_requested,
     qbo_oauth_callback_requested,
@@ -27,6 +28,7 @@ from runtime_context import (
     sync_runtime_context,
 )
 from services.admin_dashboard import render_admin_dashboard
+from services.document_upload_page import render_document_upload_page
 from services.error_log_service import log_application_error
 from services.qbo_dashboard import render_qbo_dashboard
 from state import init_session_state
@@ -72,6 +74,15 @@ if admin_dashboard_requested():
 # application flow exactly like the admin dashboard route above.
 if qbo_importer_requested() or qbo_oauth_callback_requested():
     render_qbo_dashboard()
+    render_version_footer()
+    st.stop()
+
+
+# Standalone driver document upload route. Reachable via ?documents=1 (also
+# ?docs=1 / ?route=document-upload). This intentionally bypasses the company
+# application flow and does not require a company slug.
+if document_upload_requested():
+    render_document_upload_page(SUBMISSIONS_DIR)
     render_version_footer()
     st.stop()
 

@@ -348,6 +348,50 @@ def test_notification_omits_csv_and_attaches_supporting_documents(monkeypatch):
     assert "csv" not in body.lower()
 
 
+def test_document_upload_notification_sends_without_application_pdf(monkeypatch):
+    smtp_instance: FakeSMTP | None = None
+
+    def fake_smtp(host, port, timeout=30):
+        nonlocal smtp_instance
+        smtp_instance = FakeSMTP(host, port, timeout)
+        return smtp_instance
+
+    _stub_settings(monkeypatch)
+    monkeypatch.setattr(notification_service.smtplib, "SMTP", fake_smtp)
+
+    result = notification_service.send_internal_document_upload_notification(
+        form_data={
+            "driver_name": "Jane Driver",
+            "email": "jane@example.com",
+            "phone": "555-0100",
+            "document_types": ["CDL"],
+            "final_submission_timestamp": "2026-06-03T10:11:12",
+        },
+        upload_result={"location_label": "driver-applications/document-uploads/live/document_uploads/test"},
+        uploaded_documents=[{"file_name": "cdl.pdf", "document_type": "CDL"}],
+        supporting_document_payloads=[
+            {
+                "document_type": "CDL",
+                "file_name": "cdl.pdf",
+                "content_type": "application/pdf",
+                "size_bytes": 12,
+                "content": b"FAKEPDFBYTES",
+            }
+        ],
+    )
+
+    assert result["status"] == "sent"
+    assert smtp_instance is not None and smtp_instance.sent_message is not None
+    assert smtp_instance.sent_message["Subject"] == "Driver documents uploaded: Jane Driver"
+    assert smtp_instance.sent_message["Reply-To"] == "jane@example.com"
+    filenames = [part.get_filename() for part in smtp_instance.sent_message.iter_attachments()]
+    assert filenames == ["cdl.pdf"]
+    body = smtp_instance.sent_message.get_body(preferencelist=("plain",)).get_content()
+    assert "document-only upload link" in body
+    assert "Document count: 1" in body
+    assert "CDL" in body
+
+
 def test_notification_skips_oversize_supporting_documents(monkeypatch):
     smtp_instance: FakeSMTP | None = None
 

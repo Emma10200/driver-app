@@ -343,6 +343,132 @@ def send_internal_submission_notification(
     }
 
 
+def send_internal_document_upload_notification(
+    *,
+    form_data: dict[str, Any],
+    upload_result: dict[str, Any],
+    uploaded_documents: list[dict[str, Any]] | None = None,
+    supporting_document_payloads: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Notify staff about a document-only upload without requiring an application packet."""
+    company_slug = DEFAULT_COMPANY_SLUG
+    test_mode = bool(form_data.get("test_mode")) or is_test_mode_active()
+
+    if not notifications_enabled(company_slug, test_mode=test_mode):
+        return {
+            "status": "disabled",
+            "message": "Internal notification email is not configured yet.",
+        }
+
+    settings = _notification_settings(company_slug, test_mode=test_mode)
+    applicant_email = str(form_data.get("email", "") or "").strip()
+    internal_recipients = _internal_recipients_only(settings["recipients"], applicant_email)
+    if not internal_recipients:
+        return {
+            "status": "error",
+            "message": "Internal notification has no recipients after excluding driver email.",
+        }
+
+    driver_name = str(form_data.get("driver_name") or "").strip()
+    if not driver_name:
+        driver_name = " ".join(
+            part
+            for part in [
+                str(form_data.get("first_name", "")).strip(),
+                str(form_data.get("last_name", "")).strip(),
+            ]
+            if part
+        ) or "Unnamed driver"
+
+    message = EmailMessage()
+    subject_prefix = "[TEST] " if test_mode else ""
+    message["Subject"] = f"{subject_prefix}Driver documents uploaded: {driver_name}"
+    message["From"] = settings["from_email"]
+    message["To"] = ", ".join(internal_recipients)
+    if applicant_email:
+        message["Reply-To"] = applicant_email
+
+    uploaded_documents = uploaded_documents or []
+    supporting_payloads = supporting_document_payloads or []
+    max_total = max(0, int(settings.get("max_attachment_bytes", 0) or 0))
+    used_bytes = 0
+    attached_docs: list[dict[str, Any]] = []
+    skipped_docs: list[dict[str, Any]] = []
+    for payload in supporting_payloads:
+        content = payload.get("content")
+        if not isinstance(content, (bytes, bytearray)) or not content:
+            skipped_docs.append({**payload, "_reason": "no bytes available"})
+            continue
+        size = len(content)
+        if max_total and (used_bytes + size) > max_total:
+            skipped_docs.append({**payload, "_reason": "would exceed email size limit"})
+            continue
+        attached_docs.append({**payload, "_size": size})
+        used_bytes += size
+
+    selected_document_types = form_data.get("document_types") or []
+    body_lines = [
+        "A driver submitted documents through the document-only upload link.",
+        "",
+        f"Driver: {driver_name}",
+        f"Phone: {form_data.get('phone', 'Not provided') or 'Not provided'}",
+        f"Email: {form_data.get('email', 'Not provided') or 'Not provided'}",
+        f"Submitted at: {form_data.get('final_submission_timestamp', 'Unknown')}",
+        f"Saved to: {upload_result.get('location_label', 'Unknown location')}",
+        f"Document count: {len(uploaded_documents)}",
+    ]
+    if selected_document_types:
+        body_lines.extend(["", "Document types selected:"])
+        for document_type in selected_document_types:
+            body_lines.append(f"  - {document_type}")
+    notes = str(form_data.get("notes") or "").strip()
+    if notes:
+        body_lines.extend(["", "Driver notes:", notes])
+    if attached_docs:
+        body_lines.extend(["", "Documents attached to this email:"])
+        for doc in attached_docs:
+            label = doc.get("document_type") or "Document"
+            body_lines.append(f"  - {label}: {doc.get('file_name', 'document')}")
+    if skipped_docs:
+        body_lines.append("")
+        body_lines.append(
+            "The following documents were NOT attached (size limit or missing bytes); "
+            "they remain available at the saved location above:"
+        )
+        for doc in skipped_docs:
+            body_lines.append(
+                f"  - {doc.get('file_name', 'document')} ({doc.get('_reason', 'unavailable')})"
+            )
+
+    message.set_content("\n".join(body_lines))
+
+    for doc in attached_docs:
+        ctype = str(doc.get("content_type") or "application/octet-stream")
+        if "/" in ctype:
+            maintype, _, subtype = ctype.partition("/")
+        else:
+            maintype, subtype = "application", "octet-stream"
+        message.add_attachment(
+            bytes(doc["content"]),
+            maintype=maintype,
+            subtype=subtype,
+            filename=str(doc.get("file_name") or "document"),
+        )
+
+    try:
+        _deliver_message(message, settings)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": str(exc),
+        }
+
+    return {
+        "status": "sent",
+        "message": f"Internal document upload notification sent to {', '.join(internal_recipients)}.",
+    }
+
+
 def send_resume_link_email(
     *,
     to_email: str,

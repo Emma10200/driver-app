@@ -63,6 +63,19 @@ def test_get_storage_namespace_uses_company_and_test_mode(monkeypatch):
     assert runtime_context.get_storage_namespace() == "companies/xpress/test-mode"
 
 
+def test_document_upload_requested_accepts_documents_query(monkeypatch):
+    monkeypatch.setattr(runtime_context, "st", SimpleNamespace(query_params={"documents": "1"}))
+
+    assert runtime_context.document_upload_requested() is True
+
+
+def test_document_upload_storage_namespace_is_company_agnostic(monkeypatch):
+    fake_state = FakeSessionState(company_slug="xpress", test_mode=True)
+    monkeypatch.setattr(runtime_context, "st", SimpleNamespace(session_state=fake_state, query_params={}))
+
+    assert runtime_context.get_document_upload_storage_namespace() == "document-uploads/test-mode"
+
+
 def test_get_company_profile_returns_real_xpress_details():
     profile = runtime_context.get_company_profile("xpress")
 

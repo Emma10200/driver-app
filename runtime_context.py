@@ -110,6 +110,24 @@ def qbo_oauth_callback_requested() -> bool:
     return _truthy(_query_param_value("qbo_oauth_callback")) or bool(_query_param_value("code"))
 
 
+def document_upload_requested() -> bool:
+    """True for the standalone, company-agnostic driver document upload page."""
+    route = _query_param_value("route").strip().lower().replace("_", "-")
+    upload = _query_param_value("upload").strip().lower().replace("_", "-")
+    return (
+        _truthy(_query_param_value("documents"))
+        or _truthy(_query_param_value("docs"))
+        or route in {"documents", "document-upload", "driver-documents"}
+        or upload in {"documents", "document-upload", "driver-documents"}
+    )
+
+
+def get_document_upload_storage_namespace() -> str:
+    """Storage namespace for document-only uploads; intentionally not company-scoped."""
+    mode_segment = "test-mode" if is_test_mode_active() else "live"
+    return f"document-uploads/{mode_segment}"
+
+
 def admin_tools_enabled() -> bool:
     if not admin_tools_requested():
         return False

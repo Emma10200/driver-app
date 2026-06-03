@@ -38,6 +38,7 @@ PDF_MIME = "application/pdf"
 JSON_MIME = "application/json"
 DRAFTS_DIRNAME = "drafts"
 UPLOADS_DIRNAME = "uploads"
+DOCUMENT_UPLOADS_DIRNAME = "document_uploads"
 
 
 def _join_relative_prefix(*parts: str | None) -> str:
@@ -262,6 +263,16 @@ def _build_submission_key(form_data: dict[str, Any]) -> tuple[str, str]:
     applicant_name = f"{form_data.get('last_name', 'driver')}_{form_data.get('first_name', '')}"
     submission_key = f"{timestamp}_{_slugify(applicant_name)}"
     return submission_timestamp, submission_key
+
+
+def _build_document_upload_key(form_data: dict[str, Any]) -> tuple[str, str]:
+    submitted_at = form_data.get("final_submission_timestamp", datetime.now().isoformat())
+    timestamp = datetime.fromisoformat(submitted_at).strftime("%Y%m%d_%H%M%S")
+    driver_name = str(form_data.get("driver_name") or "").strip()
+    if not driver_name:
+        driver_name = f"{form_data.get('last_name', 'driver')}_{form_data.get('first_name', '')}"
+    upload_key = f"{timestamp}_{_slugify(driver_name)}"
+    return submitted_at, upload_key
 
 
 def _build_payload(
@@ -541,6 +552,64 @@ def save_supporting_documents(
         file_map=file_map,
     )
     result["draft_id"] = draft_id
+    result["documents"] = metadata
+    return result
+
+
+def save_document_upload_bundle(
+    *,
+    form_data: dict[str, Any],
+    documents: list[dict[str, Any]],
+    local_base_dir: Path,
+    storage_namespace: str = "",
+) -> dict[str, Any]:
+    """Persist a document-only upload manifest and files outside application submissions."""
+    submitted_at, upload_key = _build_document_upload_key(form_data)
+    relative_prefix = _join_relative_prefix(storage_namespace, DOCUMENT_UPLOADS_DIRNAME, upload_key)
+    file_map: dict[str, tuple[bytes, str]] = {}
+    metadata: list[dict[str, Any]] = []
+
+    for index, document in enumerate(documents, start=1):
+        file_name = str(document.get("file_name") or f"document-{index}").strip() or f"document-{index}"
+        content = document.get("content", b"")
+        content_bytes = content if isinstance(content, bytes) else bytes(content)
+        content_digest = str(document.get("content_digest") or "")
+        suffix = Path(file_name).suffix
+        base_name = Path(file_name).stem or f"document-{index}"
+        stored_name = f"{index:02d}-{_slugify(base_name)}-{content_digest[:12] or index}{suffix.lower()}"
+        file_map[stored_name] = (content_bytes, str(document.get("content_type") or "application/octet-stream"))
+        metadata.append(
+            {
+                "document_type": str(document.get("document_type") or "Unspecified"),
+                "file_name": file_name,
+                "stored_name": stored_name,
+                "content_type": str(document.get("content_type") or "application/octet-stream"),
+                "size_bytes": int(document.get("size_bytes") or len(content_bytes)),
+                "content_digest": content_digest,
+                "storage_path": f"{relative_prefix}/{stored_name}",
+            }
+        )
+
+    payload = {
+        "upload_key": upload_key,
+        "submitted_at": submitted_at,
+        "upload_type": "driver_document_upload_only",
+        "form_data": form_data,
+        "uploaded_documents": metadata,
+    }
+    file_map["document_upload.json"] = (
+        json.dumps(payload, indent=2, default=_json_default).encode("utf-8"),
+        JSON_MIME,
+    )
+
+    result = _save_file_map(
+        local_base_dir=local_base_dir,
+        local_relative_prefix=relative_prefix,
+        supabase_relative_prefix=relative_prefix,
+        file_map=file_map,
+    )
+    result["upload_key"] = upload_key
+    result["submitted_at"] = submitted_at
     result["documents"] = metadata
     return result
 
