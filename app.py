@@ -84,6 +84,15 @@ def _document_upload_requested() -> bool:
     )
 
 
+def _safety_portal_requested() -> bool:
+    """Local route check for the staff Safety Paperwork Portal."""
+    route = _query_param_value("route").strip().lower().replace("_", "-")
+    return (
+        _truthy_query_param(_query_param_value("safety"))
+        or route in {"safety", "safety-portal", "safety-paperwork"}
+    )
+
+
 # Standalone admin dashboard route. Reachable via ?dashboard=1; gated by admin
 # auth config (Google SSO, password fallback, or both). Short-circuits the
 # entire application flow so the dashboard renders by itself.
@@ -109,6 +118,17 @@ if _document_upload_requested():
     from services.document_upload_page import render_document_upload_page
 
     render_document_upload_page(SUBMISSIONS_DIR)
+    render_version_footer()
+    st.stop()
+
+
+# Standalone Safety Paperwork Portal (staff-only). Reachable via ?safety=1 or
+# ?route=safety. SSO-gated inside the page using the QBO allowlist. Lazy
+# import so a parser-side error cannot break overall startup.
+if _safety_portal_requested():
+    from services.safety_portal_page import render_safety_portal_page
+
+    render_safety_portal_page()
     render_version_footer()
     st.stop()
 

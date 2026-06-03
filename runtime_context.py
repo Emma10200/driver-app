@@ -128,6 +128,15 @@ def get_document_upload_storage_namespace() -> str:
     return f"document-uploads/{mode_segment}"
 
 
+def safety_portal_requested() -> bool:
+    """True for the staff-side Safety Paperwork Portal (?safety=1 / ?route=safety)."""
+    route = _query_param_value("route").strip().lower().replace("_", "-")
+    return (
+        _truthy(_query_param_value("safety"))
+        or route in {"safety", "safety-portal", "safety-paperwork"}
+    )
+
+
 def admin_tools_enabled() -> bool:
     if not admin_tools_requested():
         return False
