@@ -238,7 +238,10 @@ def test_send_safety_document_request_email_sends_to_recipient_and_ccs_internal(
     assert smtp_instance is not None
     assert smtp_instance.sent_message is not None
     msg = smtp_instance.sent_message
-    assert msg["From"] == "statements@example.com"
+    assert msg["Subject"] == "Safety paperwork needed - Unit 802 - ABRAHAM PEREZ - Prestige Transportation Inc"
+    assert msg["From"] == "Safety Dept <safety@prestigecalifornia.com>"
+    assert msg["Sender"] == "statements@example.com"
+    assert msg["Reply-To"] == "Safety Dept <safety@prestigecalifornia.com>"
     assert msg["To"] == "owner@example.com"
     assert msg["Cc"] == "safety@example.com, dann@example.com"
     text_part = msg.get_body(preferencelist=("plain",))
@@ -284,6 +287,53 @@ def test_safety_upload_url_default_uses_new_stable_domain(monkeypatch):
     )
 
     assert notification_service._safety_upload_url() == "https://driver-application.streamlit.app/?documents=1"
+
+
+def test_safety_identity_for_division_maps_mailboxes() -> None:
+    assert notification_service._safety_identity_for_division("Xpress Trans Inc") == (
+        "Safety Department",
+        "safety@xpresstransinc.com",
+        "xpress",
+    )
+    assert notification_service._safety_identity_for_division("Prestig Inc") == (
+        "Safety Dept",
+        "safety@prestige.inc",
+        "pg",
+    )
+    assert notification_service._safety_identity_for_division("Prestige Transportation Inc") == (
+        "Safety Dept",
+        "safety@prestigecalifornia.com",
+        "prestige",
+    )
+
+
+def test_safety_email_subject_handles_driver_units_and_multiple_units() -> None:
+    assert notification_service._safety_email_subject(
+        recipient_name="ANTHONY MUNOZ",
+        division="Xpress Trans Inc",
+        items=[{"unit": "—", "document": "DOT Medical Card"}],
+        test_mode=False,
+    ) == "Safety paperwork needed - ANTHONY MUNOZ - Driver docs - Xpress Trans Inc"
+
+    assert notification_service._safety_email_subject(
+        recipient_name="OWNER LLC",
+        division="Prestig Inc",
+        items=[
+            {"unit": "802", "document": "Insurance Certificate"},
+            {"unit": "687", "document": "DOT Inspection"},
+        ],
+        test_mode=False,
+    ) == "Safety paperwork needed - OWNER LLC - Units 802, 687 - Prestig Inc"
+
+    assert notification_service._safety_email_subject(
+        recipient_name="OWNER OPERATOR",
+        division="Prestige Transportation Inc",
+        items=[
+            {"unit": "—", "document": "CDL"},
+            {"unit": "713", "document": "Insurance Certificate"},
+        ],
+        test_mode=True,
+    ) == "[TEST] Safety paperwork needed - OWNER OPERATOR - Driver + Unit 713 - Prestige Transportation Inc"
 
 
 def test_attempt_submission_notification_retries_after_error(monkeypatch):

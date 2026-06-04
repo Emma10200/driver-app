@@ -6,6 +6,7 @@ from datetime import datetime
 import html
 import smtplib
 from email.message import EmailMessage
+from email.utils import formataddr
 from typing import Any
 
 from config import COMPANY_PROFILES, DEFAULT_COMPANY_SLUG
@@ -479,6 +480,70 @@ def _safety_upload_url() -> str:
     return "https://driver-application.streamlit.app/?documents=1"
 
 
+def _safety_company_slug_for_division(division: str) -> str:
+    normalized = "".join(ch.lower() if ch.isalnum() else " " for ch in str(division or ""))
+    normalized = " ".join(normalized.split())
+    if "xpress" in normalized:
+        return "xpress"
+    # ProTransport exports Prestig, Inc. as "Prestig Inc". Prestige
+    # Transportation includes "prestige" too, so only treat it as PG when the
+    # transportation/california wording is absent.
+    if "prestig" in normalized and "transportation" not in normalized and "california" not in normalized:
+        return "pg"
+    return "prestige"
+
+
+def _safety_identity_for_division(division: str) -> tuple[str, str, str]:
+    """Return (display name, mailbox, company_slug) for a safety division."""
+    company_slug = _safety_company_slug_for_division(division)
+    profile = COMPANY_PROFILES.get(company_slug) or COMPANY_PROFILES[DEFAULT_COMPANY_SLUG]
+    display_name = "Safety Department" if company_slug == "xpress" else "Safety Dept"
+    return display_name, profile.email, company_slug
+
+
+def _clean_subject_part(value: Any, *, fallback: str = "Safety request") -> str:
+    text = " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split())
+    return text or fallback
+
+
+def _safety_subject_context(recipient_name: str, items: list[dict[str, Any]]) -> str:
+    units: list[str] = []
+    has_driver_docs = False
+    for item in items:
+        unit = _clean_subject_part(item.get("unit") or item.get("Unit") or "", fallback="")
+        if unit and unit != "—":
+            if unit not in units:
+                units.append(unit)
+        else:
+            has_driver_docs = True
+
+    name = _clean_subject_part(recipient_name, fallback="Safety request")
+    if not units:
+        return f"{name} - Driver docs" if has_driver_docs else name
+    if len(units) == 1:
+        return f"{name} - Driver + Unit {units[0]}" if has_driver_docs else f"Unit {units[0]} - {name}"
+    if len(units) <= 3:
+        unit_part = "Units " + ", ".join(units)
+    else:
+        unit_part = f"{len(units)} units ({', '.join(units[:3])}, +{len(units) - 3})"
+    return f"{name} - Driver + {unit_part}" if has_driver_docs else f"{name} - {unit_part}"
+
+
+def _safety_email_subject(
+    *,
+    recipient_name: str,
+    division: str,
+    items: list[dict[str, Any]],
+    test_mode: bool,
+) -> str:
+    subject_prefix = "[TEST] " if test_mode else ""
+    context = _safety_subject_context(recipient_name, items)
+    division_part = _clean_subject_part(division, fallback="")
+    suffix = f" - {division_part}" if division_part else ""
+    subject = f"{subject_prefix}Safety paperwork needed - {context}{suffix}"
+    return subject[:180]
+
+
 def send_safety_document_request_email(
     *,
     to_email: str,
@@ -502,8 +567,10 @@ def send_safety_document_request_email(
     if not items:
         return {"status": "skipped", "message": "No selected safety paperwork items to send."}
 
-    company_slug = DEFAULT_COMPANY_SLUG
     resolved_test_mode = is_test_mode_active() if test_mode is None else bool(test_mode)
+    recipient_name = str(recipient_name or "Driver/Owner").strip() or "Driver/Owner"
+    division = str(division or "").strip()
+    safety_display_name, safety_email, company_slug = _safety_identity_for_division(division)
     if not notifications_enabled(company_slug, test_mode=resolved_test_mode):
         return {
             "status": "disabled",
@@ -512,15 +579,20 @@ def send_safety_document_request_email(
 
     settings = _notification_settings(company_slug, test_mode=resolved_test_mode)
     cc_recipients = _internal_recipients_only(settings["recipients"], to_email)
-    recipient_name = str(recipient_name or "Driver/Owner").strip() or "Driver/Owner"
-    division = str(division or "").strip()
     upload_url = str(upload_url or "").strip() or _safety_upload_url()
 
     message = EmailMessage()
-    subject_prefix = "[TEST] " if resolved_test_mode else ""
-    division_suffix = f" - {division}" if division else ""
-    message["Subject"] = f"{subject_prefix}Safety paperwork needed{division_suffix}"
-    message["From"] = settings["from_email"]
+    message["Subject"] = _safety_email_subject(
+        recipient_name=recipient_name,
+        division=division,
+        items=items,
+        test_mode=resolved_test_mode,
+    )
+    message["From"] = formataddr((safety_display_name, safety_email))
+    smtp_from = str(settings.get("from_email") or "").strip()
+    if smtp_from and smtp_from.lower() != safety_email.lower():
+        message["Sender"] = smtp_from
+    message["Reply-To"] = formataddr((safety_display_name, safety_email))
     message["To"] = to_email
     if cc_recipients:
         message["Cc"] = ", ".join(cc_recipients)
