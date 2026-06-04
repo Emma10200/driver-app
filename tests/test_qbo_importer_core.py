@@ -420,18 +420,43 @@ class _InvoiceLookup:
     def resolve_entity(self, type_name, name, realm_id):
         if type_name == "Customer":
             return "cust-1"
+        if type_name == "Vendor":
+            return "vendor-1"
         if type_name == "Item":
             return "item-1"
         if type_name == "Term":
             return "term-1"
         return "ref-1"
 
+    def resolve_account(self, account_name, realm_id):
+        return "acct-1"
+
 
 class _NoDuplicateInvoices:
+    def __init__(self):
+        self.invoice_exists_calls = 0
+        self.check_exists_calls = 0
+        self.money_code_exists_calls = 0
+
     def preload_invoice_keys(self, realm_id, min_date, max_date):
         return set()
 
+    def preload_purchase_keys(self, realm_id, payment_type, min_date, max_date):
+        return set()
+
+    def preload_money_code_keys(self, realm_id, min_date, max_date):
+        return set()
+
     def invoice_exists(self, doc_number, realm_id):
+        self.invoice_exists_calls += 1
+        return False
+
+    def check_exists(self, doc_number, txn_date, vendor_id, realm_id):
+        self.check_exists_calls += 1
+        return False
+
+    def money_code_exists(self, doc_number, txn_date, vendor_id, realm_id, amount, memo, expense_account_name):
+        self.money_code_exists_calls += 1
         return False
 
 
@@ -451,7 +476,8 @@ def test_invoice_import_uses_qbo_batch_chunks_of_ten(monkeypatch):
 
     fake_qbo = _BatchQbo()
     audit = _NoopAudit()
-    service = ImportService(fake_qbo, _InvoiceLookup(), _NoDuplicateInvoices(), audit)  # type: ignore[arg-type]
+    dup = _NoDuplicateInvoices()
+    service = ImportService(fake_qbo, _InvoiceLookup(), dup, audit)  # type: ignore[arg-type]
 
     stats = service.post_invoices([{**_invoice_draft(str(num)), "_realmId": "realm-1"} for num in range(12)])
 
@@ -460,6 +486,7 @@ def test_invoice_import_uses_qbo_batch_chunks_of_ten(monkeypatch):
     assert len(fake_qbo.batch_calls) == 2
     assert [len(call[1]) for call in fake_qbo.batch_calls] == [10, 2]
     assert all(request["operation"] == "create" and "Invoice" in request for _, batch in fake_qbo.batch_calls for request in batch)
+    assert dup.invoice_exists_calls == 0
 
 
 def test_invoice_import_holds_rate_limited_batch_rows_for_retry(monkeypatch):
@@ -487,3 +514,95 @@ def test_invoice_import_holds_rate_limited_batch_rows_for_retry(monkeypatch):
     assert all("rate limit" in row["message"].lower() for row in stats.failures)
     assert len(audit.rows) == 3
     assert all("retryable" not in row for row in audit.rows)
+
+
+def _check_draft(doc_number: str) -> dict[str, object]:
+    return {
+        "DocNumber": doc_number,
+        "TxnDate": "2026-05-22",
+        "_division": "Prestig Inc",
+        "_tempVendorName": "Driver One",
+        "AccountRef": {"name": "Main Checking"},
+        "Line": [
+            {
+                "Amount": 100.0,
+                "DetailType": "AccountBasedExpenseLineDetail",
+                "_tempAccountName": "Driver Pay",
+            }
+        ],
+    }
+
+
+def _money_code_draft(doc_number: str) -> dict[str, object]:
+    return {
+        "DocNumber": doc_number,
+        "TxnDate": "2026-05-22",
+        "_division": "Prestig Inc",
+        "_tempVendorName": "Fuel Vendor",
+        "_tempCcAccountName": "Fuel Card - EFS",
+        "_memo": "fuel",
+        "Line": [
+            {
+                "Amount": 50.0,
+                "DetailType": "AccountBasedExpenseLineDetail",
+                "_tempAccountName": "Truck Fuel",
+            }
+        ],
+    }
+
+
+def test_check_import_uses_qbo_batch_and_reports_progress():
+    class _BatchQbo:
+        def __init__(self):
+            self.batch_calls = []
+
+        def batch(self, *, realm_id, requests):
+            self.batch_calls.append((realm_id, requests))
+            return {
+                "BatchItemResponse": [
+                    {"bId": request["bId"], "Purchase": {"Id": f"qbo-{request['bId']}"}}
+                    for request in requests
+                ]
+            }
+
+    fake_qbo = _BatchQbo()
+    dup = _NoDuplicateInvoices()
+    progress = []
+    service = ImportService(fake_qbo, _InvoiceLookup(), dup, _NoopAudit(), progress_callback=lambda *args: progress.append(args))  # type: ignore[arg-type]
+
+    stats = service.post_checks([_check_draft(str(num)) for num in range(11)], target_realm_id="realm-1")
+
+    assert stats.posted == 11
+    assert stats.failed == 0
+    assert [len(call[1]) for call in fake_qbo.batch_calls] == [10, 1]
+    assert all("Purchase" in request and request["Purchase"]["PaymentType"] == "Check" for _, batch in fake_qbo.batch_calls for request in batch)
+    assert dup.check_exists_calls == 0
+    assert progress[-1][0:2] == (11, 11)
+    assert "11/11" in progress[-1][2]
+
+
+def test_money_code_import_uses_qbo_batch_purchase_create():
+    class _BatchQbo:
+        def __init__(self):
+            self.batch_calls = []
+
+        def batch(self, *, realm_id, requests):
+            self.batch_calls.append((realm_id, requests))
+            return {
+                "BatchItemResponse": [
+                    {"bId": request["bId"], "Purchase": {"Id": f"qbo-{request['bId']}"}}
+                    for request in requests
+                ]
+            }
+
+    fake_qbo = _BatchQbo()
+    dup = _NoDuplicateInvoices()
+    service = ImportService(fake_qbo, _InvoiceLookup(), dup, _NoopAudit())  # type: ignore[arg-type]
+
+    stats = service.post_money_codes([_money_code_draft(str(num)) for num in range(3)], target_realm_id="realm-1")
+
+    assert stats.posted == 3
+    assert stats.failed == 0
+    assert len(fake_qbo.batch_calls) == 1
+    assert all("Purchase" in request and request["Purchase"]["PaymentType"] == "CreditCard" for _, batch in fake_qbo.batch_calls for request in batch)
+    assert dup.money_code_exists_calls == 0

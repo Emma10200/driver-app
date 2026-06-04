@@ -883,11 +883,18 @@ def _post_preview_to_qbo(
         source_hash=upload_hash,
     )
     qbo_client = QboClient(auth_service)
+    progress_bar = st.progress(0.0, text=f"Posting to QuickBooks: 0/{len(preview.drafts)} — starting…")
+
+    def _update_import_progress(done: int, total: int, message: str) -> None:
+        fraction = min(1.0, max(0.0, (done / total) if total else 0.0))
+        progress_bar.progress(fraction, text=message)
+
     import_service = ImportService(
         qbo_client,
         EntityLookupService(qbo_client),
         DuplicateChecker(qbo_client),
         audit,
+        progress_callback=_update_import_progress,
     )
     with st.spinner("Posting to QuickBooks… please keep this tab open."):
         start_ts = datetime.now(tz=timezone.utc)
@@ -905,6 +912,8 @@ def _post_preview_to_qbo(
             assert target_realm is not None
             stats = import_service.post_money_codes(preview.drafts, target_realm_id=target_realm.realm_id)
         duration_ms = int((datetime.now(tz=timezone.utc) - start_ts).total_seconds() * 1000)
+    completed = int(getattr(stats, "posted", 0) or 0) + int(getattr(stats, "skipped_duplicates", 0) or 0) + int(getattr(stats, "failed", 0) or 0)
+    progress_bar.progress(1.0, text=f"Posting complete: {completed}/{len(preview.drafts)} processed.")
 
     held = int(getattr(stats, "held_for_retry", 0) or 0)
     st.success(f"Done: posted {stats.posted}, duplicates {stats.skipped_duplicates}, failed {stats.failed}.")
