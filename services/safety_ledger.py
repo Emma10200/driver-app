@@ -16,9 +16,11 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from services.safety_link_store import list_safety_upload_links
+from submission_storage import list_supabase_document_upload_manifests
 
 _LEDGER_FILE = "ledger.json"
 _DEFAULT_COOLDOWN_DAYS = 7
+_SAFETY_UPLOAD_NAMESPACES = ("safety-uploads/live", "safety-uploads/test-mode", "")
 _lock = threading.Lock()
 
 
@@ -416,6 +418,7 @@ def record_upload_event(
 
 def _iter_safety_upload_manifests(submissions_dir: Path) -> list[dict[str, Any]]:
     manifests: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for path in submissions_dir.rglob("document_upload.json"):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -426,7 +429,22 @@ def _iter_safety_upload_manifests(submissions_dir: Path) -> list[dict[str, Any]]
             continue
         if form_data.get("upload_type") != "safety_document_upload":
             continue
+        identity = _safe(payload.get("upload_key") or path)
+        if identity in seen:
+            continue
+        seen.add(identity)
         manifests.append(payload)
+
+    for namespace in _SAFETY_UPLOAD_NAMESPACES:
+        for payload in list_supabase_document_upload_manifests(
+            storage_namespace=namespace,
+            upload_type="safety_document_upload",
+        ):
+            identity = _safe(payload.get("upload_key") or payload.get("_remote_prefix"))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            manifests.append(payload)
     return manifests
 
 

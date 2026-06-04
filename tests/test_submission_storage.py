@@ -72,3 +72,45 @@ def test_save_document_upload_bundle_is_company_agnostic(tmp_path, monkeypatch):
         "document-uploads/live/document_uploads/20260603_101112_jane-driver/"
     )
     assert (expected_dir / payload["uploaded_documents"][0]["stored_name"]).read_bytes() == b"fake pdf bytes"
+
+
+def test_list_supabase_document_upload_manifests_filters_by_upload_type(monkeypatch):
+    safety_manifest = {
+        "upload_key": "20260603_101112_owner-one",
+        "submitted_at": "2026-06-03T10:11:12",
+        "form_data": {"upload_type": "safety_document_upload"},
+        "uploaded_documents": [{"file_name": "insurance.pdf"}],
+    }
+    generic_manifest = {
+        "upload_key": "20260603_101113_driver-two",
+        "submitted_at": "2026-06-03T10:11:13",
+        "form_data": {"upload_type": "driver_document_upload_only"},
+        "uploaded_documents": [{"file_name": "license.pdf"}],
+    }
+
+    def fake_read(path: str) -> bytes:
+        if path.endswith("20260603_101112_owner-one/document_upload.json"):
+            return json.dumps(safety_manifest).encode("utf-8")
+        if path.endswith("20260603_101113_driver-two/document_upload.json"):
+            return json.dumps(generic_manifest).encode("utf-8")
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(submission_storage, "_supabase_enabled", lambda: True)
+    monkeypatch.setattr(
+        submission_storage,
+        "_supabase_list",
+        lambda prefix, limit=1000: [
+            {"name": "20260603_101112_owner-one", "id": None},
+            {"name": "20260603_101113_driver-two", "id": None},
+        ],
+    )
+    monkeypatch.setattr(submission_storage, "_read_supabase_bytes", fake_read)
+
+    manifests = submission_storage.list_supabase_document_upload_manifests(
+        storage_namespace="safety-uploads/live",
+        upload_type="safety_document_upload",
+    )
+
+    assert len(manifests) == 1
+    assert manifests[0]["upload_key"] == "20260603_101112_owner-one"
+    assert manifests[0]["_remote_prefix"] == "safety-uploads/live/document_uploads/20260603_101112_owner-one"

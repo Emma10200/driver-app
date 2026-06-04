@@ -793,3 +793,58 @@ def read_remote_file_bytes(remote_prefix: str, file_name: str) -> bytes | None:
     except Exception:  # noqa: BLE001
         return None
 
+
+def list_supabase_document_upload_manifests(
+    *,
+    storage_namespace: str = "",
+    upload_type: str | None = None,
+    limit: int = 1000,
+) -> list[dict[str, Any]]:
+    """List and load document-upload manifests from Supabase Storage.
+
+    Document-only upload bundles are stored as::
+
+        <storage_namespace>/document_uploads/<upload_key>/document_upload.json
+
+    The safety dashboard uses this to backfill uploads that were saved in
+    Supabase by Streamlit Cloud, where local filesystem scans cannot see them.
+    Returns an empty list on configuration/listing/read failures so dashboards
+    remain usable even if remote storage is unavailable.
+    """
+
+    if not _supabase_enabled():
+        return []
+
+    prefix = _join_relative_prefix(storage_namespace, DOCUMENT_UPLOADS_DIRNAME)
+    try:
+        upload_dirs = _supabase_list(prefix, limit=limit)
+    except Exception:  # noqa: BLE001 - dashboards should not crash on storage listing failures
+        return []
+
+    manifests: list[dict[str, Any]] = []
+    for entry in upload_dirs:
+        upload_key = str(entry.get("name") or "").strip("/")
+        if not upload_key:
+            continue
+        # Supabase returns folder entries with no id. If a provider returns a
+        # file entry here, trying the conventional manifest path is harmless.
+        remote_prefix = f"{prefix}/{upload_key}".strip("/")
+        try:
+            raw = _read_supabase_bytes(f"{remote_prefix}/document_upload.json")
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(payload, dict):
+            continue
+        form_data = payload.get("form_data") if isinstance(payload.get("form_data"), dict) else {}
+        if upload_type and form_data.get("upload_type") != upload_type:
+            continue
+        payload = dict(payload)
+        payload.setdefault("upload_key", upload_key)
+        payload["_remote_prefix"] = remote_prefix
+        payload["_storage_backend"] = "supabase"
+        manifests.append(payload)
+
+    manifests.sort(key=lambda item: str(item.get("submitted_at") or item.get("upload_key") or ""), reverse=True)
+    return manifests
+

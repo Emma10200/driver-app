@@ -4,6 +4,9 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
+import services.safety_ledger as safety_ledger
 from services.safety_ledger import (
     annotate_rows_for_send_queue,
     backfill_safety_ledger,
@@ -177,3 +180,45 @@ def test_backfill_safety_ledger_from_links_and_upload_manifests(tmp_path: Path) 
     assert records[0]["send_count"] == 1
     assert records[0]["ledger_state"] == "Submitted"
     assert records[0]["uploads"][0]["storage_path"].endswith("insurance.pdf")
+
+
+def test_backfill_safety_ledger_reads_supabase_safety_upload_manifests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    submissions_dir = tmp_path / "submissions"
+    remote_manifest = {
+        "upload_key": "20260603_101112_owner-one",
+        "submitted_at": "2026-06-03T10:11:12+00:00",
+        "form_data": {
+            "upload_type": "safety_document_upload",
+            "safety_link_token": "tok_remote",
+            "email": "owner@example.com",
+            "driver_name": "Owner One",
+            "division": "Prestige Transportation Inc",
+            "requested_items": [{"unit": "802", "document": "Insurance Certificate"}],
+        },
+        "uploaded_documents": [
+            {
+                "document_type": "Unit 802 - Insurance Certificate",
+                "file_name": "insurance.pdf",
+                "stored_name": "insurance.pdf",
+                "content_type": "application/pdf",
+                "size_bytes": 12,
+                "storage_path": "safety-uploads/live/document_uploads/20260603_101112_owner-one/insurance.pdf",
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        safety_ledger,
+        "list_supabase_document_upload_manifests",
+        lambda **_: [remote_manifest],
+    )
+
+    result = backfill_safety_ledger(submissions_dir)
+
+    assert result["upload_events"] == 1
+    records = list_ledger_records(submissions_dir, backfill=False)
+    assert records[0]["ledger_state"] == "Submitted"
+    assert records[0]["uploads"][0]["storage_path"].startswith("safety-uploads/live/")
