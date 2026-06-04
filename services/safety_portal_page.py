@@ -8,6 +8,8 @@ before sending real emails.
 
 from __future__ import annotations
 
+import base64
+import html
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,14 @@ import streamlit as st
 
 from services.notification_service import send_safety_document_request_email
 from services.qbo_auth import qbo_allowed_emails
+from services.safety_ledger import (
+    annotate_rows_for_send_queue,
+    backfill_safety_ledger,
+    ledger_summary,
+    list_ledger_records,
+    record_send_event,
+    upsert_import_rows,
+)
 from services.safety_link_store import create_safety_upload_link
 from services.safety_paperwork import (
     DOC_TYPE_LABELS,
@@ -35,6 +45,7 @@ from services.safety_reference_db import (
     upsert_drivers,
     upsert_trucks,
 )
+from submission_storage import read_supporting_document_bytes
 
 
 def _mapping_get(mapping: Any, key: str) -> Any:
@@ -180,6 +191,7 @@ def _group_selected_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         )
         bundle["items"].append(
             {
+                "item_key": row.get("_item_key"),
                 "unit": row.get("Unit"),
                 "document": row.get("Document"),
                 "expires": row.get("Expires"),
@@ -200,7 +212,7 @@ def _render_send_queue(recipients: list[RecipientBundle], *, preview_version: in
         "For example, uncheck IFTA if it is handled internally. Only checked rows are sent."
     )
 
-    rows = _send_queue_rows(recipients)
+    rows = annotate_rows_for_send_queue(submissions_dir, _send_queue_rows(recipients))
     edited = st.data_editor(
         rows,
         key=f"safety_send_queue_editor_{preview_version}",
@@ -216,6 +228,11 @@ def _render_send_queue(recipients: list[RecipientBundle], *, preview_version: in
             "Document",
             "Expires",
             "Status",
+            "Ledger status",
+            "Last emailed",
+            "Sent count",
+            "Last upload",
+            "Action note",
         ],
         disabled=[
             "Recipient",
@@ -226,6 +243,11 @@ def _render_send_queue(recipients: list[RecipientBundle], *, preview_version: in
             "Document",
             "Expires",
             "Status",
+            "Ledger status",
+            "Last emailed",
+            "Sent count",
+            "Last upload",
+            "Action note",
         ],
         column_config={
             "Include": st.column_config.CheckboxColumn("Include in email?", default=True),
@@ -274,6 +296,15 @@ def _render_send_queue(recipients: list[RecipientBundle], *, preview_version: in
                 items=bundle["items"],
                 upload_url=str(link.get("url") or ""),
             )
+            if result.get("status") == "sent":
+                record_send_event(
+                    submissions_dir,
+                    recipient_email=bundle["email"],
+                    recipient_name=bundle["recipient_name"],
+                    division=bundle["division"],
+                    items=bundle["items"],
+                    token=str(link.get("token") or ""),
+                )
             results.append(
                 {
                     "Email": bundle["email"],
@@ -327,6 +358,143 @@ def _render_review(review: list[ReviewIssue]) -> None:
             hide_index=True,
             use_container_width=True,
         )
+
+
+def _render_file_preview(file_name: str, content_type: str, content: bytes) -> None:
+    if not content:
+        st.warning("File bytes are not available from storage.")
+        return
+    lower_name = file_name.lower()
+    if content_type == "application/pdf" or lower_name.endswith(".pdf"):
+        encoded = base64.b64encode(content).decode("ascii")
+        st.markdown(
+            f'<iframe src="data:application/pdf;base64,{encoded}" width="100%" height="520" style="border:1px solid #e5e7eb;border-radius:8px;"></iframe>',
+            unsafe_allow_html=True,
+        )
+    elif content_type.startswith("image/") or lower_name.endswith((".png", ".jpg", ".jpeg")):
+        st.image(content, caption=file_name, use_container_width=True)
+    else:
+        st.caption("Preview is not available for this file type. Use the download button.")
+
+
+def _render_uploaded_documents(record: dict[str, Any], submissions_dir: Path) -> None:
+    uploads = [dict(item) for item in (record.get("uploads") or []) if isinstance(item, dict)]
+    if not uploads:
+        return
+    st.markdown("**Submitted file(s)**")
+    for index, upload in enumerate(uploads, start=1):
+        file_name = str(upload.get("file_name") or upload.get("stored_name") or f"document-{index}")
+        content_type = str(upload.get("content_type") or "application/octet-stream")
+        content = read_supporting_document_bytes(upload, local_base_dir=submissions_dir)
+        cols = st.columns([3, 1])
+        with cols[0]:
+            st.markdown(
+                f"{index}. **{html.escape(file_name)}**  \n"
+                f"Type: `{html.escape(str(upload.get('document_type') or 'Document'))}` · "
+                f"Submitted: `{html.escape(str(upload.get('submitted_at') or ''))}`"
+            )
+        with cols[1]:
+            st.download_button(
+                "Download",
+                data=content or b"",
+                file_name=file_name,
+                mime=content_type,
+                disabled=not bool(content),
+                key=f"safety_download_{record.get('item_key')}_{index}_{upload.get('event_id')}",
+                use_container_width=True,
+            )
+        if content:
+            with st.expander(f"View {file_name}", expanded=False):
+                _render_file_preview(file_name, content_type, content)
+        else:
+            st.warning(f"Could not load `{file_name}` from storage. It may only exist in a remote backend not currently configured.")
+
+
+def _render_ledger_dashboard(submissions_dir: Path) -> None:
+    st.subheader("Safety dashboard")
+    backfill_result = backfill_safety_ledger(submissions_dir)
+    summary = ledger_summary(submissions_dir, backfill=False)
+    cols = st.columns(5)
+    cols[0].metric("Ledger items", summary["total"])
+    cols[1].metric("Recently sent", summary["recently_sent"])
+    cols[2].metric("Needs nudge", summary["needs_nudge"])
+    cols[3].metric("Submitted", summary["submitted"])
+    cols[4].metric("Resolved", summary["resolved"])
+    if backfill_result.get("sent_events") or backfill_result.get("upload_events"):
+        st.caption(
+            f"Backfilled {backfill_result.get('sent_events', 0)} historical send event(s) and "
+            f"{backfill_result.get('upload_events', 0)} upload event(s) from saved links/manifests."
+        )
+
+    records = list_ledger_records(submissions_dir, backfill=False)
+    if not records:
+        st.info("No safety ledger records yet. Build a warnings preview or send a safety request to start the ledger.")
+        return
+
+    divisions = sorted({str(r.get("division") or "(no division)") for r in records})
+    states = sorted({str(r.get("ledger_state") or "") for r in records if r.get("ledger_state")})
+    c1, c2, c3 = st.columns([1.2, 1.2, 1.6])
+    with c1:
+        division_filter = st.selectbox("Division", ["All"] + divisions, key="safety_ledger_division_filter")
+    with c2:
+        state_filter = st.multiselect(
+            "Status",
+            states,
+            default=[s for s in states if s != "Resolved"],
+            key="safety_ledger_state_filter",
+        )
+    with c3:
+        search = st.text_input("Search recipient / unit / document", key="safety_ledger_search")
+
+    filtered = []
+    query = search.strip().lower()
+    for record in records:
+        if division_filter != "All" and str(record.get("division") or "(no division)") != division_filter:
+            continue
+        if state_filter and record.get("ledger_state") not in state_filter:
+            continue
+        haystack = " ".join(
+            str(record.get(key) or "")
+            for key in ("recipient_name", "recipient_email", "unit", "document", "status", "item_key")
+        ).lower()
+        if query and query not in haystack:
+            continue
+        filtered.append(record)
+
+    st.dataframe(
+        [
+            {
+                "State": r.get("ledger_state"),
+                "Recipient": r.get("recipient_name"),
+                "Email": r.get("recipient_email"),
+                "Division": r.get("division"),
+                "Unit": r.get("unit"),
+                "Document": r.get("document"),
+                "Expires": r.get("expires"),
+                "Last emailed": r.get("last_sent_display"),
+                "Sent count": r.get("send_count"),
+                "Last upload": r.get("last_upload_display"),
+                "Suppressed until": r.get("suppressed_until_display"),
+            }
+            for r in filtered
+        ],
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    uploaded = [r for r in filtered if r.get("uploads")]
+    with st.expander(f"Submitted documents ({len(uploaded)})", expanded=bool(uploaded)):
+        if not uploaded:
+            st.caption("No submitted documents match the current filters.")
+        for record in uploaded[:50]:
+            title = (
+                f"{record.get('recipient_name') or 'Recipient'} · "
+                f"Unit {record.get('unit') or '—'} · {record.get('document') or 'Document'} · "
+                f"{record.get('last_upload_display') or ''}"
+            )
+            with st.expander(title, expanded=False):
+                st.caption(f"Item key: {record.get('item_key')}")
+                _render_uploaded_documents(record, submissions_dir)
 
 
 def _render_excluded_doc_types() -> None:
@@ -425,11 +593,13 @@ def render_safety_portal_page(submissions_dir: Path) -> None:
 
     st.title("🛡️ Safety Paperwork Portal")
     st.caption(
-        "Phase 1 — staff workspace. The reference database stores drivers and "
-        "truck owners over time. Each preview run only needs the two warnings "
-        "CSVs from ProTransport. Emails only send after you review the checkbox queue "
-        "and confirm the real-send step."
+        "Staff workspace for reference data, ProTransport warning previews, "
+        "recipient-specific safety links, nudge tracking, and submitted-document review. "
+        "Emails only send after you review the checkbox queue and confirm the real-send step."
     )
+
+    _render_ledger_dashboard(submissions_dir)
+    st.divider()
 
     _render_reference_section(submissions_dir)
     st.divider()
@@ -493,9 +663,19 @@ def render_safety_portal_page(submissions_dir: Path) -> None:
             st.error(f"Could not build preview: {exc}")
             return
 
+        ledger_update = upsert_import_rows(
+            submissions_dir,
+            _send_queue_rows(preview.recipients),
+            full_export=True,
+            source="warnings_preview",
+        )
         st.session_state["safety_import_preview"] = preview
         st.session_state["safety_preview_version"] = int(st.session_state.get("safety_preview_version", 0) or 0) + 1
-        st.success("Preview built. Review the checkbox queue below, then confirm before sending.")
+        st.success(
+            "Preview built. Review the checkbox queue below, then confirm before sending. "
+            f"Ledger: {ledger_update['added']} new, {ledger_update['updated']} updated, "
+            f"{ledger_update['resolved']} resolved from latest full export."
+        )
 
     preview = st.session_state.get("safety_import_preview")
     if not preview:

@@ -19,6 +19,7 @@ from services.document_upload_page import (
 )
 from services.error_log_service import log_application_error
 from services.notification_service import send_internal_document_upload_notification
+from services.safety_ledger import record_upload_event
 from services.safety_link_store import get_safety_upload_link
 from submission_storage import save_document_upload_bundle
 from ui.common import BASE_STYLES, show_missing_fields
@@ -220,6 +221,26 @@ def render_safety_upload_page(submissions_dir: Path, token: str) -> None:
         )
         st.warning("We couldn't save the uploaded documents right now. Please try again.")
         return
+
+    try:
+        record_upload_event(
+            submissions_dir,
+            token=token,
+            recipient_email=recipient_email,
+            recipient_name=recipient_name,
+            division=division,
+            requested_items=items,
+            uploaded_documents=upload_result.get("documents", []),
+            submitted_at=submitted_at,
+            upload_key=str(upload_result.get("upload_key") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log_application_error(
+            code="safety_upload_ledger_record_failed",
+            user_message="Safety document upload was saved but could not be recorded in the safety ledger.",
+            technical_details=str(exc),
+            severity="warning",
+        )
 
     try:
         notification_result = send_internal_document_upload_notification(

@@ -116,3 +116,16 @@ def get_safety_upload_link(*, submissions_dir: Path, token: str) -> dict[str, An
     record = dict(record)
     record["expired"] = bool(expires_at and expires_at < _now())
     return record
+
+
+def list_safety_upload_links(*, submissions_dir: Path) -> list[dict[str, Any]]:
+    """Return all generated safety upload links, newest first."""
+    rows = []
+    for token, record in _read_links(_links_path(submissions_dir)).items():
+        item = dict(record)
+        item.setdefault("token", token)
+        expires_at = _parse_dt(str(item.get("expires_at") or ""))
+        item["expired"] = bool(expires_at and expires_at < _now())
+        rows.append(item)
+    rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    return rows

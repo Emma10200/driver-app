@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from services.safety_link_store import create_safety_upload_link, get_safety_upload_link, safety_upload_url
+from services.safety_link_store import (
+    create_safety_upload_link,
+    get_safety_upload_link,
+    list_safety_upload_links,
+    safety_upload_url,
+)
 
 
 def test_safety_upload_url_uses_stable_driver_application_domain() -> None:
@@ -34,6 +39,11 @@ def test_create_and_get_safety_upload_link(tmp_path: Path) -> None:
     assert loaded["recipient_name"] == "ABRAHAM PEREZ"
     assert loaded["items"][0]["document"] == "Insurance Certificate"
     assert loaded["expired"] is False
+
+    links = list_safety_upload_links(submissions_dir=sub)
+    assert len(links) == 1
+    assert links[0]["token"] == token
+    assert links[0]["expired"] is False
 
 
 def test_missing_safety_upload_link_returns_none(tmp_path: Path) -> None:
