@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from qbo.duplicate_check import build_invoice_key, build_money_code_key
+from qbo.api_client import QboRateLimitError
 from qbo.file_loader import FileLoader
+from qbo.import_service import ImportService
 from qbo.lookups import EntityLookupService
 from qbo.models import ConnectedRealm, PreviewResult
 from qbo.parsers import DriverStatementParser, MoneyCodeParser
@@ -394,3 +396,94 @@ def test_retry_filter_keeps_only_selected_failed_docs():
     assert filtered.count == 1
     assert filtered.rows == [{"Doc #": "200"}]
     assert filtered.drafts == [{"DocNumber": "200"}]
+
+
+def _invoice_draft(doc_number: str) -> dict[str, object]:
+    return {
+        "DocNumber": doc_number,
+        "TxnDate": "2026-05-22",
+        "_division": "Prestig Inc",
+        "_tempCustomerName": "TGR Logistics - PT",
+        "Line": [{"Amount": 100.0, "DetailType": "SalesItemLineDetail"}],
+    }
+
+
+class _NoopAudit:
+    def __init__(self):
+        self.rows = []
+
+    def record(self, **row):
+        self.rows.append(row)
+
+
+class _InvoiceLookup:
+    def resolve_entity(self, type_name, name, realm_id):
+        if type_name == "Customer":
+            return "cust-1"
+        if type_name == "Item":
+            return "item-1"
+        if type_name == "Term":
+            return "term-1"
+        return "ref-1"
+
+
+class _NoDuplicateInvoices:
+    def preload_invoice_keys(self, realm_id, min_date, max_date):
+        return set()
+
+    def invoice_exists(self, doc_number, realm_id):
+        return False
+
+
+def test_invoice_import_uses_qbo_batch_chunks_of_ten(monkeypatch):
+    class _BatchQbo:
+        def __init__(self):
+            self.batch_calls = []
+
+        def batch(self, *, realm_id, requests):
+            self.batch_calls.append((realm_id, requests))
+            return {
+                "BatchItemResponse": [
+                    {"bId": request["bId"], "Invoice": {"Id": f"qbo-{request['bId']}"}}
+                    for request in requests
+                ]
+            }
+
+    fake_qbo = _BatchQbo()
+    audit = _NoopAudit()
+    service = ImportService(fake_qbo, _InvoiceLookup(), _NoDuplicateInvoices(), audit)  # type: ignore[arg-type]
+
+    stats = service.post_invoices([{**_invoice_draft(str(num)), "_realmId": "realm-1"} for num in range(12)])
+
+    assert stats.posted == 12
+    assert stats.failed == 0
+    assert len(fake_qbo.batch_calls) == 2
+    assert [len(call[1]) for call in fake_qbo.batch_calls] == [10, 2]
+    assert all(request["operation"] == "create" and "Invoice" in request for _, batch in fake_qbo.batch_calls for request in batch)
+
+
+def test_invoice_import_holds_rate_limited_batch_rows_for_retry(monkeypatch):
+    monkeypatch.setattr("qbo.import_service.time.sleep", lambda *_args, **_kwargs: None)
+
+    class _RateLimitedQbo:
+        def batch(self, *, realm_id, requests):
+            raise QboRateLimitError(
+                "QBO POST /batch failed: HTTP 429 throttled",
+                status_code=429,
+                response_text="throttled",
+                retry_after_seconds=60,
+            )
+
+    audit = _NoopAudit()
+    service = ImportService(_RateLimitedQbo(), _InvoiceLookup(), _NoDuplicateInvoices(), audit)  # type: ignore[arg-type]
+
+    stats = service.post_invoices([{**_invoice_draft(str(num)), "_realmId": "realm-1"} for num in range(3)])
+
+    assert stats.posted == 0
+    assert stats.failed == 3
+    assert stats.held_for_retry == 3
+    assert len(stats.failures) == 3
+    assert all(row["retryable"] is True for row in stats.failures)
+    assert all("rate limit" in row["message"].lower() for row in stats.failures)
+    assert len(audit.rows) == 3
+    assert all("retryable" not in row for row in audit.rows)

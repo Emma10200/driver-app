@@ -906,7 +906,13 @@ def _post_preview_to_qbo(
             stats = import_service.post_money_codes(preview.drafts, target_realm_id=target_realm.realm_id)
         duration_ms = int((datetime.now(tz=timezone.utc) - start_ts).total_seconds() * 1000)
 
+    held = int(getattr(stats, "held_for_retry", 0) or 0)
     st.success(f"Done: posted {stats.posted}, duplicates {stats.skipped_duplicates}, failed {stats.failed}.")
+    if held:
+        st.warning(
+            f"QuickBooks throttled part of the import. {held} row(s) were held as retryable failures. "
+            "Open Import history → Retry failed rows after waiting about a minute."
+        )
     _render_import_stats(stats)
 
     try:
@@ -1392,6 +1398,7 @@ def _render_import_stats(stats: Any) -> None:
                     "Date": item.get("txn_date"),
                     "Customer / Vendor": item.get("entity_name"),
                     "Amount": _format_amount(item.get("amount")),
+                    "Retryable?": "Yes" if item.get("retryable") else "",
                     "QBO Id / Message": item.get("qbo_id") or item.get("message") or "",
                 }
             )
@@ -1460,7 +1467,7 @@ def _friendly_history_reason(row: dict[str, Any]) -> str:
     if "http 401" in lower or "authentication" in lower:
         return "QuickBooks authorization failed. Reconnect the company, then retry."
     if "http 429" in lower or "rate limit" in lower:
-        return "QuickBooks rate-limited the request. Wait a minute, then retry."
+        return "QuickBooks rate-limited the request. This row is held for retry; wait about a minute, then retry."
     if any(token in lower for token in ("http 500", "http 502", "http 503", "http 504")):
         return "QuickBooks had a temporary server error. Retry is usually safe."
     if "business validation error" in lower:

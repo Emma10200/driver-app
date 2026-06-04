@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from qbo.api_client import QboClient
+from qbo.api_client import QboClient, QboRateLimitError
 from qbo.duplicate_check import (
     DuplicateChecker,
     build_invoice_key,
@@ -16,6 +16,7 @@ from qbo.models import ImportStats
 
 _POST_DELAY_SECONDS = 0.35
 _RETRY_DELAYS = (1.0, 3.0, 8.0)
+_INVOICE_BATCH_SIZE = 10
 
 
 def _grouped_by_realm(records: list[dict[str, Any]], default_realm: str) -> dict[str, list[dict[str, Any]]]:
@@ -57,9 +58,154 @@ class ImportService:
                     existing_keys = self._dup.preload_invoice_keys(realm_id, window[0], window[1])
                 except RuntimeError as exc:
                     stats.warnings.append(f"Realm {realm_id}: invoice dedup preload failed, falling back per record ({exc}).")
-            for draft in group:
-                self._post_one_invoice(draft, realm_id, existing_keys, stats)
+            prepared = self._prepare_invoice_batch(group, realm_id, existing_keys, stats)
+            self._post_invoice_batches(prepared, realm_id, existing_keys, stats)
         return stats
+
+    def _prepare_invoice_batch(
+        self,
+        drafts: list[dict[str, Any]],
+        realm_id: str,
+        existing_keys: set[str],
+        stats: ImportStats,
+    ) -> list[dict[str, Any]]:
+        prepared: list[dict[str, Any]] = []
+        for draft in drafts:
+            doc_number = str(draft.get("DocNumber") or "")
+            txn_date = str(draft.get("TxnDate") or "")
+            division = str(draft.get("_division") or "")
+            customer_name = str(draft.get("_tempCustomerName") or "")
+            amount = self._draft_amount(draft)
+            try:
+                customer_id = self._lookups.resolve_entity("Customer", customer_name, realm_id)
+                if not customer_id:
+                    self._record_failure(stats, "Invoice", realm_id, division, doc_number, txn_date, customer_name, amount, f"Customer '{customer_name}' not found in QBO.")
+                    continue
+                dup_key = build_invoice_key(doc_number, txn_date, customer_id)
+                if dup_key and dup_key in existing_keys:
+                    self._record_duplicate(stats, "Invoice", realm_id, division, doc_number, txn_date, customer_name, amount)
+                    continue
+                if not existing_keys and self._dup.invoice_exists(doc_number, realm_id):
+                    self._record_duplicate(stats, "Invoice", realm_id, division, doc_number, txn_date, customer_name, amount)
+                    continue
+                payload = self._materialize_invoice_payload(draft, customer_id, realm_id)
+            except RuntimeError as exc:
+                self._record_failure(stats, "Invoice", realm_id, division, doc_number, txn_date, customer_name, amount, str(exc))
+                continue
+            prepared.append(
+                {
+                    "payload": payload,
+                    "dup_key": dup_key,
+                    "realm_id": realm_id,
+                    "division": division,
+                    "doc_number": doc_number,
+                    "txn_date": txn_date,
+                    "entity_name": customer_name,
+                    "amount": amount,
+                }
+            )
+        return prepared
+
+    def _post_invoice_batches(
+        self,
+        prepared: list[dict[str, Any]],
+        realm_id: str,
+        existing_keys: set[str],
+        stats: ImportStats,
+    ) -> None:
+        index = 0
+        while index < len(prepared):
+            chunk = prepared[index : index + _INVOICE_BATCH_SIZE]
+            try:
+                response = self._post_batch_with_retry(
+                    realm_id=realm_id,
+                    batch_items=[
+                        {
+                            "bId": f"inv{index + offset + 1}",
+                            "operation": "create",
+                            "Invoice": item["payload"],
+                        }
+                        for offset, item in enumerate(chunk)
+                    ],
+                )
+            except QboRateLimitError as exc:
+                held = prepared[index:]
+                for item in held:
+                    self._record_failure(
+                        stats,
+                        "Invoice",
+                        item["realm_id"],
+                        item["division"],
+                        item["doc_number"],
+                        item["txn_date"],
+                        item["entity_name"],
+                        item["amount"],
+                        _rate_limit_hold_message(exc),
+                        retryable=True,
+                    )
+                stats.warnings.append(f"Realm {realm_id}: QuickBooks rate limit reached. Held {len(held)} invoice(s) for retry instead of continuing to hammer the API.")
+                return
+            except RuntimeError as exc:
+                for item in chunk:
+                    self._record_failure(
+                        stats,
+                        "Invoice",
+                        item["realm_id"],
+                        item["division"],
+                        item["doc_number"],
+                        item["txn_date"],
+                        item["entity_name"],
+                        item["amount"],
+                        str(exc),
+                        retryable=_is_transient_error(str(exc)),
+                    )
+                index += _INVOICE_BATCH_SIZE
+                continue
+
+            by_bid = {
+                str(item.get("bId") or ""): item
+                for item in (response.get("BatchItemResponse") or [])
+                if isinstance(item, dict)
+            }
+            for offset, item in enumerate(chunk):
+                b_id = f"inv{index + offset + 1}"
+                item_response = by_bid.get(b_id) or {}
+                fault = item_response.get("Fault")
+                if fault:
+                    message = _batch_fault_message(fault)
+                    self._record_failure(
+                        stats,
+                        "Invoice",
+                        item["realm_id"],
+                        item["division"],
+                        item["doc_number"],
+                        item["txn_date"],
+                        item["entity_name"],
+                        item["amount"],
+                        message,
+                        retryable=_is_transient_error(message),
+                    )
+                    continue
+                invoice = item_response.get("Invoice") or {}
+                qbo_id = str(invoice.get("Id") or "")
+                if not qbo_id:
+                    self._record_failure(
+                        stats,
+                        "Invoice",
+                        item["realm_id"],
+                        item["division"],
+                        item["doc_number"],
+                        item["txn_date"],
+                        item["entity_name"],
+                        item["amount"],
+                        "QuickBooks batch response did not include an Invoice Id. Retry this row after reviewing QBO.",
+                        retryable=True,
+                    )
+                    continue
+                self._record_success(stats, item_response, "Invoice", item["realm_id"], item["division"], item["doc_number"], item["txn_date"], item["entity_name"], item["amount"], qbo_id)
+                if item.get("dup_key"):
+                    existing_keys.add(str(item["dup_key"]))
+            index += _INVOICE_BATCH_SIZE
 
     def post_checks(self, checks: list[dict[str, Any]], target_realm_id: str = "") -> ImportStats:
         stats = ImportStats()
@@ -271,6 +417,27 @@ class ImportService:
             raise last_error
         raise RuntimeError("Unknown POST failure")
 
+    def _post_batch_with_retry(self, *, realm_id: str, batch_items: list[dict[str, Any]]) -> dict[str, Any]:
+        last_error: Exception | None = None
+        for attempt, delay in enumerate((0.0,) + _RETRY_DELAYS):
+            if delay:
+                time.sleep(delay)
+            try:
+                return self._qbo.batch(realm_id=realm_id, requests=batch_items)
+            except QboRateLimitError as exc:
+                # Intuit's QBO guidance for HTTP 429 is to wait about 60 seconds
+                # before retrying. Do not retry these short-delay attempts;
+                # bubble up so the caller can hold remaining rows for retry.
+                raise exc
+            except RuntimeError as exc:
+                msg = str(exc)
+                last_error = exc
+                if not _is_transient_error(msg) or attempt == len(_RETRY_DELAYS):
+                    raise
+        if last_error:
+            raise last_error
+        raise RuntimeError("Unknown QBO batch failure")
+
     @staticmethod
     def _draft_amount(draft: dict[str, Any]) -> float:
         total = 0.0
@@ -300,10 +467,37 @@ class ImportService:
         stats.bump_division(division, "duplicate")
         self._audit.record(**row, message="Duplicate detected via composite key.")
 
-    def _record_failure(self, stats: ImportStats, txn_type: str, realm_id: str, division: str, doc_number: str, txn_date: str, entity_name: str, amount: float, message: str) -> None:
+    def _record_failure(self, stats: ImportStats, txn_type: str, realm_id: str, division: str, doc_number: str, txn_date: str, entity_name: str, amount: float, message: str, *, retryable: bool = False) -> None:
         stats.failed += 1
-        row = {"txn_type": txn_type, "realm_id": realm_id, "division": division, "doc_number": doc_number, "txn_date": txn_date, "entity_name": entity_name, "amount": amount, "status": "failed", "message": message}
+        if retryable:
+            stats.held_for_retry += 1
+        row = {"txn_type": txn_type, "realm_id": realm_id, "division": division, "doc_number": doc_number, "txn_date": txn_date, "entity_name": entity_name, "amount": amount, "status": "failed", "message": message, "retryable": retryable}
         stats.failures.append(row)
         stats.errors.append(f"{txn_type} {doc_number} @ {realm_id}: {message}")
         stats.bump_division(division, "failed")
-        self._audit.record(**row)
+        audit_row = {key: value for key, value in row.items() if key != "retryable"}
+        self._audit.record(**audit_row)
+
+
+def _batch_fault_message(fault: dict[str, Any]) -> str:
+    errors = fault.get("Error") or []
+    if isinstance(errors, dict):
+        errors = [errors]
+    parts: list[str] = []
+    for err in errors:
+        if not isinstance(err, dict):
+            continue
+        detail = str(err.get("Detail") or err.get("Message") or err.get("code") or "").strip()
+        if detail:
+            parts.append(detail)
+    return "; ".join(parts) or str(fault)[:500] or "QuickBooks rejected this batch item."
+
+
+def _is_transient_error(message: str) -> bool:
+    lower = str(message or "").lower()
+    return any(token in lower for token in ("http 429", "rate limit", "throttl", "http 500", "http 502", "http 503", "http 504", "timeout"))
+
+
+def _rate_limit_hold_message(exc: QboRateLimitError) -> str:
+    retry_after = exc.retry_after_seconds or 60
+    return f"Retryable: QuickBooks rate limit reached (HTTP 429). Held for retry; wait at least {retry_after} seconds before resending."

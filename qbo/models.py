@@ -37,6 +37,7 @@ class ImportStats:
     posted: int = 0
     skipped_duplicates: int = 0
     failed: int = 0
+    held_for_retry: int = 0
     errors: list[str] = field(default_factory=_string_list)
     warnings: list[str] = field(default_factory=_string_list)
     successes: list[dict[str, Any]] = field(default_factory=_dict_list)
