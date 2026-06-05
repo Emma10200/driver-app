@@ -616,8 +616,10 @@ def _render_email_replies(submissions_dir: Path) -> None:
     mailboxes = load_inbox_mailboxes()
     if not mailboxes:
         st.info(
-            "No reply mailboxes are configured. Set the `SAFETY_INBOX_MAILBOXES` secret "
-            "(JSON array of `{username, password, division}`) to enable email-reply ingestion."
+            "No reply mailboxes are configured for this Streamlit app. Add `SAFETY_INBOX_MAILBOXES` "
+            "to **Streamlit app secrets** to enable the dashboard pull button. GitHub Actions secrets "
+            "only power the scheduled background run. For a division-agnostic statements mailbox, use "
+            "a JSON array like `[{\"username\":\"statements@yourcompany.com\",\"password\":\"gmail-app-password\"}]`."
         )
     else:
         st.caption(

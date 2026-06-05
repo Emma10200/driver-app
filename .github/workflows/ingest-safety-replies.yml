@@ -10,7 +10,7 @@ name: Ingest safety email replies
 #   SUPABASE_SERVICE_KEY      service-role key (storage + state read/write)
 #   SUPABASE_BUCKET           optional; defaults to "driver-applications"
 #   SAFETY_INBOX_MAILBOXES    JSON array of mailbox configs, e.g.
-#     [{"username":"statements@yourco.com","password":"<gmail-app-password>","division":"Prestige Transportation Inc"}]
+#     [{"username":"statements@yourco.com","password":"<gmail-app-password>"}]
 
 on:
   schedule:

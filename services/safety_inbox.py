@@ -120,13 +120,15 @@ def load_inbox_mailboxes(raw_config: str | None = None) -> list[MailboxConfig]:
     The secret is a JSON array (or single object) of mailbox entries, e.g.::
 
         [
-          {"username": "statements@example.com", "password": "app-pw"},
+                    {"username": "statements@example.com", "password": "app-pw"},
           {"username": "safety@xpresstransinc.com", "password": "app-pw",
            "division": "Xpress Trans, Inc"}
         ]
 
-    Kept deliberately config-driven so today's single ``statements`` mailbox can
-    become per-division safety inboxes later with no code change.
+        ``division`` is optional. Omitting it is the recommended division-agnostic
+        mode for today's single ``statements`` mailbox; matched replies still use
+        the division from the original safety upload link. Per-division safety
+        inboxes can be added later with no code change.
     """
     import json
 

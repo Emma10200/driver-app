@@ -12,6 +12,10 @@ Required environment (set as GitHub Actions secrets):
     SAFETY_INBOX_MAILBOXES               JSON array of mailbox configs, e.g.
         [{"username": "statements@example.com", "password": "<gmail-app-pw>"}]
 
+Omit ``division`` for today's division-agnostic statements mailbox. Matched
+replies still use the division from the original safety request link; the
+mailbox-level division is only a fallback hint for unmatched/manual assignment.
+
 Usage:
     python -m scripts.ingest_safety_replies
 """
