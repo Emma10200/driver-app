@@ -26,7 +26,13 @@ from services.safety_ledger import (
     record_send_event,
     upsert_import_rows,
 )
-from services.safety_link_store import create_safety_upload_link
+from services.safety_inbox import (
+    assign_unmatched_reply,
+    ingest_all,
+    list_unmatched_replies,
+    load_inbox_mailboxes,
+)
+from services.safety_link_store import create_safety_upload_link, record_outbound_message_id
 from services.safety_paperwork import (
     DOC_TYPE_LABELS,
     EXCLUDED_FROM_OUTBOUND,
@@ -295,8 +301,17 @@ def _render_send_queue(recipients: list[RecipientBundle], *, preview_version: in
                 division=bundle["division"],
                 items=bundle["items"],
                 upload_url=str(link.get("url") or ""),
+                token=str(link.get("token") or ""),
+                ref_code=str(link.get("ref_code") or ""),
             )
             if result.get("status") == "sent":
+                message_id = str(result.get("message_id") or "")
+                if message_id:
+                    record_outbound_message_id(
+                        submissions_dir=submissions_dir,
+                        token=str(link.get("token") or ""),
+                        message_id=message_id,
+                    )
                 record_send_event(
                     submissions_dir,
                     recipient_email=bundle["email"],
@@ -587,6 +602,90 @@ def _render_reference_section(submissions_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _render_email_replies(submissions_dir: Path) -> None:
+    """Pull driver replies (lazy uploads) and triage anything we couldn't match."""
+    st.subheader("Email replies")
+    st.caption(
+        "Drivers who reply to the request email with attachments instead of using "
+        "their link are ingested here and filed under the matched person. Replies we "
+        "can't match wait below for manual assignment. Scheduled ingestion runs "
+        "automatically; use the button to pull on demand."
+    )
+
+    mailboxes = load_inbox_mailboxes()
+    if not mailboxes:
+        st.info(
+            "No reply mailboxes are configured. Set the `SAFETY_INBOX_MAILBOXES` secret "
+            "(JSON array of `{username, password, division}`) to enable email-reply ingestion."
+        )
+    else:
+        st.caption(
+            "Polling: " + ", ".join(f"{m.display}" + (f" → {m.division}" if m.division else "") for m in mailboxes)
+        )
+        if st.button("📥 Pull email replies now", key="safety_pull_replies"):
+            with st.spinner("Checking mailboxes for new replies..."):
+                try:
+                    summary = ingest_all(submissions_dir, mailboxes=mailboxes)
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Reply ingestion failed: {exc}")
+                else:
+                    st.success(
+                        f"Ingested {summary['ingested']}, unmatched {summary['unmatched']}, "
+                        f"skipped {summary['skipped']} across {summary['mailboxes']} mailbox(es)."
+                    )
+                    if summary.get("errors"):
+                        st.warning("Some mailboxes reported issues: " + "; ".join(summary["errors"][:5]))
+
+    unmatched = list_unmatched_replies(submissions_dir)
+    with st.expander(f"Unmatched replies to assign ({len(unmatched)})", expanded=bool(unmatched)):
+        if not unmatched:
+            st.caption("No unmatched replies. Everything pulled so far was filed automatically.")
+            return
+        for entry in unmatched:
+            entry_id = str(entry.get("entry_id") or "")
+            title = (
+                f"{entry.get('sender_name') or 'Unknown'} <{entry.get('sender_email') or '?'}> · "
+                f"{entry.get('document_count') or 0} file(s) · {entry.get('subject') or '(no subject)'}"
+            )
+            with st.expander(title, expanded=False):
+                st.caption(f"Received: {entry.get('received_at') or '—'} · Mailbox: {entry.get('mailbox') or '—'}")
+                with st.form(f"assign_reply_{entry_id}", clear_on_submit=True):
+                    a1, a2 = st.columns(2)
+                    with a1:
+                        assign_email = st.text_input(
+                            "Recipient email",
+                            value=str(entry.get("sender_email") or ""),
+                            key=f"assign_email_{entry_id}",
+                        )
+                    with a2:
+                        assign_name = st.text_input(
+                            "Recipient name",
+                            value=str(entry.get("sender_name") or ""),
+                            key=f"assign_name_{entry_id}",
+                        )
+                    assign_division = st.text_input(
+                        "Division (optional)",
+                        value=str(entry.get("division_hint") or ""),
+                        key=f"assign_division_{entry_id}",
+                    )
+                    if st.form_submit_button("Assign to this person", type="primary"):
+                        result = assign_unmatched_reply(
+                            submissions_dir,
+                            entry_id=entry_id,
+                            recipient_email=assign_email,
+                            recipient_name=assign_name,
+                            division=assign_division,
+                        )
+                        if result.get("status") == "assigned":
+                            st.success(
+                                f"Filed {result.get('document_count')} document(s) under "
+                                f"{result.get('recipient_name')}."
+                            )
+                            st.rerun()
+                        else:
+                            st.error(result.get("message") or "Could not assign this reply.")
+
+
 def render_safety_portal_page(submissions_dir: Path) -> None:
     if not _render_sso_gate():
         return
@@ -599,6 +698,9 @@ def render_safety_portal_page(submissions_dir: Path) -> None:
     )
 
     _render_ledger_dashboard(submissions_dir)
+    st.divider()
+
+    _render_email_replies(submissions_dir)
     st.divider()
 
     _render_reference_section(submissions_dir)

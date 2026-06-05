@@ -1,0 +1,51 @@
+name: Ingest safety email replies
+
+# Pulls driver safety documents that arrive as EMAIL REPLIES (instead of via the
+# upload portal) and files them in Supabase under the matched person. Runs as a
+# separate process from the Streamlit app because Streamlit Community Cloud
+# cannot receive inbound email and has no scheduler.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   SUPABASE_URL              shared Supabase project URL
+#   SUPABASE_SERVICE_KEY      service-role key (storage + state read/write)
+#   SUPABASE_BUCKET           optional; defaults to "driver-applications"
+#   SAFETY_INBOX_MAILBOXES    JSON array of mailbox configs, e.g.
+#     [{"username":"statements@yourco.com","password":"<gmail-app-password>","division":"Prestige Transportation Inc"}]
+
+on:
+  schedule:
+    # Every 15 minutes (UTC). GitHub may delay scheduled runs under load.
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+# Never let two ingest runs overlap and double-process a mailbox.
+concurrency:
+  group: ingest-safety-replies
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Pull safety email replies
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_BUCKET: ${{ secrets.SUPABASE_BUCKET }}
+          SAFETY_INBOX_MAILBOXES: ${{ secrets.SAFETY_INBOX_MAILBOXES }}
+        run: python -m scripts.ingest_safety_replies

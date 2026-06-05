@@ -6,7 +6,7 @@ from datetime import datetime
 import html
 import smtplib
 from email.message import EmailMessage
-from email.utils import formataddr
+from email.utils import formataddr, make_msgid
 from typing import Any
 
 from config import COMPANY_PROFILES, DEFAULT_COMPANY_SLUG
@@ -552,6 +552,8 @@ def send_safety_document_request_email(
     items: list[dict[str, Any]],
     upload_url: str | None = None,
     test_mode: bool | None = None,
+    token: str | None = None,
+    ref_code: str | None = None,
 ) -> dict[str, Any]:
     """Send a driver/owner-facing safety paperwork request.
 
@@ -559,6 +561,10 @@ def send_safety_document_request_email(
     and sends from the normal statements mailbox. The recipient is the driver
     or owner; internal safety/statement recipients are CC'd using the existing
     notification settings so staff can see exactly what went out.
+
+    When ``ref_code`` is supplied it is stamped into the subject and body and a
+    Message-ID is set so replies (drivers who answer instead of using the link)
+    can be matched back to this exact recipient by the email-reply ingester.
     """
     to_email = str(to_email or "").strip()
     if not to_email:
@@ -582,13 +588,19 @@ def send_safety_document_request_email(
     upload_url = str(upload_url or "").strip() or _safety_upload_url()
 
     message = EmailMessage()
-    message["Subject"] = _safety_email_subject(
+    ref_code = str(ref_code or "").strip().upper()
+    subject = _safety_email_subject(
         recipient_name=recipient_name,
         division=division,
         items=items,
         test_mode=resolved_test_mode,
     )
+    if ref_code:
+        subject = f"{subject} [Ref: {ref_code}]"[:200]
+    message["Subject"] = subject
     message["From"] = formataddr((safety_display_name, safety_email))
+    message_id = make_msgid(domain=(safety_email.split("@")[-1] or "prestige.local"))
+    message["Message-ID"] = message_id
     smtp_from = str(settings.get("from_email") or "").strip()
     if smtp_from and smtp_from.lower() != safety_email.lower():
         message["Sender"] = smtp_from
@@ -635,6 +647,8 @@ def send_safety_document_request_email(
             "Safety Department",
         ]
     )
+    if ref_code:
+        body_lines.extend(["", f"Safety-Ref: {ref_code} (please keep this on any reply)"])
     message.set_content("\n".join(body_lines))
     safe_upload_url = html.escape(upload_url, quote=True)
     safe_name = html.escape(recipient_name)
@@ -674,6 +688,7 @@ def send_safety_document_request_email(
     return {
         "status": "sent",
         "message": f"Safety paperwork request sent to {to_email}{cc_note}.",
+        "message_id": message_id,
     }
 
 
