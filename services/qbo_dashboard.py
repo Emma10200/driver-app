@@ -68,6 +68,7 @@ QBO_PARKING_SCAN_KEY = "qbo_parking_scan"
 QBO_PARKING_SELECTION_KEY = "qbo_parking_selected_ids"
 QBO_CATALOG_CACHE_KEY = "qbo_catalog_cache"
 QBO_MISSING_CUSTOMERS_KEY = "qbo_missing_customers"
+QBO_MISSING_VENDORS_KEY = "qbo_missing_vendors"
 QBO_RETRY_FILTER_KEY = "qbo_retry_filter"
 _DATE_USE_ROW = "Use row dates (or most recent Friday)"
 _TEMPLATE_OPTIONS = {
@@ -446,6 +447,7 @@ def _go_to(view: str, *, template_key: str | None = None) -> None:
         st.session_state.pop(QBO_PREVIEW_KEY, None)
         st.session_state.pop(QBO_UPLOAD_HASH_KEY, None)
         st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
+        st.session_state.pop(QBO_MISSING_VENDORS_KEY, None)
         st.session_state.pop(QBO_RETRY_FILTER_KEY, None)
         st.session_state.pop(QBO_DRIVER_EDIT_NOTICE_KEY, None)
     st.rerun()
@@ -667,6 +669,7 @@ def _render_importer(
     if st.session_state.get(QBO_UPLOAD_HASH_KEY) != upload_hash:
         st.session_state.pop(QBO_PREVIEW_KEY, None)
         st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
+        st.session_state.pop(QBO_MISSING_VENDORS_KEY, None)
         st.session_state.pop(QBO_DRIVER_EDIT_NOTICE_KEY, None)
         st.session_state.pop(QBO_DRIVER_PENDING_KEY, None)
         st.session_state.pop(QBO_DRIVER_RESET_KEY, None)
@@ -677,8 +680,9 @@ def _render_importer(
     preview = st.session_state.get(QBO_PREVIEW_KEY)
     preview_ready = isinstance(preview, PreviewResult)
     has_pending_customer_prompt = isinstance(st.session_state.get(QBO_MISSING_CUSTOMERS_KEY), dict)
+    has_pending_vendor_prompt = isinstance(st.session_state.get(QBO_MISSING_VENDORS_KEY), dict)
     has_pending_driver_edits = bool(_driver_pending_for(preview))
-    post_disabled = not preview_ready or bool(preview.errors) or not bool(preview.drafts) or has_pending_customer_prompt or has_pending_driver_edits
+    post_disabled = not preview_ready or bool(preview.errors) or not bool(preview.drafts) or has_pending_customer_prompt or has_pending_vendor_prompt or has_pending_driver_edits
     if template_key != "invoices" and selected_realm is None:
         post_disabled = True
 
@@ -702,11 +706,13 @@ def _render_importer(
                 preview = _apply_retry_filter(preview, retry_filter)
                 st.session_state[QBO_PREVIEW_KEY] = preview
                 st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
+                st.session_state.pop(QBO_MISSING_VENDORS_KEY, None)
                 st.rerun()
     with clear_col:
         if st.button("Clear", use_container_width=True):
             st.session_state.pop(QBO_PREVIEW_KEY, None)
             st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
+            st.session_state.pop(QBO_MISSING_VENDORS_KEY, None)
             st.session_state.pop(QBO_RETRY_FILTER_KEY, None)
             st.session_state.pop(QBO_DRIVER_EDIT_NOTICE_KEY, None)
             st.session_state.pop(QBO_DRIVER_PENDING_KEY, None)
@@ -754,6 +760,21 @@ def _render_importer(
     if template_key == "invoices" and _render_missing_customers_prompt(
         preview=preview,
         realms=realms,
+        supabase=supabase,
+        token_repo=token_repo,
+        auth_service=auth_service,
+        email=email,
+        template_key=template_key,
+        template_label=template_label,
+        uploaded_name=uploaded.name,
+        upload_hash=upload_hash,
+        bank_account_name=bank_account_name,
+    ):
+        return
+
+    if template_key == "driver_statements" and _render_missing_vendors_prompt(
+        preview=preview,
+        target_realm=selected_realm,
         supabase=supabase,
         token_repo=token_repo,
         auth_service=auth_service,
@@ -830,6 +851,20 @@ def _handle_post_to_qbo(
             st.session_state[QBO_MISSING_CUSTOMERS_KEY] = check
             st.rerun()
         st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
+    elif template_key == "driver_statements":
+        if target_realm is None:
+            st.error("Choose a QuickBooks company before posting.")
+            return
+        with st.spinner("Checking vendors in QuickBooks…"):
+            check = _find_missing_driver_statement_vendors(
+                preview=preview,
+                target_realm=target_realm,
+                auth_service=auth_service,
+            )
+        if check.get("lookup_errors") or check.get("missing"):
+            st.session_state[QBO_MISSING_VENDORS_KEY] = check
+            st.rerun()
+        st.session_state.pop(QBO_MISSING_VENDORS_KEY, None)
 
     _post_preview_to_qbo(
         preview=preview,
@@ -948,6 +983,7 @@ def _post_preview_to_qbo(
 
     st.session_state.pop(QBO_PREVIEW_KEY, None)
     st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
+    st.session_state.pop(QBO_MISSING_VENDORS_KEY, None)
     st.session_state.pop(QBO_RETRY_FILTER_KEY, None)
 
 
@@ -1001,6 +1037,63 @@ def _find_missing_invoice_customers(
             lookup_errors.append({**ref, "error": str(exc)})
             continue
         if customer_id:
+            found_count += 1
+        else:
+            missing.append(ref)
+    return {
+        "source_hash": preview.source_hash,
+        "checked_count": len(refs),
+        "found_count": found_count,
+        "missing": missing,
+        "lookup_errors": lookup_errors,
+    }
+
+
+def _driver_statement_vendor_refs(
+    *,
+    preview: PreviewResult,
+    target_realm: ConnectedRealm | None,
+) -> list[dict[str, Any]]:
+    """Return unique driver-statement Vendor targets for the selected QBO company."""
+    if target_realm is None:
+        return []
+    unique: dict[str, dict[str, Any]] = {}
+    for draft in preview.drafts or []:
+        vendor_name = str(draft.get("_tempVendorName") or "").strip()
+        if not vendor_name:
+            continue
+        key = vendor_name.lower()
+        if key not in unique:
+            unique[key] = {
+                "vendor_name": vendor_name,
+                "realm_id": target_realm.realm_id,
+                "target_company": target_realm.company_name,
+                "check_count": 0,
+            }
+        unique[key]["check_count"] += 1
+    return sorted(unique.values(), key=lambda row: str(row.get("vendor_name") or ""))
+
+
+def _find_missing_driver_statement_vendors(
+    *,
+    preview: PreviewResult,
+    target_realm: ConnectedRealm | None,
+    auth_service: QboAuthService,
+) -> dict[str, Any]:
+    refs = _driver_statement_vendor_refs(preview=preview, target_realm=target_realm)
+    qbo_client = QboClient(auth_service)
+    lookups = EntityLookupService(qbo_client)
+    missing: list[dict[str, Any]] = []
+    lookup_errors: list[dict[str, Any]] = []
+    found_count = 0
+    for ref in refs:
+        try:
+            vendor_id = lookups.resolve_entity("Vendor", ref["vendor_name"], ref["realm_id"])
+        except Exception as exc:  # noqa: BLE001 - block posting, do not guess
+            logger.exception("Vendor lookup failed for %s", ref["vendor_name"])
+            lookup_errors.append({**ref, "error": str(exc)})
+            continue
+        if vendor_id:
             found_count += 1
         else:
             missing.append(ref)
@@ -1156,6 +1249,147 @@ def _render_missing_customers_prompt(
     return True
 
 
+def _render_missing_vendors_prompt(
+    *,
+    preview: PreviewResult,
+    target_realm: ConnectedRealm | None,
+    supabase: SupabaseRestClient,
+    token_repo: QboTokenRepository,
+    auth_service: QboAuthService,
+    email: str,
+    template_key: str,
+    template_label: str,
+    uploaded_name: str,
+    upload_hash: str,
+    bank_account_name: str,
+) -> bool:
+    """Render the approval prompt after Post discovers missing driver vendors.
+
+    Returns True while the prompt is active so the normal Post button stays
+    hidden until the user creates vendors, re-checks, or cancels.
+    """
+    state = st.session_state.get(QBO_MISSING_VENDORS_KEY)
+    if not isinstance(state, dict):
+        return False
+    if state.get("source_hash") != preview.source_hash:
+        st.session_state.pop(QBO_MISSING_VENDORS_KEY, None)
+        return False
+
+    missing = list(state.get("missing") or [])
+    lookup_errors = list(state.get("lookup_errors") or [])
+    creation_errors = list(state.get("creation_errors") or [])
+    if not missing and not lookup_errors and not creation_errors:
+        st.session_state.pop(QBO_MISSING_VENDORS_KEY, None)
+        return False
+
+    with st.container(border=True):
+        st.markdown("**Vendors needed before posting checks**")
+        st.caption(
+            "No driver statement checks have been posted yet. Missing drivers/owners can be created as QBO Vendors, then posting continues."
+        )
+
+        metric_cols = st.columns(3)
+        metric_cols[0].metric("Checked", int(state.get("checked_count") or 0))
+        metric_cols[1].metric("Found", int(state.get("found_count") or 0))
+        metric_cols[2].metric("Missing", len(missing))
+
+        if lookup_errors:
+            st.error("Vendor lookup failed, so posting is paused. Re-check after fixing the connection or QBO access.")
+            with st.expander("Lookup errors", expanded=False):
+                st.dataframe(
+                    [
+                        {
+                            "Vendor": item.get("vendor_name"),
+                            "Target company": item.get("target_company"),
+                            "Error": item.get("error"),
+                        }
+                        for item in lookup_errors
+                    ],
+                    hide_index=True,
+                    use_container_width=True,
+                )
+
+        if creation_errors:
+            st.error("Some vendors could not be created. Nothing was posted.")
+            with st.expander("Create errors", expanded=True):
+                st.dataframe(creation_errors, hide_index=True, use_container_width=True)
+
+        if missing:
+            table_rows = [
+                {
+                    "Vendor": item.get("vendor_name"),
+                    "Target company": item.get("target_company"),
+                    "Checks": item.get("check_count"),
+                }
+                for item in missing
+            ]
+            with st.expander("Missing vendor details", expanded=len(missing) <= 5):
+                st.dataframe(table_rows, hide_index=True, use_container_width=True)
+
+        action_cols = st.columns([0.18, 0.16, 0.13, 0.53])
+        with action_cols[0]:
+            create_clicked = st.button(
+                "Create + post",
+                type="primary",
+                key="qbo_create_missing_vendors_and_post",
+                disabled=not missing or bool(lookup_errors),
+                use_container_width=True,
+            )
+        with action_cols[1]:
+            recheck_clicked = st.button("Check again", key="qbo_missing_vendors_recheck", use_container_width=True)
+        with action_cols[2]:
+            cancel_clicked = st.button("Cancel", key="qbo_missing_vendors_cancel", use_container_width=True)
+
+    if cancel_clicked:
+        st.session_state.pop(QBO_MISSING_VENDORS_KEY, None)
+        st.info("Import cancelled. Nothing was posted.")
+        st.rerun()
+
+    if recheck_clicked:
+        with st.spinner("Re-checking vendors in QuickBooks…"):
+            st.session_state[QBO_MISSING_VENDORS_KEY] = _find_missing_driver_statement_vendors(
+                preview=preview,
+                target_realm=target_realm,
+                auth_service=auth_service,
+            )
+        st.rerun()
+
+    if create_clicked:
+        created, failed = _create_missing_vendors(missing, auth_service)
+        if failed:
+            st.session_state[QBO_MISSING_VENDORS_KEY] = {
+                **state,
+                "missing": [item.get("record") or item for item in failed],
+                "creation_errors": [
+                    {
+                        "Vendor": (item.get("record") or {}).get("vendor_name"),
+                        "Target company": (item.get("record") or {}).get("target_company"),
+                        "Error": item.get("error"),
+                    }
+                    for item in failed
+                ],
+            }
+            st.rerun()
+
+        st.session_state.pop(QBO_MISSING_VENDORS_KEY, None)
+        st.success(f"Created {len(created)} vendor(s). Continuing to post…")
+        _post_preview_to_qbo(
+            preview=preview,
+            target_realm=target_realm,
+            supabase=supabase,
+            token_repo=token_repo,
+            auth_service=auth_service,
+            email=email,
+            template_key=template_key,
+            template_label=template_label,
+            uploaded_name=uploaded_name,
+            upload_hash=upload_hash,
+            bank_account_name=bank_account_name,
+        )
+
+    return True
+
+
 def _create_missing_customers(
     missing: list[dict[str, Any]], auth_service: QboAuthService
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1179,6 +1413,34 @@ def _create_missing_customers(
                 created.append({**item, "qbo_id": new_id})
             else:
                 failed.append({"record": item, "error": "QBO returned no customer Id."})
+        progress.progress(idx / total, text=f"Created {idx}/{total}…")
+    progress.empty()
+    return created, failed
+
+
+def _create_missing_vendors(
+    missing: list[dict[str, Any]], auth_service: QboAuthService
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    qbo_client = QboClient(auth_service)
+    lookups = EntityLookupService(qbo_client)
+    created: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    progress = st.progress(0.0, text="Creating vendors in QuickBooks…")
+    total = len(missing)
+    for idx, item in enumerate(missing, start=1):
+        vendor_name = str(item.get("vendor_name") or "").strip()
+        realm_id = str(item.get("realm_id") or "").strip()
+        try:
+            existing_id = lookups.resolve_entity("Vendor", vendor_name, realm_id)
+            new_id = existing_id or lookups.create_entity("Vendor", vendor_name, realm_id)
+        except Exception as exc:  # noqa: BLE001 - keep the rest safe
+            logger.exception("Vendor create failed for %s", vendor_name)
+            failed.append({"record": item, "error": str(exc)})
+        else:
+            if new_id:
+                created.append({**item, "qbo_id": new_id})
+            else:
+                failed.append({"record": item, "error": "QBO returned no vendor Id."})
         progress.progress(idx / total, text=f"Created {idx}/{total}…")
     progress.empty()
     return created, failed
@@ -1630,6 +1892,7 @@ def _render_failed_retry_panel(filtered_rows: list[dict[str, Any]]) -> None:
             st.session_state.pop(QBO_PREVIEW_KEY, None)
             st.session_state.pop(QBO_UPLOAD_HASH_KEY, None)
             st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
+            st.session_state.pop(QBO_MISSING_VENDORS_KEY, None)
             st.rerun()
 
 
