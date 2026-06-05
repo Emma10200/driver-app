@@ -385,30 +385,6 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
     reset_counter = int(st.session_state.get(QBO_DRIVER_RESET_KEY, 0) or 0)
     editor_key = f"qbo_full_preview_editor_{preview.source_hash}_{reset_counter}"
 
-    confirm_col, discard_col, uncheck_col, _info_col = st.columns([0.18, 0.18, 0.16, 0.48])
-    with confirm_col:
-        confirm_clicked = st.button(
-            "✅ Confirm changes",
-            type="primary",
-            use_container_width=True,
-            key=f"qbo_confirm_driver_edits_{preview.source_hash}_{reset_counter}",
-            help="Apply checked rows and cell edits to the QBO post payload.",
-        )
-    with discard_col:
-        discard_clicked = st.button(
-            "↩️ Discard changes",
-            use_container_width=True,
-            key=f"qbo_discard_driver_edits_{preview.source_hash}_{reset_counter}",
-            help="Revert row checks and cell edits to the last confirmed state.",
-        )
-    with uncheck_col:
-        uncheck_all_clicked = st.button(
-            "☐ Uncheck all",
-            use_container_width=True,
-            key=f"qbo_uncheck_all_driver_{preview.source_hash}_{reset_counter}",
-            help="Clear selection so nothing posts; re-select the rows you want.",
-        )
-
     with st.popover("ℹ️ How this preview works", use_container_width=True):
         st.markdown(
             "- Keep **Post?** checked for rows you want to send; uncheck rows to skip/remove them from this import.\n"
@@ -417,11 +393,34 @@ def _render_editable_driver_statement_preview(preview: PreviewResult) -> None:
             "- **Uncheck all** clears every Post? checkbox so nothing posts until you re-check rows."
         )
 
-    edited_records = _render_driver_statement_streamlit_fallback(
-        rows,
-        preview.source_hash,
-        editor_key,
-    )
+    st.caption("Checkbox and cell edits are staged locally; the page updates only after you click **Confirm changes**.")
+    with st.form(f"qbo_driver_preview_form_{preview.source_hash}_{reset_counter}", clear_on_submit=False):
+        confirm_col, discard_col, uncheck_col, _info_col = st.columns([0.18, 0.18, 0.16, 0.48])
+        with confirm_col:
+            confirm_clicked = st.form_submit_button(
+                "✅ Confirm changes",
+                type="primary",
+                use_container_width=True,
+                help="Apply checked rows and cell edits to the QBO post payload.",
+            )
+        with discard_col:
+            discard_clicked = st.form_submit_button(
+                "↩️ Discard changes",
+                use_container_width=True,
+                help="Revert row checks and cell edits to the last confirmed state.",
+            )
+        with uncheck_col:
+            uncheck_all_clicked = st.form_submit_button(
+                "☐ Uncheck all",
+                use_container_width=True,
+                help="Clear selection so nothing posts; re-select the rows you want.",
+            )
+
+        edited_records = _render_driver_statement_streamlit_fallback(
+            rows,
+            preview.source_hash,
+            editor_key,
+        )
 
     pending = _pending_driver_statement_changes(preview, edited_records)
     pending_total = int(pending.get("fields") or 0) + int(pending.get("removed") or 0)
