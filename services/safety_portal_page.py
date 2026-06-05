@@ -605,6 +605,7 @@ def _render_reference_section(submissions_dir: Path) -> None:
 def _render_email_replies(submissions_dir: Path) -> None:
     """Pull driver replies (lazy uploads) and triage anything we couldn't match."""
     st.subheader("Email replies")
+    st.caption("Email-reply ingestion is installed. Matched attachments are filed into Supabase; unmatched replies wait here for assignment.")
     st.caption(
         "Drivers who reply to the request email with attachments instead of using "
         "their link are ingested here and filed under the matched person. Replies we "
@@ -697,10 +698,10 @@ def render_safety_portal_page(submissions_dir: Path) -> None:
         "Emails only send after you review the checkbox queue and confirm the real-send step."
     )
 
-    _render_ledger_dashboard(submissions_dir)
+    _render_email_replies(submissions_dir)
     st.divider()
 
-    _render_email_replies(submissions_dir)
+    _render_ledger_dashboard(submissions_dir)
     st.divider()
 
     _render_reference_section(submissions_dir)
