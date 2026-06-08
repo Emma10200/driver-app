@@ -322,6 +322,8 @@ def test_generate_application_pdf_includes_aligned_credentials_and_disclosures(m
 
     for expected_text in [
         "Visible Wireless",
+        "Social Security Number:",
+        "123456789",
         "Emergency Contact Address:",
         "Previous Address #1:",
         "Best Time to Contact:",
