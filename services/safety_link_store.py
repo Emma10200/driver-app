@@ -17,6 +17,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 from services.safety_cloud_state import read_state as _read_cloud_state
+from services.safety_cloud_state import read_state_path as _read_cloud_state_path
 from services.safety_cloud_state import write_state as _write_cloud_state
 
 _PUBLIC_BASE_URL = "https://driver-application.streamlit.app"
@@ -70,10 +71,40 @@ def _write_links(path: Path, payload: dict[str, dict[str, Any]]) -> None:
 
 
 def _read_cloud_links() -> dict[str, dict[str, Any]]:
-    data = _read_cloud_state(_CLOUD_STATE_NAME)
-    if not isinstance(data, dict):
-        return {}
-    return {str(k): dict(v) for k, v in data.items() if isinstance(v, dict)}
+    merged: dict[str, dict[str, Any]] = {}
+    for data in (
+        _read_cloud_state(_CLOUD_STATE_NAME),
+        # Defensive legacy locations. Current writes use safety-uploads/live/state/links.json,
+        # but early deployments/local mirrors may have used one of these paths.
+        _read_cloud_state_path("safety/state/links.json"),
+        _read_cloud_state_path("safety/links/links.json"),
+        _read_cloud_state_path("safety-uploads/live/links.json"),
+        _read_cloud_state_path("safety-uploads/live/links/links.json"),
+    ):
+        if not isinstance(data, dict):
+            continue
+        for token, record in data.items():
+            if isinstance(record, dict):
+                merged[str(token)] = dict(record)
+    return merged
+
+
+def link_history_source_counts(submissions_dir: Path) -> list[dict[str, Any]]:
+    """Diagnostic counts for saved safety link history sources."""
+    path = _links_path(submissions_dir)
+    sources = [
+        ("Supabase current: safety-uploads/live/state/links.json", _read_cloud_state(_CLOUD_STATE_NAME)),
+        ("Supabase legacy: safety/state/links.json", _read_cloud_state_path("safety/state/links.json")),
+        ("Supabase legacy: safety/links/links.json", _read_cloud_state_path("safety/links/links.json")),
+        ("Supabase legacy: safety-uploads/live/links.json", _read_cloud_state_path("safety-uploads/live/links.json")),
+        ("Supabase legacy: safety-uploads/live/links/links.json", _read_cloud_state_path("safety-uploads/live/links/links.json")),
+        (f"Local file: {path}", _read_links(path)),
+    ]
+    rows: list[dict[str, Any]] = []
+    for label, data in sources:
+        records = {str(k): dict(v) for k, v in (data or {}).items() if isinstance(v, dict)}
+        rows.append({"Source": label, "Records": len(records)})
+    return rows
 
 
 def _merged_links(path: Path) -> dict[str, dict[str, Any]]:

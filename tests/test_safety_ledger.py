@@ -105,6 +105,44 @@ def test_record_send_event_suppresses_recently_emailed_rows(tmp_path: Path) -> N
     assert annotated[0]["Sent count"] == 1
 
 
+def test_list_ledger_records_reads_cloud_state_when_local_file_is_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    submissions_dir = tmp_path / "submissions"
+
+    monkeypatch.setattr(
+        safety_ledger,
+        "_read_cloud_state",
+        lambda name: {
+            "unit:802:INSURANCE": {
+                "item_key": "unit:802:INSURANCE",
+                "recipient_email": "owner@example.com",
+                "recipient_name": "Owner One",
+                "division": "Prestige Transportation Inc",
+                "unit": "802",
+                "document": "Insurance Certificate",
+                "last_sent_at": "2026-06-08T10:00:00+00:00",
+                "send_count": 1,
+                "send_events": [
+                    {
+                        "event_id": "send:tok_1:unit:802:INSURANCE",
+                        "token": "tok_1",
+                        "sent_at": "2026-06-08T10:00:00+00:00",
+                        "to": "owner@example.com",
+                    }
+                ],
+            }
+        }
+        if name == "ledger"
+        else {},
+    )
+    monkeypatch.setattr(safety_ledger, "_read_cloud_state_path", lambda path: {})
+
+    records = list_ledger_records(submissions_dir, backfill=False)
+
+    assert len(records) == 1
+    assert records[0]["recipient_email"] == "owner@example.com"
+    assert records[0]["send_count"] == 1
+
+
 def test_record_upload_event_marks_row_submitted_and_keeps_download_metadata(tmp_path: Path) -> None:
     submissions_dir = tmp_path / "submissions"
     result = record_upload_event(

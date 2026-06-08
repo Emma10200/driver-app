@@ -15,10 +15,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
+from services.safety_cloud_state import read_state as _read_cloud_state
+from services.safety_cloud_state import read_state_path as _read_cloud_state_path
+from services.safety_cloud_state import write_state as _write_cloud_state
 from services.safety_link_store import list_safety_upload_links
 from submission_storage import list_supabase_document_upload_manifests
 
 _LEDGER_FILE = "ledger.json"
+_CLOUD_STATE_NAME = "ledger"
 _DEFAULT_COOLDOWN_DAYS = 7
 _SAFETY_UPLOAD_NAMESPACES = ("safety-uploads/live", "safety-uploads/test-mode", "")
 _lock = threading.Lock()
@@ -40,21 +44,53 @@ def _ledger_path(submissions_dir: Path) -> Path:
 
 
 def _read_ledger(path: Path) -> dict[str, dict[str, Any]]:
+    records: dict[str, dict[str, Any]] = {}
+    for data in (
+        _read_cloud_state(_CLOUD_STATE_NAME),
+        # Defensive legacy locations for any early/manual Supabase mirrors.
+        _read_cloud_state_path("safety/ledger/ledger.json"),
+        _read_cloud_state_path("safety-uploads/live/ledger.json"),
+        _read_cloud_state_path("safety-uploads/live/ledger/ledger.json"),
+    ):
+        if isinstance(data, dict):
+            records.update({str(k): dict(v) for k, v in data.items() if isinstance(v, dict)})
     if not path.exists():
-        return {}
+        return records
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return {str(k): dict(v) for k, v in data.items() if isinstance(v, dict)}
+        return records
+    if isinstance(data, dict):
+        records.update({str(k): dict(v) for k, v in data.items() if isinstance(v, dict)})
+    return records
 
 
 def _write_ledger(path: Path, records: dict[str, dict[str, Any]]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(records, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
+    _write_cloud_state(_CLOUD_STATE_NAME, records)
+
+
+def ledger_history_source_counts(submissions_dir: Path) -> list[dict[str, Any]]:
+    """Diagnostic counts for safety ledger history sources."""
+    path = _ledger_path(submissions_dir)
+    sources = [
+        ("Supabase current: safety-uploads/live/state/ledger.json", _read_cloud_state(_CLOUD_STATE_NAME)),
+        ("Supabase legacy: safety/ledger/ledger.json", _read_cloud_state_path("safety/ledger/ledger.json")),
+        ("Supabase legacy: safety-uploads/live/ledger.json", _read_cloud_state_path("safety-uploads/live/ledger.json")),
+        ("Supabase legacy: safety-uploads/live/ledger/ledger.json", _read_cloud_state_path("safety-uploads/live/ledger/ledger.json")),
+    ]
+    try:
+        local_data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        local_data = {}
+    sources.append((f"Local file: {path}", local_data))
+    rows: list[dict[str, Any]] = []
+    for label, data in sources:
+        records = {str(k): dict(v) for k, v in (data or {}).items() if isinstance(v, dict)}
+        rows.append({"Source": label, "Records": len(records)})
+    return rows
 
 
 def _now() -> datetime:

@@ -14,6 +14,8 @@ from services.safety_link_store import (
     safety_upload_url,
 )
 
+import services.safety_link_store as safety_link_store
+
 
 def test_safety_upload_url_uses_stable_driver_application_domain() -> None:
     assert safety_upload_url("abc123") == "https://driver-application.streamlit.app/?safety_upload=abc123"
@@ -99,3 +101,32 @@ def test_find_links_by_recipient_email_is_case_insensitive(tmp_path: Path) -> No
     matches = find_links_by_recipient_email(submissions_dir=sub, email="driver@example.com")
     assert len(matches) == 1
     assert matches[0]["token"] == link["token"]
+
+
+def test_list_safety_upload_links_merges_legacy_cloud_paths(tmp_path: Path, monkeypatch) -> None:
+    sub = tmp_path / "submissions"
+
+    monkeypatch.setattr(safety_link_store, "_read_cloud_state", lambda name: {})
+    monkeypatch.setattr(
+        safety_link_store,
+        "_read_cloud_state_path",
+        lambda path: {
+            "tok_legacy": {
+                "token": "tok_legacy",
+                "recipient_email": "owner@example.com",
+                "recipient_name": "Owner One",
+                "division": "Prestige Transportation Inc",
+                "created_at": "2026-06-08T10:00:00+00:00",
+                "expires_at": "2026-08-07T10:00:00+00:00",
+                "items": [],
+            }
+        }
+        if path == "safety/links/links.json"
+        else {},
+    )
+
+    links = list_safety_upload_links(submissions_dir=sub)
+
+    assert len(links) == 1
+    assert links[0]["token"] == "tok_legacy"
+    assert links[0]["recipient_email"] == "owner@example.com"

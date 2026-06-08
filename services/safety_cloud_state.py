@@ -51,9 +51,13 @@ def _state_path(name: str) -> str:
 
 def read_state(name: str) -> dict[str, Any]:
     """Read a JSON state object from Supabase. Returns ``{}`` when absent/disabled."""
+    return read_state_path(_state_path(name))
+
+
+def read_state_path(relative_path: str) -> dict[str, Any]:
+    """Read a JSON state object from an explicit Supabase relative path."""
     if not cloud_state_enabled():
         return {}
-    relative_path = _state_path(name)
     try:
         raw = _read_supabase_bytes(relative_path)
     except FileNotFoundError:

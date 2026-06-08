@@ -21,6 +21,7 @@ from services.qbo_auth import qbo_allowed_emails
 from services.safety_ledger import (
     annotate_rows_for_send_queue,
     backfill_safety_ledger,
+    ledger_history_source_counts,
     ledger_summary,
     list_ledger_records,
     record_send_event,
@@ -32,7 +33,12 @@ from services.safety_inbox import (
     list_unmatched_replies,
     load_inbox_mailboxes,
 )
-from services.safety_link_store import create_safety_upload_link, list_safety_upload_links, record_outbound_message_id
+from services.safety_link_store import (
+    create_safety_upload_link,
+    link_history_source_counts,
+    list_safety_upload_links,
+    record_outbound_message_id,
+)
 from services.safety_paperwork import (
     DOC_TYPE_LABELS,
     EXCLUDED_FROM_OUTBOUND,
@@ -664,6 +670,13 @@ def _render_ledger_dashboard(submissions_dir: Path) -> None:
                 st.caption(f"Showing the latest 500 of {len(sent_history)} sent item event(s).")
         else:
             st.caption("No sent email events match the current filters yet.")
+
+    with st.expander("History storage diagnostics", expanded=False):
+        st.caption(
+            "Shows where the app is finding saved safety-send history. If older sends are missing here, "
+            "they were likely stored only in the previous Streamlit local filesystem and not mirrored to Supabase."
+        )
+        st.table(link_history_source_counts(submissions_dir) + ledger_history_source_counts(submissions_dir))
 
     uploaded = [r for r in filtered if r.get("uploads")]
     with st.expander(f"Submitted documents ({len(uploaded)})", expanded=bool(uploaded)):
