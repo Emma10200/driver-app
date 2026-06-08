@@ -32,7 +32,7 @@ from services.safety_inbox import (
     list_unmatched_replies,
     load_inbox_mailboxes,
 )
-from services.safety_link_store import create_safety_upload_link, record_outbound_message_id
+from services.safety_link_store import create_safety_upload_link, list_safety_upload_links, record_outbound_message_id
 from services.safety_paperwork import (
     DOC_TYPE_LABELS,
     EXCLUDED_FROM_OUTBOUND,
@@ -206,6 +206,123 @@ def _group_selected_rows(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]
             }
         )
     return grouped
+
+
+def _sent_history_rows_from_links(
+    links: list[dict[str, Any]],
+    *,
+    division_filter: str = "All",
+    query: str = "",
+) -> list[dict[str, Any]]:
+    """Build sent-history rows from saved outbound safety upload links."""
+    rows: list[dict[str, Any]] = []
+    query = query.strip().lower()
+    for link in links:
+        division = str(link.get("division") or "").strip()
+        if division_filter != "All" and (division or "(no division)") != division_filter:
+            continue
+        base = {
+            "Source": "Saved email link",
+            "Sent at": link.get("created_at") or "",
+            "Sent to": link.get("recipient_email") or "",
+            "Recipient": link.get("recipient_name") or "Driver/Owner",
+            "Division": division,
+            "Ref": link.get("ref_code") or "",
+            "Link expires": link.get("expires_at") or "",
+            "Expired link?": "Yes" if link.get("expired") else "No",
+            "Token": link.get("token") or "",
+        }
+        items = [dict(item) for item in (link.get("items") or []) if isinstance(item, Mapping)] or [{}]
+        for item in items:
+            row = {
+                **base,
+                "Unit": item.get("unit") or item.get("Unit") or "—",
+                "Document": item.get("document") or item.get("Document") or "Document",
+                "Expires": item.get("expires") or item.get("Expires") or "—",
+                "Status when sent": item.get("status") or item.get("Status") or "",
+            }
+            haystack = " ".join(str(value or "") for value in row.values()).lower()
+            if query and query not in haystack:
+                continue
+            rows.append(row)
+    rows.sort(key=lambda row: str(row.get("Sent at") or ""), reverse=True)
+    return rows
+
+
+def _history_query_matches(row: dict[str, Any], query: str) -> bool:
+    query = query.strip().lower()
+    if not query:
+        return True
+    haystack = " ".join(str(value or "") for value in row.values()).lower()
+    return query in haystack
+
+
+def _sent_history_rows_from_ledger_records(
+    records: list[dict[str, Any]],
+    *,
+    division_filter: str = "All",
+    query: str = "",
+    skip_tokens: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Fallback sent-history rows from ledger records.
+
+    Older environments may have upload/submission ledger rows even when the
+    original saved link metadata is missing. Show those rows with a clear source
+    so staff can still see who was contacted / who used a safety link.
+    """
+    skip_tokens = skip_tokens or set()
+    rows: list[dict[str, Any]] = []
+    for record in records:
+        division = str(record.get("division") or "").strip()
+        if division_filter != "All" and (division or "(no division)") != division_filter:
+            continue
+        base = {
+            "Sent to": record.get("last_sent_to") or record.get("recipient_email") or "",
+            "Recipient": record.get("recipient_name") or "Driver/Owner",
+            "Division": division,
+            "Unit": record.get("unit") or "—",
+            "Document": record.get("document") or "Document",
+            "Expires": record.get("expires") or "—",
+            "Status when sent": record.get("status") or "",
+            "Last upload": record.get("last_upload_display") or record.get("last_upload_at") or "",
+            "Token": record.get("last_link_token") or record.get("last_upload_token") or "",
+        }
+        events = [dict(event) for event in (record.get("send_events") or []) if isinstance(event, Mapping)]
+        if events:
+            for event in events:
+                token = str(event.get("token") or base["Token"] or "")
+                if token and token in skip_tokens:
+                    continue
+                row = {
+                    **base,
+                    "Source": "Ledger send event",
+                    "Sent at": event.get("sent_at") or record.get("last_sent_at") or "",
+                    "Token": token,
+                }
+                if _history_query_matches(row, query):
+                    rows.append(row)
+            continue
+        if record.get("last_sent_at") or int(record.get("send_count") or 0) > 0:
+            token = str(base["Token"] or "")
+            if token and token in skip_tokens:
+                continue
+            row = {**base, "Source": "Ledger send summary", "Sent at": record.get("last_sent_at") or ""}
+            if _history_query_matches(row, query):
+                rows.append(row)
+            continue
+        if record.get("uploads"):
+            token = str(base["Token"] or "")
+            if token and token in skip_tokens:
+                continue
+            row = {
+                **base,
+                "Source": "Submitted upload (original send record unavailable)",
+                "Sent at": "",
+            }
+            if _history_query_matches(row, query):
+                rows.append(row)
+    rows.sort(key=lambda row: str(row.get("Sent at") or row.get("Last upload") or ""), reverse=True)
+    return rows
 
 
 def _render_send_queue(recipients: list[RecipientBundle], *, preview_version: int, submissions_dir: Path) -> None:
@@ -521,30 +638,25 @@ def _render_ledger_dashboard(submissions_dir: Path) -> None:
         use_container_width=True,
     )
 
-    sent_history: list[dict[str, Any]] = []
-    for record in filtered:
-        for event in record.get("send_events") or []:
-            if not isinstance(event, Mapping):
-                continue
-            sent_history.append(
-                {
-                    "Sent at": event.get("sent_at") or record.get("last_sent_at") or "",
-                    "Sent to": event.get("to") or record.get("last_sent_to") or record.get("recipient_email"),
-                    "Recipient": record.get("recipient_name"),
-                    "Division": record.get("division"),
-                    "Unit": record.get("unit"),
-                    "Document": record.get("document"),
-                    "Expires": record.get("expires"),
-                    "Status when sent": record.get("status"),
-                    "Ledger state": record.get("ledger_state"),
-                    "Token": event.get("token") or record.get("last_link_token"),
-                }
-            )
-    sent_history.sort(key=lambda row: str(row.get("Sent at") or ""), reverse=True)
+    sent_history = _sent_history_rows_from_links(
+        list_safety_upload_links(submissions_dir=submissions_dir),
+        division_filter=division_filter,
+        query=query,
+    )
+    seen_tokens = {str(row.get("Token") or "") for row in sent_history if row.get("Token")}
+    sent_history.extend(
+        _sent_history_rows_from_ledger_records(
+            records,
+            division_filter=division_filter,
+            query=query,
+            skip_tokens=seen_tokens,
+        )
+    )
+    sent_history.sort(key=lambda row: str(row.get("Sent at") or row.get("Last upload") or ""), reverse=True)
     with st.expander(f"Sent email history ({len(sent_history)})", expanded=False):
         st.caption(
-            "Historical safety request sends that match the dashboard filters above. "
-            "Use this to confirm who already received a request/nudge and for which document."
+            "Historical safety requests from saved email links and ledger fallbacks. "
+            "This follows the Division and Search filters above, but it is not hidden by the Status filter."
         )
         if sent_history:
             st.dataframe(sent_history[:500], hide_index=True, use_container_width=True)
