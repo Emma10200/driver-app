@@ -171,6 +171,7 @@ def _send_queue_rows(recipients: list[RecipientBundle]) -> list[dict[str, Any]]:
                     "Document": formatted["Document"],
                     "Expires": formatted["Expires"],
                     "Status": formatted["Status"],
+                    "_status": item.status,
                     "_recipient_key": bundle.recipient_key,
                     "_row_id": f"{bundle.recipient_key}::{index}::{item.doc_type}::{item.unit_no or 'driver'}",
                 }
@@ -219,9 +220,31 @@ def _render_send_queue(recipients: list[RecipientBundle], *, preview_version: in
     )
 
     rows = annotate_rows_for_send_queue(submissions_dir, _send_queue_rows(recipients))
+
+    expiring_soon_total = sum(1 for row in rows if str(row.get("_status") or "") == "expiring_soon")
+    include_expiring = st.checkbox(
+        "Send reminders for items that are only expiring soon (not yet expired)",
+        value=True,
+        key=f"safety_include_expiring_{preview_version}",
+        help=(
+            "When unchecked, rows still inside their grace window (🟡 Expiring soon) are "
+            "excluded by default so this round only chases already-expired/missing items. "
+            "You can still re-check any individual row below."
+        ),
+    )
+    if expiring_soon_total:
+        st.caption(
+            f"This import has **{expiring_soon_total}** item(s) that are only expiring soon. "
+            + ("They are included below." if include_expiring else "They are excluded by default below.")
+        )
+    if not include_expiring:
+        for row in rows:
+            if str(row.get("_status") or "") == "expiring_soon":
+                row["Include"] = False
+
     edited = st.data_editor(
         rows,
-        key=f"safety_send_queue_editor_{preview_version}",
+        key=f"safety_send_queue_editor_{preview_version}_{int(include_expiring)}",
         hide_index=True,
         use_container_width=True,
         column_order=[
