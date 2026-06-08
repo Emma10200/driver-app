@@ -630,9 +630,13 @@ def send_safety_document_request_email(
     body_lines = [
         f"Hello {recipient_name},",
         "",
+        "This is an automated message from our safety system.",
+        "",
         "Our safety records show that we need updated paperwork for the item(s) below.",
-        "Please upload the requested document(s) using this secure upload link:",
-        f"  {upload_url}",
+        "You can submit the requested document(s) either way:",
+        "  1. Upload them through our secure website using this link:",
+        f"     {upload_url}",
+        "  2. Or simply reply to this email and attach the document(s).",
         "",
         "Requested item(s):",
     ]
@@ -660,7 +664,13 @@ def send_safety_document_request_email(
     <body style="font-family: Arial, sans-serif; color: #172033; line-height: 1.5;">
         <p>Hello {safe_name},</p>
         {division_line}
+        <p style="font-size: 13px; color: #475569;"><em>This is an automated message from our safety system.</em></p>
         <p>Our safety records show that we need updated paperwork for the item(s) below.</p>
+        <p>You can submit the requested document(s) <strong>either way</strong>:</p>
+        <ol style="margin-top:0;">
+            <li>Upload them through our secure website using the button below, or</li>
+            <li>Simply <strong>reply to this email</strong> and attach the document(s).</li>
+        </ol>
         <p>
             <a href="{safe_upload_url}" style="background:#0f766e;color:#ffffff;padding:10px 14px;text-decoration:none;border-radius:8px;font-weight:700;display:inline-block;">
                 Upload requested documents
