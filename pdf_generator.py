@@ -179,6 +179,14 @@ def _bool_text(value, default=""):
     return default
 
 
+def _format_ssn_for_display(value: Any) -> str:
+    """Format a stored SSN for PDF display as XXX-XX-XXXX when possible."""
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    if len(digits) == 9:
+        return f"{digits[:3]}-{digits[3:5]}-{digits[5:]}"
+    return str(value or "")
+
+
 def _selected_experience_rows(form_data):
     rows = []
     for eq_type in EQUIPMENT_TYPES:
@@ -263,7 +271,7 @@ def generate_application_pdf(form_data, employers, licenses, accidents, violatio
     pdf.section_title("Personal Information")
     pdf.field_row("Full Name:", f"{_safe(form_data, 'first_name')} {_safe(form_data, 'middle_name')} {_safe(form_data, 'last_name')}")
     pdf.field_row("Date of Birth:", _safe(form_data, "dob"))
-    pdf.field_row("Social Security Number:", _safe(form_data, "ssn"))
+    pdf.field_row("Social Security Number:", _format_ssn_for_display(form_data.get("ssn")))
     pdf.field_row("Address:", _safe(form_data, "address"))
     pdf.field_row("City, State, Zip:", f"{_safe(form_data, 'city')}, {_safe(form_data, 'state')} {_safe(form_data, 'zip_code')}")
     pdf.field_row("Country:", _safe(form_data, "country", "United States"))
