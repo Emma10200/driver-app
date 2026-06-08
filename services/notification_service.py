@@ -30,6 +30,28 @@ def _recipient_secret_key(company_slug: str) -> str:
     return f"INTERNAL_NOTIFICATION_TO_{company_slug.upper().replace('-', '_')}"
 
 
+def _division_smtp_override(company_slug: str) -> dict[str, str]:
+    """Per-division SMTP sender overrides (SMTP_USERNAME_<SLUG>, etc.).
+
+    Returns only the keys that are actually set, so callers can fall back to
+    the generic SMTP_* credentials for any value that is missing.
+    """
+    suffix = (company_slug or "").upper().replace("-", "_")
+    if not suffix:
+        return {}
+    override: dict[str, str] = {}
+    username = (get_runtime_secret(f"SMTP_USERNAME_{suffix}", "") or "").strip()
+    password = get_runtime_secret(f"SMTP_PASSWORD_{suffix}", "") or ""
+    from_email = (get_runtime_secret(f"SMTP_FROM_EMAIL_{suffix}", "") or "").strip()
+    if username:
+        override["username"] = username
+    if password:
+        override["password"] = password
+    if from_email:
+        override["from_email"] = from_email
+    return override
+
+
 # Always copied on every live application, regardless of which company the
 # applicant chose. Override via the ALWAYS_NOTIFY_EMAILS secret (comma-separated)
 # if you ever need to change/add to it without a code deploy.
@@ -43,7 +65,25 @@ def _always_notify_recipients() -> list[str]:
     return list(_DEFAULT_ALWAYS_NOTIFY)
 
 
-def _notification_settings(company_slug: str, *, test_mode: bool) -> dict[str, Any]:
+def safety_test_recipients() -> tuple[str, list[str]]:
+    """Return (statements_to_email, cc_emails) for the division send test.
+
+    The statements mailbox is the primary recipient and the always-notify
+    corporate inbox(es) (e.g. Dan) are CC'd, matching the live safety email
+    recipient pattern.
+    """
+    statements = (get_runtime_secret("INTERNAL_NOTIFICATION_TO", "") or "").strip()
+    statements = statements.split(",")[0].strip()
+    cc: list[str] = []
+    seen = {statements.lower()} if statements else set()
+    for extra in _always_notify_recipients():
+        if extra and extra.lower() not in seen:
+            cc.append(extra)
+            seen.add(extra.lower())
+    return statements, cc
+
+
+def _notification_settings(company_slug: str, *, test_mode: bool, use_division_sender: bool = False) -> dict[str, Any]:
     if test_mode:
         recipients_raw = get_runtime_secret("TEST_INTERNAL_NOTIFICATION_TO", "") or ""
         recipients = [item.strip() for item in recipients_raw.split(",") if item.strip()]
@@ -65,12 +105,23 @@ def _notification_settings(company_slug: str, *, test_mode: bool) -> dict[str, A
             if extra.lower() not in existing_lower:
                 recipients.append(extra)
                 existing_lower.add(extra.lower())
+    username = (get_runtime_secret("SMTP_USERNAME", "") or "").strip()
+    password = get_runtime_secret("SMTP_PASSWORD", "") or ""
+    from_email = (get_runtime_secret("SMTP_FROM_EMAIL", "") or "").strip()
+    # Per-division sending mailbox (e.g. safety@... for each company). Only the
+    # safety request/warning path opts in; application packets keep using the
+    # generic statements mailbox to preserve existing behaviour.
+    if use_division_sender:
+        override = _division_smtp_override(company_slug)
+        username = override.get("username", username)
+        password = override.get("password", password)
+        from_email = override.get("from_email", from_email)
     return {
         "host": (get_runtime_secret("SMTP_HOST", "") or "").strip(),
         "port": int((get_runtime_secret("SMTP_PORT", "587") or "587").strip()),
-        "username": (get_runtime_secret("SMTP_USERNAME", "") or "").strip(),
-        "password": get_runtime_secret("SMTP_PASSWORD", "") or "",
-        "from_email": (get_runtime_secret("SMTP_FROM_EMAIL", "") or "").strip(),
+        "username": username,
+        "password": password,
+        "from_email": from_email,
         "recipients": recipients,
         "use_tls": _as_bool(get_runtime_secret("SMTP_USE_TLS", "true"), True),
         "use_ssl": _as_bool(get_runtime_secret("SMTP_USE_SSL", "false"), False),
@@ -154,8 +205,8 @@ def _merge_pdfs(pdf_parts: list[bytes]) -> bytes:
     return out.getvalue()
 
 
-def notifications_enabled(company_slug: str, *, test_mode: bool) -> bool:
-    settings = _notification_settings(company_slug, test_mode=test_mode)
+def notifications_enabled(company_slug: str, *, test_mode: bool, use_division_sender: bool = False) -> bool:
+    settings = _notification_settings(company_slug, test_mode=test_mode, use_division_sender=use_division_sender)
     return bool(settings["host"] and settings["from_email"] and settings["recipients"])
 
 
@@ -577,13 +628,13 @@ def send_safety_document_request_email(
     recipient_name = str(recipient_name or "Driver/Owner").strip() or "Driver/Owner"
     division = str(division or "").strip()
     safety_display_name, safety_email, company_slug = _safety_identity_for_division(division)
-    if not notifications_enabled(company_slug, test_mode=resolved_test_mode):
+    if not notifications_enabled(company_slug, test_mode=resolved_test_mode, use_division_sender=True):
         return {
             "status": "disabled",
             "message": "Email is not configured on this deployment.",
         }
 
-    settings = _notification_settings(company_slug, test_mode=resolved_test_mode)
+    settings = _notification_settings(company_slug, test_mode=resolved_test_mode, use_division_sender=True)
     cc_recipients = _internal_recipients_only(settings["recipients"], to_email)
     upload_url = str(upload_url or "").strip() or _safety_upload_url()
 
@@ -698,6 +749,71 @@ def send_safety_document_request_email(
     return {
         "status": "sent",
         "message": f"Safety paperwork request sent to {to_email}{cc_note}.",
+        "message_id": message_id,
+    }
+
+
+def send_safety_division_test_email(
+    *,
+    company_slug: str,
+    to_email: str,
+    cc_emails: list[str] | None = None,
+) -> dict[str, Any]:
+    """Send a one-off configuration test from a division's safety mailbox.
+
+    Verifies that per-division SMTP sending (SMTP_USERNAME_<SLUG>, etc.) is
+    wired up. Each test email gets a unique subject + Message-ID so it arrives
+    as its own thread rather than being grouped with the others.
+    """
+    to_email = str(to_email or "").strip()
+    if not to_email:
+        return {"status": "error", "message": "Missing test recipient email."}
+    company_slug = (company_slug or DEFAULT_COMPANY_SLUG).strip().lower() or DEFAULT_COMPANY_SLUG
+    profile = COMPANY_PROFILES.get(company_slug) or COMPANY_PROFILES[DEFAULT_COMPANY_SLUG]
+    safety_email = (profile.email or "").strip()
+    display_name = "Safety Department" if company_slug == "xpress" else "Safety Dept"
+
+    settings = _notification_settings(company_slug, test_mode=False, use_division_sender=True)
+    if not (settings["host"] and settings["from_email"]):
+        return {"status": "disabled", "message": "SMTP is not configured on this deployment."}
+
+    cc_recipients = _internal_recipients_only(list(cc_emails or []), to_email)
+
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    message = EmailMessage()
+    message["Subject"] = f"[TEST] Safety division send check — {profile.name} ({timestamp})"
+    message["From"] = formataddr((display_name, safety_email))
+    message_id = make_msgid(domain=(safety_email.split("@")[-1] or "prestige.local"))
+    message["Message-ID"] = message_id
+    smtp_from = str(settings.get("from_email") or "").strip()
+    if smtp_from and smtp_from.lower() != safety_email.lower():
+        message["Sender"] = smtp_from
+    message["Reply-To"] = formataddr((display_name, safety_email))
+    message["To"] = to_email
+    if cc_recipients:
+        message["Cc"] = ", ".join(cc_recipients)
+
+    body = (
+        f"This is an automated configuration test for the {profile.name} safety mailbox.\n\n"
+        f"Division slug: {company_slug}\n"
+        f"Sending mailbox (From): {safety_email}\n"
+        f"SMTP login user: {settings.get('username') or '(generic SMTP_USERNAME)'}\n"
+        f"Sent at: {timestamp}\n\n"
+        "If you received this email and the From address above matches the division's "
+        "safety mailbox, per-division sending is working for this division."
+    )
+    message.set_content(body)
+
+    try:
+        _deliver_message(message, settings)
+    except Exception as exc:
+        return {"status": "error", "message": str(exc), "from_email": safety_email}
+
+    cc_note = f"; cc: {', '.join(cc_recipients)}" if cc_recipients else ""
+    return {
+        "status": "sent",
+        "message": f"Test email sent from {safety_email} to {to_email}{cc_note}.",
+        "from_email": safety_email,
         "message_id": message_id,
     }
 

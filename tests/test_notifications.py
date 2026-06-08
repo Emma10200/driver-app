@@ -156,7 +156,7 @@ def test_send_internal_submission_notification_uses_tls_and_reply_to(monkeypatch
     monkeypatch.setattr(
         notification_service,
         "_notification_settings",
-        lambda company_slug, test_mode: {
+        lambda company_slug, test_mode, use_division_sender=False: {
             "host": "smtp.example.com",
             "port": 587,
             "username": "mailer",
@@ -205,7 +205,7 @@ def test_send_safety_document_request_email_sends_to_recipient_and_ccs_internal(
     monkeypatch.setattr(
         notification_service,
         "_notification_settings",
-        lambda company_slug, test_mode: {
+        lambda company_slug, test_mode, use_division_sender=False: {
             "host": "smtp.example.com",
             "port": 587,
             "username": "mailer",
@@ -399,7 +399,7 @@ def test_send_internal_submission_notification_in_test_mode_uses_fallback_recipi
     monkeypatch.setattr(
         notification_service,
         "_notification_settings",
-        lambda company_slug, test_mode: {
+        lambda company_slug, test_mode, use_division_sender=False: {
             "host": "smtp.gmail.com",
             "port": 587,
             "username": "mailer",
@@ -435,7 +435,7 @@ def _stub_settings(monkeypatch, *, max_attachment_bytes: int = 0):
     monkeypatch.setattr(
         notification_service,
         "_notification_settings",
-        lambda company_slug, test_mode: {
+        lambda company_slug, test_mode, use_division_sender=False: {
             "host": "smtp.example.com",
             "port": 587,
             "username": "mailer",

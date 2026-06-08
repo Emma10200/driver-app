@@ -16,7 +16,11 @@ from typing import Any
 
 import streamlit as st
 
-from services.notification_service import send_safety_document_request_email
+from services.notification_service import (
+    safety_test_recipients,
+    send_safety_division_test_email,
+    send_safety_document_request_email,
+)
 from services.qbo_auth import qbo_allowed_emails
 from services.safety_ledger import (
     annotate_rows_for_send_queue,
@@ -712,6 +716,59 @@ def _render_email_replies(submissions_dir: Path) -> None:
                             st.error(result.get("message") or "Could not assign this reply.")
 
 
+def _render_division_email_test() -> None:
+    """Diagnostic: send one test email per division from its own safety mailbox."""
+    st.subheader("Division email test")
+    st.caption(
+        "Send one test email per division from each division's own safety mailbox to the "
+        "statements inbox (with the corporate inbox CC'd). Use this to confirm the per-division "
+        "sending secrets work. Each test arrives as its own email thread."
+    )
+
+    to_email, cc_emails = safety_test_recipients()
+    if not to_email:
+        st.info("Set INTERNAL_NOTIFICATION_TO (statements mailbox) to enable the division test.")
+        return
+
+    cc_label = ", ".join(cc_emails) if cc_emails else "(none)"
+    st.write(f"**To:** {to_email}  |  **CC:** {cc_label}")
+
+    divisions = [
+        ("prestige", "Prestige (California)"),
+        ("xpress", "Xpress"),
+        ("pg", "Prestige, Inc. (PG)"),
+    ]
+    if st.button("📧 Send division test emails", key="safety_division_test_send"):
+        progress = st.progress(0, text="Sending division test emails...")
+        results: list[dict[str, Any]] = []
+        total = len(divisions)
+        for idx, (slug, label) in enumerate(divisions, start=1):
+            result = send_safety_division_test_email(
+                company_slug=slug,
+                to_email=to_email,
+                cc_emails=cc_emails,
+            )
+            results.append(
+                {
+                    "Division": label,
+                    "From": result.get("from_email") or "—",
+                    "Status": result.get("status"),
+                    "Detail": result.get("message"),
+                }
+            )
+            progress.progress(idx / total, text=f"Sent {idx} of {total}...")
+        progress.empty()
+        st.dataframe(results, hide_index=True, use_container_width=True)
+        sent = sum(1 for r in results if r["Status"] == "sent")
+        if sent == total:
+            st.success(f"Sent {sent} division test email(s). Check the statements inbox.")
+        else:
+            st.warning(
+                f"Sent {sent} of {total}. Review the Detail column above — a non-sent row usually "
+                "means that division's SMTP_*_<SLUG> secret is missing or the app password is wrong."
+            )
+
+
 def render_safety_portal_page(submissions_dir: Path) -> None:
     if not _render_sso_gate():
         return
@@ -730,6 +787,9 @@ def render_safety_portal_page(submissions_dir: Path) -> None:
     st.divider()
 
     _render_reference_section(submissions_dir)
+    st.divider()
+
+    _render_division_email_test()
     st.divider()
 
     summary = reference_summary(submissions_dir)
