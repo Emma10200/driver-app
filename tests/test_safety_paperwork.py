@@ -296,6 +296,43 @@ def test_build_preview_accepts_preloaded_detail_lists() -> None:
     assert by_email["suppicichj@gmail.com"].kind == "driver_owner"
 
 
+def test_build_preview_allows_driver_only_upload() -> None:
+    preview = build_preview(
+        driver_warnings_csv=_driver_warnings_csv(),
+        driver_details_xls=_driver_details_xlsx(),
+        today=date(2026, 6, 1),
+    )
+
+    assert preview.driver_warning_rows == 5
+    assert preview.truck_warning_rows == 0
+    assert preview.driver_detail_rows == 3
+    assert preview.truck_detail_rows == 0
+    assert {bundle.email for bundle in preview.recipients} >= {"suppicichj@gmail.com", "abrahamp@example.com"}
+
+
+def test_build_preview_allows_truck_only_upload() -> None:
+    preview = build_preview(
+        truck_warnings_csv=_truck_warnings_csv(),
+        truck_owner_xls=_truck_owner_xlsx(),
+        today=date(2026, 6, 1),
+    )
+
+    assert preview.driver_warning_rows == 0
+    assert preview.truck_warning_rows == 3
+    assert preview.driver_detail_rows == 0
+    assert preview.truck_detail_rows == 3
+    assert {bundle.email for bundle in preview.recipients} >= {"suppicichj@gmail.com", "multi@example.com"}
+
+
+def test_build_preview_requires_at_least_one_warning_file() -> None:
+    with pytest.raises(ValueError, match="At least one warnings CSV"):
+        build_preview(
+            driver_details_xls=_driver_details_xlsx(),
+            truck_owner_xls=_truck_owner_xlsx(),
+            today=date(2026, 6, 1),
+        )
+
+
 def test_build_preview_against_real_attachments_if_available() -> None:
     """If the local Downloads exports are present, smoke-test against them."""
     downloads = Path.home() / "Downloads"

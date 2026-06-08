@@ -401,8 +401,8 @@ def _index_units(details: Iterable[TruckOwnerDetail]) -> dict[str, TruckOwnerDet
 
 def build_preview(
     *,
-    driver_warnings_csv: bytes | str,
-    truck_warnings_csv: bytes | str,
+    driver_warnings_csv: bytes | str | None = None,
+    truck_warnings_csv: bytes | str | None = None,
     driver_details_xls: bytes | str | None = None,
     truck_owner_xls: bytes | str | None = None,
     driver_details: Iterable[DriverDetail] | None = None,
@@ -413,27 +413,40 @@ def build_preview(
 
     Either pass raw export bytes (``driver_details_xls`` / ``truck_owner_xls``)
     or already-loaded detail lists from the reference DB
-    (``driver_details`` / ``truck_details``). At least one source must be
-    provided per side.
+    (``driver_details`` / ``truck_details``). Driver and truck warnings are
+    independent: provide one or both warning CSVs. Detail data is only required
+    for the side whose warning CSV is provided.
     """
     today = today or date.today()
 
-    if driver_details is None:
-        if driver_details_xls is None:
-            raise ValueError("driver_details_xls or driver_details must be provided")
-        driver_details = load_driver_details(driver_details_xls)
-    else:
-        driver_details = list(driver_details)
+    has_driver_warnings = driver_warnings_csv is not None
+    has_truck_warnings = truck_warnings_csv is not None
+    if not has_driver_warnings and not has_truck_warnings:
+        raise ValueError("At least one warnings CSV must be provided")
 
-    if truck_details is None:
-        if truck_owner_xls is None:
-            raise ValueError("truck_owner_xls or truck_details must be provided")
-        truck_details = load_truck_owner_details(truck_owner_xls)
+    if has_driver_warnings:
+        if driver_details is None:
+            if driver_details_xls is None:
+                raise ValueError("driver_details_xls or driver_details must be provided when driver warnings are uploaded")
+            driver_details = load_driver_details(driver_details_xls)
+        else:
+            driver_details = list(driver_details)
+        driver_warnings = _read_csv(driver_warnings_csv)
     else:
-        truck_details = list(truck_details)
+        driver_details = list(driver_details or [])
+        driver_warnings = pd.DataFrame()
 
-    driver_warnings = _read_csv(driver_warnings_csv)
-    truck_warnings = _read_csv(truck_warnings_csv)
+    if has_truck_warnings:
+        if truck_details is None:
+            if truck_owner_xls is None:
+                raise ValueError("truck_owner_xls or truck_details must be provided when truck warnings are uploaded")
+            truck_details = load_truck_owner_details(truck_owner_xls)
+        else:
+            truck_details = list(truck_details)
+        truck_warnings = _read_csv(truck_warnings_csv)
+    else:
+        truck_details = list(truck_details or [])
+        truck_warnings = pd.DataFrame()
 
     driver_index = _index_drivers(driver_details)
     unit_index = _index_units(truck_details)

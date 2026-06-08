@@ -521,6 +521,38 @@ def _render_ledger_dashboard(submissions_dir: Path) -> None:
         use_container_width=True,
     )
 
+    sent_history: list[dict[str, Any]] = []
+    for record in filtered:
+        for event in record.get("send_events") or []:
+            if not isinstance(event, Mapping):
+                continue
+            sent_history.append(
+                {
+                    "Sent at": event.get("sent_at") or record.get("last_sent_at") or "",
+                    "Sent to": event.get("to") or record.get("last_sent_to") or record.get("recipient_email"),
+                    "Recipient": record.get("recipient_name"),
+                    "Division": record.get("division"),
+                    "Unit": record.get("unit"),
+                    "Document": record.get("document"),
+                    "Expires": record.get("expires"),
+                    "Status when sent": record.get("status"),
+                    "Ledger state": record.get("ledger_state"),
+                    "Token": event.get("token") or record.get("last_link_token"),
+                }
+            )
+    sent_history.sort(key=lambda row: str(row.get("Sent at") or ""), reverse=True)
+    with st.expander(f"Sent email history ({len(sent_history)})", expanded=False):
+        st.caption(
+            "Historical safety request sends that match the dashboard filters above. "
+            "Use this to confirm who already received a request/nudge and for which document."
+        )
+        if sent_history:
+            st.dataframe(sent_history[:500], hide_index=True, use_container_width=True)
+            if len(sent_history) > 500:
+                st.caption(f"Showing the latest 500 of {len(sent_history)} sent item event(s).")
+        else:
+            st.caption("No sent email events match the current filters yet.")
+
     uploaded = [r for r in filtered if r.get("uploads")]
     with st.expander(f"Submitted documents ({len(uploaded)})", expanded=bool(uploaded)):
         if not uploaded:
@@ -720,11 +752,12 @@ def _render_warnings_preview(submissions_dir: Path) -> None:
         "then send only after the final confirmation."
     )
     summary = reference_summary(submissions_dir)
-    can_preview = summary["driver_count"] > 0 and summary["truck_count"] > 0
+    can_preview = summary["driver_count"] > 0 or summary["truck_count"] > 0
     if not can_preview:
         st.info(
-            "Before you can run warnings, add reference data first: one driver details "
-            "file and one truck owner details file. Use the **Reference data** tab."
+            "Before you can run warnings, add at least one reference file first: "
+            "driver details for driver warnings, or truck owner details for truck warnings. "
+            "Use the **Reference data** tab."
         )
         _render_excluded_doc_types()
         return
@@ -746,29 +779,28 @@ def _render_warnings_preview(submissions_dir: Path) -> None:
         st.caption(
             "The preview joins these warnings against the stored reference "
             "database above. To use a one-off detail file instead of the stored "
-            "data, refresh the reference database first."
+            "data, refresh the reference database first. You can upload driver warnings, "
+            "truck warnings, or both."
         )
         submitted = st.form_submit_button("Build preview", type="primary")
 
     _render_excluded_doc_types()
 
     if submitted:
-        missing = [
-            label
-            for label, value in (
-                ("Driver warnings CSV", driver_warnings),
-                ("Truck warnings CSV", truck_warnings),
-            )
-            if value is None
-        ]
-        if missing:
-            st.error("Please upload: " + ", ".join(missing))
+        if driver_warnings is None and truck_warnings is None:
+            st.error("Please upload at least one warnings CSV: driver warnings, truck warnings, or both.")
+            return
+        if driver_warnings is not None and summary["driver_count"] == 0:
+            st.error("Driver warnings need driver details on file. Add driver details in the Reference data tab, or skip the driver warnings file for now.")
+            return
+        if truck_warnings is not None and summary["truck_count"] == 0:
+            st.error("Truck warnings need truck owner details on file. Add truck owner details in the Reference data tab, or skip the truck warnings file for now.")
             return
 
         try:
             preview = build_preview(
-                driver_warnings_csv=driver_warnings.getvalue(),
-                truck_warnings_csv=truck_warnings.getvalue(),
+                driver_warnings_csv=driver_warnings.getvalue() if driver_warnings is not None else None,
+                truck_warnings_csv=truck_warnings.getvalue() if truck_warnings is not None else None,
                 driver_details=load_drivers(submissions_dir),
                 truck_details=load_trucks(submissions_dir),
             )
