@@ -16,6 +16,7 @@ from typing import Any
 
 import streamlit as st
 
+from config import COMPANY_PROFILES
 from services.notification_service import send_safety_document_request_email
 from services.qbo_auth import qbo_allowed_emails
 from services.safety_ledger import (
@@ -128,6 +129,37 @@ _STATUS_BADGES = {
     "missing": "⚪ Missing",
     "ok": "🟢 OK",
 }
+
+_PUBLIC_APP_URL = "https://driver-application.streamlit.app"
+
+
+def _app_link(query: str = "") -> str:
+    return f"{_PUBLIC_APP_URL}/{query}" if query else f"{_PUBLIC_APP_URL}/"
+
+
+def _render_safety_sidebar_links() -> None:
+    """Safety-portal-only sidebar shortcuts for staff."""
+    with st.sidebar:
+        st.header("🛡️ Safety links")
+        st.caption("Quick copy/open links for safety workflows.")
+
+        st.markdown("**Uploads & portals**")
+        st.link_button("Driver document upload", _app_link("?documents=1"), use_container_width=True)
+        st.code(_app_link("?documents=1"), language=None)
+        st.link_button("Safety paperwork portal", _app_link("?safety=1"), use_container_width=True)
+
+        st.markdown("**Staff tools**")
+        st.link_button("Admin dashboard", _app_link("?dashboard=1"), use_container_width=True)
+        st.link_button("QBO importer", _app_link("?qbo=1"), use_container_width=True)
+
+        st.markdown("**Driver application links**")
+        for slug, profile in COMPANY_PROFILES.items():
+            st.link_button(profile.name, _app_link(f"?company={slug}"), use_container_width=True)
+
+        st.caption(
+            "Recipient-specific safety upload links are generated from the Warnings & send tab "
+            "after you build a warnings preview."
+        )
 
 
 def _format_item_row(item) -> dict[str, str]:
