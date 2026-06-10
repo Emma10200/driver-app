@@ -7,11 +7,11 @@ from qbo.api_client import QboClient, QboRateLimitError
 from qbo.duplicate_check import (
     DuplicateChecker,
     build_invoice_key,
-    build_money_code_key,
     build_purchase_key,
     date_range,
 )
 from qbo.lookups import EntityLookupService
+from qbo.money_code_batches import build_money_code_batch_signature
 from qbo.models import ImportStats
 
 _RETRY_DELAYS = (1.0, 3.0, 8.0)
@@ -295,25 +295,30 @@ class ImportService:
             return stats
 
         for realm_id, group in groups.items():
-            window = date_range(group, realm_id)
-            existing_keys: set[str] = set()
-            preload_complete = False
-            if window:
-                try:
-                    existing_keys = self._dup.preload_money_code_keys(realm_id, window[0], window[1])
-                    preload_complete = True
-                except RuntimeError as exc:
-                    stats.warnings.append(f"Realm {realm_id}: money-code dedup preload failed ({exc}).")
-            prepared = self._prepare_money_code_batch(group, realm_id, existing_keys, stats, preload_complete=preload_complete)
+            signature = build_money_code_batch_signature(group, realm_id)
+            if not self._claim_money_code_batch_signature(signature, group, realm_id, stats):
+                continue
+
+            posted_before = stats.posted
+            failed_before = stats.failed
+            duplicate_before = stats.skipped_duplicates
+            prepared = self._prepare_money_code_batch(group, realm_id, stats)
             self._post_prepared_batches(
                 prepared,
                 realm_id,
-                existing_keys,
+                set(),
                 stats,
                 txn_type="MoneyCode",
                 response_key="Purchase",
                 batch_entity_key="Purchase",
                 bid_prefix="mc",
+            )
+            self._finalize_money_code_batch_signature(
+                signature,
+                stats,
+                posted_count=stats.posted - posted_before,
+                failed_count=stats.failed - failed_before,
+                duplicate_count=stats.skipped_duplicates - duplicate_before,
             )
         return stats
 
@@ -364,10 +369,7 @@ class ImportService:
         self,
         drafts: list[dict[str, Any]],
         realm_id: str,
-        existing_keys: set[str],
         stats: ImportStats,
-        *,
-        preload_complete: bool,
     ) -> list[dict[str, Any]]:
         prepared: list[dict[str, Any]] = []
         for draft in drafts:
@@ -389,18 +391,11 @@ class ImportService:
                 if not cc_account_id:
                     self._record_failure(stats, "MoneyCode", realm_id, division, doc_number, txn_date, vendor_name, amount, f"CC account '{cc_account_name}' not found in QBO.")
                     continue
-                dup_key = build_money_code_key(doc_number, txn_date, vendor_id, amount, memo, expense_account_name)
-                if dup_key and dup_key in existing_keys:
-                    self._record_duplicate(stats, "MoneyCode", realm_id, division, doc_number, txn_date, vendor_name, amount)
-                    continue
-                if not preload_complete and self._dup.money_code_exists(doc_number, txn_date, vendor_id, realm_id, amount, memo, expense_account_name):
-                    self._record_duplicate(stats, "MoneyCode", realm_id, division, doc_number, txn_date, vendor_name, amount)
-                    continue
                 payload = self._materialize_purchase_payload(draft, vendor_id, cc_account_id, realm_id, "CreditCard")
             except RuntimeError as exc:
                 self._record_failure(stats, "MoneyCode", realm_id, division, doc_number, txn_date, vendor_name, amount, str(exc))
                 continue
-            prepared.append({"payload": payload, "dup_key": dup_key, "realm_id": realm_id, "division": division, "doc_number": doc_number, "txn_date": txn_date, "entity_name": vendor_name, "amount": amount})
+            prepared.append({"payload": payload, "dup_key": "", "realm_id": realm_id, "division": division, "doc_number": doc_number, "txn_date": txn_date, "entity_name": vendor_name, "amount": amount})
         return prepared
 
     def _materialize_invoice_payload(self, draft: dict[str, Any], customer_id: str, realm_id: str) -> dict[str, Any]:
@@ -501,6 +496,93 @@ class ImportService:
         except (TypeError, ValueError):
             return 0.0
 
+    def _claim_money_code_batch_signature(
+        self,
+        signature: dict[str, Any],
+        drafts: list[dict[str, Any]],
+        realm_id: str,
+        stats: ImportStats,
+    ) -> bool:
+        fingerprint = str(signature.get("fingerprint") or "")
+        claim = getattr(self._audit, "claim_money_code_batch_signature", None)
+        if not fingerprint or not callable(claim):
+            return True
+        try:
+            claimed, existing = claim(signature)
+        except Exception as exc:  # noqa: BLE001 - fail closed so duplicate protection is not silently bypassed
+            message = (
+                "Money-code batch duplicate guard is unavailable, so nothing was posted. "
+                "Run Supabase migration 0002_qbo_import_batch_signatures.sql, then retry. "
+                f"Details: {exc}"
+            )
+            for draft in drafts:
+                self._record_failure(
+                    stats,
+                    "MoneyCode",
+                    realm_id,
+                    str(draft.get("_division") or ""),
+                    str(draft.get("DocNumber") or ""),
+                    str(draft.get("TxnDate") or ""),
+                    str(draft.get("_tempVendorName") or ""),
+                    self._draft_amount(draft),
+                    message,
+                )
+            return False
+        if claimed:
+            return True
+
+        message = _money_code_batch_duplicate_message(existing)
+        stats.warnings.append(message)
+        for draft in drafts:
+            self._record_duplicate(
+                stats,
+                "MoneyCode",
+                realm_id,
+                str(draft.get("_division") or ""),
+                str(draft.get("DocNumber") or ""),
+                str(draft.get("TxnDate") or ""),
+                str(draft.get("_tempVendorName") or ""),
+                self._draft_amount(draft),
+                message=message,
+            )
+        return False
+
+    def _finalize_money_code_batch_signature(
+        self,
+        signature: dict[str, Any],
+        stats: ImportStats,
+        *,
+        posted_count: int,
+        failed_count: int,
+        duplicate_count: int,
+    ) -> None:
+        update = getattr(self._audit, "update_money_code_batch_signature", None)
+        if not signature.get("fingerprint") or not callable(update):
+            return
+        if posted_count > 0 and failed_count > 0:
+            status = "partial"
+            message = "Partial money-code batch posted. Retry only failed rows from Import history."
+        elif posted_count > 0:
+            status = "complete"
+            message = "Money-code batch posted completely."
+        elif failed_count > 0:
+            status = "failed"
+            message = "Money-code batch did not post any rows."
+        else:
+            status = "failed"
+            message = "Money-code batch had no postable rows."
+        try:
+            update(
+                signature,
+                status=status,
+                posted_count=posted_count,
+                failed_count=failed_count,
+                duplicate_count=duplicate_count,
+                message=message,
+            )
+        except Exception as exc:  # noqa: BLE001 - QBO posting already happened; do not flip successes to failures
+            stats.warnings.append(f"Could not update money-code batch signature after posting: {exc}")
+
     def _record_success(self, stats: ImportStats, raw_response: Any, txn_type: str, realm_id: str, division: str, doc_number: str, txn_date: str, entity_name: str, amount: float, qbo_id: str) -> None:
         stats.posted += 1
         row = {"txn_type": txn_type, "realm_id": realm_id, "division": division, "doc_number": doc_number, "txn_date": txn_date, "entity_name": entity_name, "amount": amount, "qbo_id": qbo_id, "status": "success"}
@@ -509,12 +591,12 @@ class ImportService:
         self._audit.record(**row, raw_response=raw_response)
         self._advance_progress(f"posted {txn_type} {doc_number or qbo_id}")
 
-    def _record_duplicate(self, stats: ImportStats, txn_type: str, realm_id: str, division: str, doc_number: str, txn_date: str, entity_name: str, amount: float) -> None:
+    def _record_duplicate(self, stats: ImportStats, txn_type: str, realm_id: str, division: str, doc_number: str, txn_date: str, entity_name: str, amount: float, *, message: str = "Duplicate detected via composite key.") -> None:
         stats.skipped_duplicates += 1
-        row = {"txn_type": txn_type, "realm_id": realm_id, "division": division, "doc_number": doc_number, "txn_date": txn_date, "entity_name": entity_name, "amount": amount, "status": "duplicate"}
+        row = {"txn_type": txn_type, "realm_id": realm_id, "division": division, "doc_number": doc_number, "txn_date": txn_date, "entity_name": entity_name, "amount": amount, "status": "duplicate", "message": message}
         stats.duplicates.append(row)
         stats.bump_division(division, "duplicate")
-        self._audit.record(**row, message="Duplicate detected via composite key.")
+        self._audit.record(**row)
         self._advance_progress(f"skipped duplicate {txn_type} {doc_number}")
 
     def _record_failure(self, stats: ImportStats, txn_type: str, realm_id: str, division: str, doc_number: str, txn_date: str, entity_name: str, amount: float, message: str, *, retryable: bool = False) -> None:
@@ -552,3 +634,18 @@ def _is_transient_error(message: str) -> bool:
 def _rate_limit_hold_message(exc: QboRateLimitError) -> str:
     retry_after = exc.retry_after_seconds or 60
     return f"Retryable: QuickBooks rate limit reached (HTTP 429). Held for retry; wait at least {retry_after} seconds before resending."
+
+
+def _money_code_batch_duplicate_message(existing: dict[str, Any] | None) -> str:
+    if not existing:
+        return "This exact money-code/amount batch was already imported. Nothing was posted."
+    created_at = str(existing.get("created_at") or "").strip()
+    source_file = str(existing.get("source_file_name") or "").strip()
+    status = str(existing.get("status") or "imported").strip().lower()
+    parts = ["This exact money-code/amount batch was already imported"]
+    if created_at:
+        parts.append(f"on {created_at[:19].replace('T', ' ')} UTC")
+    if source_file:
+        parts.append(f"from {source_file}")
+    parts.append(f"(status: {status}). Nothing was posted.")
+    return " ".join(parts)

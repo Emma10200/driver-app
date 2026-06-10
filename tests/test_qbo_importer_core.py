@@ -5,6 +5,7 @@ from qbo.api_client import QboRateLimitError
 from qbo.file_loader import FileLoader
 from qbo.import_service import ImportService
 from qbo.lookups import EntityLookupService
+from qbo.money_code_batches import build_money_code_batch_signature
 from qbo.models import ConnectedRealm, PreviewResult
 from qbo.parsers import DriverStatementParser, MoneyCodeParser
 from services.qbo_driver_statement_preview import (
@@ -14,10 +15,14 @@ from services.qbo_driver_statement_preview import (
 from services.qbo_dashboard import (
     _apply_retry_filter,
     _build_preview,
+    _create_missing_vendors,
+    _driver_statement_vendor_refs,
+    _find_missing_driver_statement_vendors,
     _friendly_history_reason,
     _history_display_rows,
     _invoice_customer_refs,
 )
+import services.qbo_dashboard as qbo_dashboard
 from services.qbo_auth import qbo_allowed_emails
 
 
@@ -247,6 +252,140 @@ def test_driver_statement_preview_unchecked_post_row_is_removed():
     assert preview.rows[0]["Check Total"] == 20.0
 
 
+def test_driver_statement_vendor_refs_dedupe_for_selected_company():
+    realm = ConnectedRealm(realm_id="realm-1", company_name="Prestig Inc")
+    preview = PreviewResult(
+        template_type="driver_statements",
+        source_file="driver.csv",
+        source_hash="abc",
+        count=3,
+        source_count=3,
+        skipped_count=0,
+        drafts=[
+            {"DocNumber": "CHK-1", "_tempVendorName": "Driver One"},
+            {"DocNumber": "CHK-2", "_tempVendorName": "driver one"},
+            {"DocNumber": "CHK-3", "_tempVendorName": "Driver Two"},
+        ],
+    )
+
+    refs = _driver_statement_vendor_refs(preview=preview, target_realm=realm)
+
+    assert refs == [
+        {
+            "vendor_name": "Driver One",
+            "realm_id": "realm-1",
+            "target_company": "Prestig Inc",
+            "check_count": 2,
+        },
+        {
+            "vendor_name": "Driver Two",
+            "realm_id": "realm-1",
+            "target_company": "Prestig Inc",
+            "check_count": 1,
+        },
+    ]
+
+
+def test_find_missing_driver_statement_vendors_checks_qbo_before_post(monkeypatch):
+    class _FakeLookup:
+        def __init__(self, _qbo):
+            pass
+
+        def resolve_entity(self, type_name, name, realm_id):
+            assert type_name == "Vendor"
+            assert realm_id == "realm-1"
+            return "vendor-1" if name == "Existing Driver" else None
+
+    monkeypatch.setattr(qbo_dashboard, "QboClient", lambda auth_service: object())
+    monkeypatch.setattr(qbo_dashboard, "EntityLookupService", _FakeLookup)
+
+    realm = ConnectedRealm(realm_id="realm-1", company_name="Prestig Inc")
+    preview = PreviewResult(
+        template_type="driver_statements",
+        source_file="driver.csv",
+        source_hash="abc",
+        count=2,
+        source_count=2,
+        skipped_count=0,
+        drafts=[
+            {"DocNumber": "CHK-1", "_tempVendorName": "Existing Driver"},
+            {"DocNumber": "CHK-2", "_tempVendorName": "New Driver"},
+        ],
+    )
+
+    result = _find_missing_driver_statement_vendors(
+        preview=preview,
+        target_realm=realm,
+        auth_service=object(),
+    )
+
+    assert result["checked_count"] == 2
+    assert result["found_count"] == 1
+    assert result["lookup_errors"] == []
+    assert result["missing"] == [
+        {
+            "vendor_name": "New Driver",
+            "realm_id": "realm-1",
+            "target_company": "Prestig Inc",
+            "check_count": 1,
+        }
+    ]
+
+
+def test_create_missing_vendors_posts_vendor_and_returns_new_ids(monkeypatch):
+    class _Progress:
+        def __init__(self):
+            self.updates = []
+
+        def progress(self, value, text=""):
+            self.updates.append((value, text))
+
+        def empty(self):
+            self.updates.append(("empty", ""))
+
+    class _FakeLookup:
+        created = []
+
+        def __init__(self, _qbo):
+            pass
+
+        def resolve_entity(self, type_name, name, realm_id):
+            assert type_name == "Vendor"
+            return None
+
+        def create_entity(self, type_name, display_name, realm_id):
+            self.created.append((type_name, display_name, realm_id))
+            return f"vendor-{len(self.created)}"
+
+    monkeypatch.setattr(qbo_dashboard, "QboClient", lambda auth_service: object())
+    monkeypatch.setattr(qbo_dashboard, "EntityLookupService", _FakeLookup)
+    monkeypatch.setattr(qbo_dashboard.st, "progress", lambda *args, **kwargs: _Progress())
+
+    created, failed = _create_missing_vendors(
+        [
+            {
+                "vendor_name": "New Driver",
+                "realm_id": "realm-1",
+                "target_company": "Prestig Inc",
+                "check_count": 2,
+            }
+        ],
+        auth_service=object(),
+    )
+
+    assert failed == []
+    assert created == [
+        {
+            "vendor_name": "New Driver",
+            "realm_id": "realm-1",
+            "target_company": "Prestig Inc",
+            "check_count": 2,
+            "qbo_id": "vendor-1",
+        }
+    ]
+    assert _FakeLookup.created == [("Vendor", "New Driver", "realm-1")]
+
+
 def test_money_code_parser_only_imports_fuel_card_efs_rows():
     data = [
         ["Ref#", "Vendor", "Memo", "Bill Date", "Amount Used", "Expense Account", "CC Account"],
@@ -267,6 +406,22 @@ def test_qbo_duplicate_keys_are_stable():
     assert build_money_code_key("MC-1", "2026-05-22", "9", 12, "Fuel", "Truck Fuel") == (
         "creditcard|mc-1|2026-05-22|9|12.00|fuel|truck fuel"
     )
+
+
+def test_money_code_batch_signature_is_order_independent_and_preserves_splits():
+    one_thousand = build_money_code_batch_signature([_money_code_draft("MC-1", 1000.0)], "realm-1")
+    split_a = build_money_code_batch_signature(
+        [_money_code_draft("MC-1", 500.0), _money_code_draft("MC-1", 500.0)],
+        "realm-1",
+    )
+    split_b = build_money_code_batch_signature(
+        [_money_code_draft("mc-1", 500.0), _money_code_draft("MC-1", 500)],
+        "realm-1",
+    )
+
+    assert split_a["fingerprint"] == split_b["fingerprint"]
+    assert split_a["entries"] == [{"code": "MC-1", "amount": "500.00"}, {"code": "MC-1", "amount": "500.00"}]
+    assert split_a["fingerprint"] != one_thousand["fingerprint"]
 
 
 def test_invoice_customer_refs_route_by_division_without_fallback():
@@ -533,7 +688,7 @@ def _check_draft(doc_number: str) -> dict[str, object]:
     }
 
 
-def _money_code_draft(doc_number: str) -> dict[str, object]:
+def _money_code_draft(doc_number: str, amount: float = 50.0) -> dict[str, object]:
     return {
         "DocNumber": doc_number,
         "TxnDate": "2026-05-22",
@@ -543,7 +698,7 @@ def _money_code_draft(doc_number: str) -> dict[str, object]:
         "_memo": "fuel",
         "Line": [
             {
-                "Amount": 50.0,
+                "Amount": amount,
                 "DetailType": "AccountBasedExpenseLineDetail",
                 "_tempAccountName": "Truck Fuel",
             }
@@ -606,3 +761,116 @@ def test_money_code_import_uses_qbo_batch_purchase_create():
     assert len(fake_qbo.batch_calls) == 1
     assert all("Purchase" in request and request["Purchase"]["PaymentType"] == "CreditCard" for _, batch in fake_qbo.batch_calls for request in batch)
     assert dup.money_code_exists_calls == 0
+
+
+class _MoneyCodeBatchAudit(_NoopAudit):
+    def __init__(self, existing=None):
+        super().__init__()
+        self.existing = existing
+        self.claims = []
+        self.updates = []
+
+    def claim_money_code_batch_signature(self, signature):
+        self.claims.append(signature)
+        if self.existing:
+            return False, self.existing
+        return True, None
+
+    def update_money_code_batch_signature(self, signature, **kwargs):
+        self.updates.append({"signature": signature, **kwargs})
+
+
+def test_money_code_exact_batch_duplicate_rejects_before_qbo_post():
+    class _BatchQbo:
+        def __init__(self):
+            self.batch_calls = []
+
+        def batch(self, *, realm_id, requests):
+            self.batch_calls.append((realm_id, requests))
+            raise AssertionError("duplicate money-code batch should not post to QBO")
+
+    existing = {
+        "created_at": "2026-05-28T12:30:00Z",
+        "source_file_name": "money-codes.csv",
+        "status": "complete",
+    }
+    fake_qbo = _BatchQbo()
+    audit = _MoneyCodeBatchAudit(existing=existing)
+    service = ImportService(fake_qbo, _InvoiceLookup(), _NoDuplicateInvoices(), audit)  # type: ignore[arg-type]
+
+    stats = service.post_money_codes(
+        [_money_code_draft("MC-1", 500.0), _money_code_draft("MC-1", 500.0)],
+        target_realm_id="realm-1",
+    )
+
+    assert stats.posted == 0
+    assert stats.failed == 0
+    assert stats.skipped_duplicates == 2
+    assert not fake_qbo.batch_calls
+    assert "already imported" in stats.warnings[0]
+    assert "money-codes.csv" in stats.warnings[0]
+    assert len(audit.rows) == 2
+    assert all(row["status"] == "duplicate" for row in audit.rows)
+    assert not audit.updates
+
+
+def test_money_code_successful_import_records_complete_batch_signature():
+    class _BatchQbo:
+        def batch(self, *, realm_id, requests):
+            return {
+                "BatchItemResponse": [
+                    {"bId": request["bId"], "Purchase": {"Id": f"qbo-{request['bId']}"}}
+                    for request in requests
+                ]
+            }
+
+    audit = _MoneyCodeBatchAudit()
+    service = ImportService(_BatchQbo(), _InvoiceLookup(), _NoDuplicateInvoices(), audit)  # type: ignore[arg-type]
+
+    stats = service.post_money_codes(
+        [_money_code_draft("MC-2", 200.0), _money_code_draft("MC-1", 100.0)],
+        target_realm_id="realm-1",
+    )
+
+    assert stats.posted == 2
+    assert stats.failed == 0
+    assert audit.claims[0]["entries"] == [{"code": "MC-1", "amount": "100.00"}, {"code": "MC-2", "amount": "200.00"}]
+    assert audit.updates[-1]["status"] == "complete"
+    assert audit.updates[-1]["posted_count"] == 2
+    assert audit.updates[-1]["failed_count"] == 0
+
+
+def test_money_code_partial_import_records_partial_batch_signature(monkeypatch):
+    monkeypatch.setattr("qbo.import_service.time.sleep", lambda *_args, **_kwargs: None)
+
+    class _PartiallyRateLimitedQbo:
+        def __init__(self):
+            self.calls = 0
+
+        def batch(self, *, realm_id, requests):
+            self.calls += 1
+            if self.calls == 2:
+                raise QboRateLimitError(
+                    "QBO POST /batch failed: HTTP 429 throttled",
+                    status_code=429,
+                    response_text="throttled",
+                    retry_after_seconds=60,
+                )
+            return {
+                "BatchItemResponse": [
+                    {"bId": request["bId"], "Purchase": {"Id": f"qbo-{request['bId']}"}}
+                    for request in requests
+                ]
+            }
+
+    audit = _MoneyCodeBatchAudit()
+    service = ImportService(_PartiallyRateLimitedQbo(), _InvoiceLookup(), _NoDuplicateInvoices(), audit)  # type: ignore[arg-type]
+
+    stats = service.post_money_codes([_money_code_draft(str(num), 50.0) for num in range(11)], target_realm_id="realm-1")
+
+    assert stats.posted == 10
+    assert stats.failed == 1
+    assert stats.held_for_retry == 1
+    assert audit.updates[-1]["status"] == "partial"
+    assert audit.updates[-1]["posted_count"] == 10
+    assert audit.updates[-1]["failed_count"] == 1

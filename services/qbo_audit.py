@@ -95,6 +95,96 @@ class SupabaseAuditLog:
             )
         return row_id
 
+    def find_money_code_batch_signature(self, fingerprint: str) -> dict[str, Any] | None:
+        if not fingerprint:
+            return None
+        rows = self._client.select(
+            "qbo_import_batch_signatures",
+            select=(
+                "id,created_at,updated_at,imported_by_email,template_type,realm_id,"
+                "fingerprint,status,entries,entry_count,total_amount,source_file_name,"
+                "source_file_hash,posted_count,failed_count,duplicate_count,message"
+            ),
+            filters={"fingerprint": f"eq.{fingerprint}"},
+            limit=1,
+        )
+        return rows[0] if rows else None
+
+    def claim_money_code_batch_signature(self, signature: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
+        """
+        Reserve an exact money-code batch before posting.
+
+        Returns (claimed, existing_row). If claimed is False, a blocking prior row already exists
+        and the caller should reject the import without posting to QBO.
+        """
+        fingerprint = str(signature.get("fingerprint") or "").strip()
+        if not fingerprint:
+            return True, None
+
+        existing = self.find_money_code_batch_signature(fingerprint)
+        if existing and str(existing.get("status") or "").lower() in {"pending", "complete", "partial"}:
+            return False, existing
+
+        row = self._money_code_batch_row(signature, status="pending")
+        if existing:
+            rows = self._client.patch(
+                "qbo_import_batch_signatures",
+                row,
+                filters={"fingerprint": f"eq.{fingerprint}"},
+            )
+            return True, rows[0] if rows else existing
+
+        try:
+            rows = self._client.insert("qbo_import_batch_signatures", row)
+            return True, rows[0] if rows else None
+        except Exception:
+            # If another request inserted the same fingerprint between our select and insert,
+            # treat it as a duplicate. Otherwise bubble up configuration/storage failures.
+            existing = self.find_money_code_batch_signature(fingerprint)
+            if existing and str(existing.get("status") or "").lower() in {"pending", "complete", "partial"}:
+                return False, existing
+            raise
+
+    def update_money_code_batch_signature(
+        self,
+        signature: dict[str, Any],
+        *,
+        status: str,
+        posted_count: int = 0,
+        failed_count: int = 0,
+        duplicate_count: int = 0,
+        message: str = "",
+    ) -> None:
+        fingerprint = str(signature.get("fingerprint") or "").strip()
+        if not fingerprint:
+            return
+        self._client.patch(
+            "qbo_import_batch_signatures",
+            {
+                "status": status,
+                "posted_count": int(posted_count or 0),
+                "failed_count": int(failed_count or 0),
+                "duplicate_count": int(duplicate_count or 0),
+                "message": message or "",
+            },
+            filters={"fingerprint": f"eq.{fingerprint}"},
+        )
+
+    def _money_code_batch_row(self, signature: dict[str, Any], *, status: str) -> dict[str, Any]:
+        return {
+            "imported_by_email": self._imported_by_email,
+            "template_type": "money_codes",
+            "realm_id": str(signature.get("realm_id") or ""),
+            "fingerprint": str(signature.get("fingerprint") or ""),
+            "signature_version": int(signature.get("version") or 1),
+            "status": status,
+            "entries": signature.get("entries") or [],
+            "entry_count": int(signature.get("entry_count") or 0),
+            "total_amount": float(signature.get("total_amount") or 0.0),
+            "source_file_name": self._source_file_name,
+            "source_file_hash": self._source_hash,
+        }
+
     def recent(self, limit: int = 200) -> list[dict[str, Any]]:
         return self._client.select(
             "qbo_audit_log",
