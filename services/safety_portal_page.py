@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import html
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,10 @@ from services.safety_paperwork import (
 )
 from services.safety_reference_db import (
     UpsertResult,
+    delete_drivers,
+    delete_trucks,
+    list_driver_records,
+    list_truck_records,
     load_drivers,
     load_trucks,
     reference_summary,
@@ -363,6 +368,69 @@ def _sent_history_rows_from_ledger_records(
     return rows
 
 
+def _send_recipient_bundles(
+    grouped: dict[str, dict[str, Any]], submissions_dir: Path
+) -> None:
+    """Create upload links, send the request emails, and display the results.
+
+    Shared by the normal send queue and the missing-email recovery section so
+    both code paths record links/send events identically.
+    """
+    results: list[dict[str, Any]] = []
+    progress = st.progress(0, text="Sending safety paperwork emails...")
+    total = max(1, len(grouped))
+    for idx, bundle in enumerate(grouped.values(), start=1):
+        link = create_safety_upload_link(
+            submissions_dir=submissions_dir,
+            recipient_email=bundle["email"],
+            recipient_name=bundle["recipient_name"],
+            division=bundle["division"],
+            items=bundle["items"],
+        )
+        result = send_safety_document_request_email(
+            to_email=bundle["email"],
+            recipient_name=bundle["recipient_name"],
+            division=bundle["division"],
+            items=bundle["items"],
+            upload_url=str(link.get("url") or ""),
+            token=str(link.get("token") or ""),
+            ref_code=str(link.get("ref_code") or ""),
+        )
+        if result.get("status") == "sent":
+            message_id = str(result.get("message_id") or "")
+            if message_id:
+                record_outbound_message_id(
+                    submissions_dir=submissions_dir,
+                    token=str(link.get("token") or ""),
+                    message_id=message_id,
+                )
+            record_send_event(
+                submissions_dir,
+                recipient_email=bundle["email"],
+                recipient_name=bundle["recipient_name"],
+                division=bundle["division"],
+                items=bundle["items"],
+                token=str(link.get("token") or ""),
+            )
+        results.append(
+            {
+                "Email": bundle["email"],
+                "Status": result["status"],
+                "Message": result["message"],
+                "Unique link": link.get("url"),
+            }
+        )
+        progress.progress(idx / total, text=f"Sent {idx} of {total} email(s)...")
+    progress.empty()
+    sent = sum(1 for r in results if r["Status"] == "sent")
+    errors = [r for r in results if r["Status"] != "sent"]
+    if sent:
+        st.success(f"Sent {sent} safety paperwork request email(s).")
+    if errors:
+        st.error(f"{len(errors)} email(s) did not send. Review the result table below.")
+    st.dataframe(results, hide_index=True, use_container_width=True)
+
+
 def _render_send_queue(recipients: list[RecipientBundle], *, preview_version: int, submissions_dir: Path) -> None:
     if not recipients:
         st.info("No clean recipients to contact from this import.")
@@ -463,68 +531,134 @@ def _render_send_queue(recipients: list[RecipientBundle], *, preview_version: in
         disabled=send_disabled,
         key="safety_send_selected",
     ):
-        results: list[dict[str, Any]] = []
-        progress = st.progress(0, text="Sending safety paperwork emails...")
-        total = max(1, len(grouped))
-        for idx, bundle in enumerate(grouped.values(), start=1):
-            link = create_safety_upload_link(
-                submissions_dir=submissions_dir,
-                recipient_email=bundle["email"],
-                recipient_name=bundle["recipient_name"],
-                division=bundle["division"],
-                items=bundle["items"],
-            )
-            result = send_safety_document_request_email(
-                to_email=bundle["email"],
-                recipient_name=bundle["recipient_name"],
-                division=bundle["division"],
-                items=bundle["items"],
-                upload_url=str(link.get("url") or ""),
-                token=str(link.get("token") or ""),
-                ref_code=str(link.get("ref_code") or ""),
-            )
-            if result.get("status") == "sent":
-                message_id = str(result.get("message_id") or "")
-                if message_id:
-                    record_outbound_message_id(
-                        submissions_dir=submissions_dir,
-                        token=str(link.get("token") or ""),
-                        message_id=message_id,
-                    )
-                record_send_event(
-                    submissions_dir,
-                    recipient_email=bundle["email"],
-                    recipient_name=bundle["recipient_name"],
-                    division=bundle["division"],
-                    items=bundle["items"],
-                    token=str(link.get("token") or ""),
-                )
-            results.append(
-                {
-                    "Email": bundle["email"],
-                    "Status": result["status"],
-                    "Message": result["message"],
-                    "Unique link": link.get("url"),
-                }
-            )
-            progress.progress(idx / total, text=f"Sent {idx} of {total} email(s)...")
-        progress.empty()
-        sent = sum(1 for r in results if r["Status"] == "sent")
-        errors = [r for r in results if r["Status"] != "sent"]
-        if sent:
-            st.success(f"Sent {sent} safety paperwork request email(s).")
-        if errors:
-            st.error(f"{len(errors)} email(s) did not send. Review the result table below.")
-        st.dataframe(results, hide_index=True, use_container_width=True)
+        _send_recipient_bundles(grouped, submissions_dir)
 
 
-def _render_review(review: list[ReviewIssue]) -> None:
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _looks_like_email(value: str) -> bool:
+    return bool(_EMAIL_RE.match(str(value or "").strip()))
+
+
+def _format_blocker_source(source: Any) -> str:
+    """Render a review source dict, hiding internal ``_``-prefixed keys."""
+    if isinstance(source, Mapping):
+        visible = {k: v for k, v in source.items() if not str(k).startswith("_")}
+        return str(visible)
+    return str(source)
+
+
+def _summarize_items(items: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for item in items:
+        unit = str(item.get("unit") or "").strip()
+        document = str(item.get("document") or "Document").strip()
+        parts.append(f"Unit {unit} · {document}" if unit else document)
+    return "; ".join(parts) or "—"
+
+
+def _render_missing_email_recovery(
+    blockers: list[ReviewIssue], submissions_dir: Path, *, preview_version: int
+) -> None:
+    st.markdown("**Missing email — add an address and send**")
+    st.caption(
+        "These recipients were blocked only because no email is on file. Type an email "
+        "next to each row, check Send, then confirm. Rows that share the same email are "
+        "combined into a single message."
+    )
+
+    rows: list[dict[str, Any]] = []
+    for idx, issue in enumerate(blockers):
+        source = issue.source if isinstance(issue.source, Mapping) else {}
+        items = [dict(i) for i in (source.get("_items") or []) if isinstance(i, Mapping)]
+        kind_label = {"driver": "Driver", "owner": "Owner"}.get(
+            str(source.get("_kind") or ""), "Recipient"
+        )
+        rows.append(
+            {
+                "Send": False,
+                "Recipient": str(source.get("_recipient_name") or "Driver/Owner"),
+                "Kind": kind_label,
+                "Division": str(source.get("_division") or ""),
+                "Custom email": "",
+                "Documents": _summarize_items(items),
+                "_idx": idx,
+            }
+        )
+
+    edited = st.data_editor(
+        rows,
+        key=f"safety_missing_email_editor_{preview_version}",
+        hide_index=True,
+        use_container_width=True,
+        column_order=["Send", "Recipient", "Kind", "Division", "Custom email", "Documents"],
+        disabled=["Recipient", "Kind", "Division", "Documents"],
+        column_config={
+            "Send": st.column_config.CheckboxColumn("Send?", default=False),
+            "Custom email": st.column_config.TextColumn(
+                "Custom email", help="Type the recipient's email address to send to."
+            ),
+        },
+    )
+
+    grouped: dict[str, dict[str, Any]] = {}
+    invalid: list[str] = []
+    for row_index, row in enumerate(_editor_records(edited)):
+        if not bool(row.get("Send")):
+            continue
+        name = str(row.get("Recipient") or "Driver/Owner").strip()
+        email = str(row.get("Custom email") or "").strip().lower()
+        if not _looks_like_email(email):
+            invalid.append(name or "(unnamed)")
+            continue
+        if row_index >= len(blockers):
+            continue
+        source = blockers[row_index].source if isinstance(blockers[row_index].source, Mapping) else {}
+        items = [dict(i) for i in (source.get("_items") or []) if isinstance(i, Mapping)]
+        bundle = grouped.setdefault(
+            email,
+            {
+                "email": email,
+                "recipient_name": name,
+                "division": str(source.get("_division") or "").strip(),
+                "items": [],
+            },
+        )
+        bundle["items"].extend(items)
+
+    if invalid:
+        st.warning("Enter a valid email address for: " + ", ".join(invalid))
+
+    item_count = sum(len(bundle["items"]) for bundle in grouped.values())
+    if grouped:
+        st.info(
+            f"Ready to send **{item_count} document item(s)** across **{len(grouped)} email(s)** "
+            "using the addresses you entered."
+        )
+
+    confirm = st.checkbox(
+        "I understand this will send real safety paperwork request emails to the addresses I entered.",
+        key=f"safety_missing_email_confirm_{preview_version}",
+    )
+    if st.button(
+        f"📧 Send {len(grouped)} recovered email(s) now",
+        type="primary",
+        disabled=not confirm or not grouped,
+        key=f"safety_missing_email_send_{preview_version}",
+    ):
+        _send_recipient_bundles(grouped, submissions_dir)
+
+
+def _render_review(review: list[ReviewIssue], submissions_dir: Path, *, preview_version: int) -> None:
     if not review:
         st.success("No review issues found in this import.")
         return
 
     blockers = [r for r in review if r.severity == "blocker"]
     warnings = [r for r in review if r.severity != "blocker"]
+    sendable = [r for r in blockers if isinstance(r.source, Mapping) and r.source.get("_sendable")]
+    plain_blockers = [r for r in blockers if r not in sendable]
 
     st.subheader(f"Review queue ({len(review)})")
     st.caption(
@@ -532,12 +666,15 @@ def _render_review(review: list[ReviewIssue]) -> None:
         "the row can still go out, but the data is worth a second look."
     )
 
-    if blockers:
+    if sendable:
+        _render_missing_email_recovery(sendable, submissions_dir, preview_version=preview_version)
+
+    if plain_blockers:
         st.markdown("**Blockers (excluded from outbound)**")
         st.dataframe(
             [
-                {"Category": r.category, "Message": r.message, "Source": str(r.source)}
-                for r in blockers
+                {"Category": r.category, "Message": r.message, "Source": _format_blocker_source(r.source)}
+                for r in plain_blockers
             ],
             hide_index=True,
             use_container_width=True,
@@ -546,7 +683,7 @@ def _render_review(review: list[ReviewIssue]) -> None:
         st.markdown("**Warnings**")
         st.dataframe(
             [
-                {"Category": r.category, "Message": r.message, "Source": str(r.source)}
+                {"Category": r.category, "Message": r.message, "Source": _format_blocker_source(r.source)}
                 for r in warnings
             ],
             hide_index=True,
@@ -809,6 +946,110 @@ def _render_reference_section(submissions_dir: Path) -> None:
                     except Exception as exc:  # noqa: BLE001
                         st.error(f"Truck owner details upload failed: {exc}")
 
+    _render_reference_search_delete(submissions_dir)
+
+
+def _render_reference_search_delete(submissions_dir: Path) -> None:
+    """Search the reference database and delete selected drivers / trucks."""
+    with st.expander("Search & delete reference records", expanded=False):
+        st.caption(
+            "Find drivers or truck owners already on file and remove the ones you no "
+            "longer want. Deleting here only removes the stored reference record; it "
+            "does not touch any sent emails or uploaded documents."
+        )
+        kind = st.radio(
+            "Records to manage",
+            options=["Drivers", "Truck owners"],
+            horizontal=True,
+            key="safety_ref_manage_kind",
+        )
+        query = st.text_input(
+            "Search",
+            key="safety_ref_manage_search",
+            placeholder="Name, email, division, unit, or driver id…",
+        ).strip().lower()
+
+        if kind == "Drivers":
+            records = list_driver_records(submissions_dir)
+
+            def _row(record: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    "Delete": False,
+                    "Name": str(record.get("display_name") or record.get("full_name") or ""),
+                    "Email": str(record.get("email") or ""),
+                    "Division": str(record.get("division") or ""),
+                    "Driver ID": str(record.get("driver_personal_id") or ""),
+                    "_key": str(record.get("key") or ""),
+                }
+        else:
+            records = list_truck_records(submissions_dir)
+
+            def _row(record: dict[str, Any]) -> dict[str, Any]:
+                owner = f"{record.get('owner_first') or ''} {record.get('owner_last') or ''}".strip()
+                return {
+                    "Delete": False,
+                    "Unit": str(record.get("unit_no") or ""),
+                    "Owner": owner or str(record.get("owner_company") or ""),
+                    "Email": str(record.get("owner_email") or ""),
+                    "Division": str(record.get("division") or ""),
+                    "_key": str(record.get("key") or ""),
+                }
+
+        rows = [_row(record) for record in records]
+        if query:
+            rows = [
+                row
+                for row in rows
+                if any(query in str(value).lower() for key, value in row.items() if key != "Delete")
+            ]
+
+        if not records:
+            st.info("No reference records on file yet. Upload detail files above first.")
+            return
+
+        st.caption(f"Showing {len(rows)} of {len(records)} {kind.lower()} record(s).")
+        column_order = (
+            ["Delete", "Name", "Email", "Division", "Driver ID"]
+            if kind == "Drivers"
+            else ["Delete", "Unit", "Owner", "Email", "Division"]
+        )
+        edited = st.data_editor(
+            rows,
+            key=f"safety_ref_manage_editor_{kind}",
+            hide_index=True,
+            use_container_width=True,
+            column_order=column_order,
+            disabled=[c for c in column_order if c != "Delete"],
+            column_config={"Delete": st.column_config.CheckboxColumn("Delete?", default=False)},
+        )
+
+        to_delete = [
+            str(rows[row_index].get("_key"))
+            for row_index, row in enumerate(_editor_records(edited))
+            if row_index < len(rows) and bool(row.get("Delete")) and rows[row_index].get("_key")
+        ]
+        st.warning(
+            f"Selected **{len(to_delete)}** {kind.lower()} record(s) for deletion."
+            if to_delete
+            else "Check the Delete box on any rows you want to remove."
+        )
+        confirm = st.checkbox(
+            "I understand deleting these reference records cannot be undone.",
+            key=f"safety_ref_delete_confirm_{kind}",
+        )
+        if st.button(
+            f"🗑️ Delete {len(to_delete)} {kind.lower()} record(s)",
+            type="primary",
+            disabled=not confirm or not to_delete,
+            key=f"safety_ref_delete_button_{kind}",
+        ):
+            if kind == "Drivers":
+                removed = delete_drivers(to_delete, submissions_dir=submissions_dir)
+            else:
+                removed = delete_trucks(to_delete, submissions_dir=submissions_dir)
+            st.success(f"Deleted {removed} {kind.lower()} record(s).")
+            st.rerun()
+
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -986,7 +1227,7 @@ def _render_warnings_preview(submissions_dir: Path) -> None:
     preview_version = int(st.session_state.get("safety_preview_version", 1) or 1)
     _render_summary(preview)
     _render_send_queue(preview.recipients, preview_version=preview_version, submissions_dir=submissions_dir)
-    _render_review(preview.review)
+    _render_review(preview.review, submissions_dir, preview_version=preview_version)
 
 
 def render_safety_portal_page(submissions_dir: Path) -> None:

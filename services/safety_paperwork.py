@@ -42,7 +42,7 @@ DOC_TYPE_LABELS: dict[str, str] = {
     "CDL": "Commercial Driver's License (CDL)",
     "MEDICAL_CARD": "DOT Medical Card",
     "DOT_INSPECTION": "Annual DOT Inspection",
-    "INSURANCE": "Insurance Certificate",
+    "INSURANCE": "Bobtail Insurance Certificate",
     "PLATES": "Plates / Registration",
     "IFTA": "IFTA Sticker",
 }
@@ -201,6 +201,21 @@ def parse_warning_date(raw: Any, *, today: date | None = None) -> tuple[date | N
     if parsed.year > today.year + _MAX_PLAUSIBLE_FUTURE_YEARS:
         return None, f"Implausible future date: {parsed.isoformat()}"
     return parsed, None
+
+
+def _warning_item_payload(item: "WarningItem") -> dict[str, Any]:
+    """Serialize a WarningItem into the dict shape used by the send queue.
+
+    Keeps keys aligned with ``_group_selected_rows`` / the notification and
+    ledger helpers so a manually-emailed blocker behaves like a normal send.
+    """
+    return {
+        "doc_type": item.doc_type,
+        "document": DOC_TYPE_LABELS.get(item.doc_type, item.doc_type),
+        "unit": item.unit_no or "",
+        "expires": item.expiration_date.isoformat() if item.expiration_date else "",
+        "status": item.status,
+    }
 
 
 def classify_status(
@@ -510,7 +525,15 @@ def build_preview(
                     severity="blocker",
                     category="driver_no_email",
                     message=f"Driver {detail.display_name} has no email in details list.",
-                    source={"Driver": raw_name, "DisplayName": detail.display_name},
+                    source={
+                        "Driver": raw_name,
+                        "DisplayName": detail.display_name,
+                        "_sendable": True,
+                        "_kind": "driver",
+                        "_recipient_name": detail.display_name,
+                        "_division": detail.division,
+                        "_items": [_warning_item_payload(i) for i in items],
+                    },
                 )
             )
             continue
@@ -566,18 +589,25 @@ def build_preview(
                 )
             )
             continue
+        owner_display = f"{detail.owner_first} {detail.owner_last}".strip() or detail.owner_company
         if not detail.owner_email:
             review.append(
                 ReviewIssue(
                     severity="blocker",
                     category="unit_no_owner_email",
                     message=f"Unit {unit} ({detail.owner_first} {detail.owner_last}) has no owner email.",
-                    source={"Unit #": unit},
+                    source={
+                        "Unit #": unit,
+                        "_sendable": True,
+                        "_kind": "owner",
+                        "_recipient_name": owner_display,
+                        "_division": detail.division,
+                        "_items": [_warning_item_payload(i) for i in items],
+                    },
                 )
             )
             continue
 
-        owner_display = f"{detail.owner_first} {detail.owner_last}".strip() or detail.owner_company
         bundle_key = f"owner::{detail.owner_email}"
         bundle = bundles.get(bundle_key)
         if bundle is None:

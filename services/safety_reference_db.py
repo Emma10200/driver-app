@@ -263,6 +263,55 @@ def load_trucks(submissions_dir: Path) -> list[TruckOwnerDetail]:
     return out
 
 
+def list_driver_records(submissions_dir: Path) -> list[dict]:
+    """Return stored driver records, each including its storage ``key``.
+
+    Used by the staff UI to search and selectively delete drivers.
+    """
+    store = _read_json(_drivers_path(submissions_dir))
+    return [{"key": key, **record} for key, record in store.items()]
+
+
+def list_truck_records(submissions_dir: Path) -> list[dict]:
+    """Return stored truck-owner records, each including its storage ``key``."""
+    store = _read_json(_trucks_path(submissions_dir))
+    return [{"key": key, **record} for key, record in store.items()]
+
+
+def delete_drivers(keys: Iterable[str], *, submissions_dir: Path) -> int:
+    """Delete drivers by storage key. Returns the number actually removed."""
+    keys = {str(k) for k in keys if str(k)}
+    if not keys:
+        return 0
+    path = _drivers_path(submissions_dir)
+    with _lock:
+        store = _read_json(path)
+        removed = 0
+        for key in keys:
+            if store.pop(key, None) is not None:
+                removed += 1
+        if removed:
+            _write_json(path, store)
+    return removed
+
+
+def delete_trucks(keys: Iterable[str], *, submissions_dir: Path) -> int:
+    """Delete truck owners by storage key. Returns the number actually removed."""
+    keys = {str(k) for k in keys if str(k)}
+    if not keys:
+        return 0
+    path = _trucks_path(submissions_dir)
+    with _lock:
+        store = _read_json(path)
+        removed = 0
+        for key in keys:
+            if store.pop(key, None) is not None:
+                removed += 1
+        if removed:
+            _write_json(path, store)
+    return removed
+
+
 def reference_summary(submissions_dir: Path) -> dict[str, object]:
     drivers_store = _read_json(_drivers_path(submissions_dir))
     trucks_store = _read_json(_trucks_path(submissions_dir))
