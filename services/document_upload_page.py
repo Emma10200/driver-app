@@ -10,14 +10,19 @@ from typing import Any
 
 import streamlit as st
 
+from config import COMPANY_PROFILES, DEFAULT_COMPANY_SLUG
+
 try:
-    from runtime_context import get_document_upload_storage_namespace, is_test_mode_active
+    from runtime_context import get_document_upload_storage_namespace, is_test_mode_active, normalize_company_slug
 except ImportError:  # pragma: no cover - defensive during Streamlit Cloud deploy/import races
     from runtime_context import is_test_mode_active
 
     def get_document_upload_storage_namespace() -> str:
         mode_segment = "test-mode" if is_test_mode_active() else "live"
         return f"document-uploads/{mode_segment}"
+
+    def normalize_company_slug(value: str | None) -> str:
+        return str(value or DEFAULT_COMPANY_SLUG).strip().lower() or DEFAULT_COMPANY_SLUG
 
 from services.error_log_service import log_application_error
 from services.notification_service import send_internal_document_upload_notification
@@ -107,6 +112,20 @@ def _split_driver_name(driver_name: str) -> tuple[str, str]:
     return parts[0], " ".join(parts[1:])
 
 
+def _default_company_slug_from_query() -> str:
+    for key in ("company", "c", "co"):
+        try:
+            value = st.query_params.get(key, "")
+        except Exception:
+            value = ""
+        if isinstance(value, list):
+            value = value[0] if value else ""
+        slug = normalize_company_slug(str(value or ""))
+        if slug in COMPANY_PROFILES:
+            return slug
+    return DEFAULT_COMPANY_SLUG
+
+
 def _render_upload_success() -> bool:
     success = st.session_state.get(DOCUMENT_UPLOAD_SUCCESS_KEY)
     if not isinstance(success, dict):
@@ -168,6 +187,16 @@ def render_document_upload_page(submissions_dir: Path) -> None:
     with st.form(f"document_only_upload_form_{reset_counter}"):
         st.markdown("#### Driver info")
         driver_name = st.text_input("Driver name *", key=f"document_only_driver_name_{reset_counter}")
+        company_slugs = list(COMPANY_PROFILES.keys())
+        default_slug = _default_company_slug_from_query()
+        company_slug = st.selectbox(
+            "Company / division *",
+            options=company_slugs,
+            index=company_slugs.index(default_slug) if default_slug in company_slugs else 0,
+            format_func=lambda slug: COMPANY_PROFILES[slug].name,
+            key=f"document_only_company_slug_{reset_counter}",
+            help="Pick the company/division these documents belong to so the right safety inbox is copied.",
+        )
         col_phone, col_email = st.columns(2)
         with col_phone:
             phone = st.text_input("Phone", key=f"document_only_phone_{reset_counter}")
@@ -195,6 +224,8 @@ def render_document_upload_page(submissions_dir: Path) -> None:
         return
 
     driver_name = (driver_name or "").strip()
+    company_slug = normalize_company_slug(company_slug)
+    company_profile = COMPANY_PROFILES.get(company_slug) or COMPANY_PROFILES[DEFAULT_COMPANY_SLUG]
     phone = (phone or "").strip()
     email = (email or "").strip()
     notes = (notes or "").strip()
@@ -215,6 +246,9 @@ def render_document_upload_page(submissions_dir: Path) -> None:
     document_types = sorted({str(item.get("document_type") or "Document") for item in normalized})
     form_data = {
         "upload_type": "driver_document_upload_only",
+        "company_slug": company_slug,
+        "company_name": company_profile.name,
+        "division": company_profile.name,
         "driver_name": driver_name,
         "first_name": first_name,
         "last_name": last_name,

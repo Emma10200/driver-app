@@ -534,6 +534,89 @@ def test_document_upload_notification_sends_without_application_pdf(monkeypatch)
     assert "CDL" in body
 
 
+def test_document_upload_notification_routes_by_company_and_keeps_global_copies(monkeypatch):
+    smtp_instance: FakeSMTP | None = None
+
+    def fake_smtp(host, port, timeout=30):
+        nonlocal smtp_instance
+        smtp_instance = FakeSMTP(host, port, timeout)
+        return smtp_instance
+
+    monkeypatch.setattr(
+        notification_service,
+        "get_runtime_secret",
+        _fake_secrets({
+            "SMTP_HOST": "smtp.example.com",
+            "SMTP_FROM_EMAIL": "alerts@example.com",
+            "INTERNAL_NOTIFICATION_TO": "statements@example.com",
+        }),
+    )
+    monkeypatch.setattr(notification_service.smtplib, "SMTP", fake_smtp)
+
+    result = notification_service.send_internal_document_upload_notification(
+        form_data={
+            "company_slug": "xpress",
+            "company_name": "Xpress Trans, Inc",
+            "driver_name": "Xpress Driver",
+            "email": "driver@example.com",
+            "document_types": ["CDL"],
+            "final_submission_timestamp": "2026-06-03T10:11:12",
+        },
+        upload_result={"location_label": "driver-applications/document-uploads/live/document_uploads/test"},
+        uploaded_documents=[{"file_name": "cdl.pdf", "document_type": "CDL"}],
+        supporting_document_payloads=[],
+    )
+
+    assert result["status"] == "sent"
+    assert smtp_instance is not None and smtp_instance.sent_message is not None
+    assert smtp_instance.sent_message["To"] == (
+        "statements@example.com, safety@xpresstransinc.com, dann@prestigetransportation.com"
+    )
+    body = smtp_instance.sent_message.get_body(preferencelist=("plain",)).get_content()
+    assert "Company / division: Xpress Trans, Inc" in body
+
+
+def test_document_upload_notification_routes_safety_upload_by_division(monkeypatch):
+    smtp_instance: FakeSMTP | None = None
+
+    def fake_smtp(host, port, timeout=30):
+        nonlocal smtp_instance
+        smtp_instance = FakeSMTP(host, port, timeout)
+        return smtp_instance
+
+    monkeypatch.setattr(
+        notification_service,
+        "get_runtime_secret",
+        _fake_secrets({
+            "SMTP_HOST": "smtp.example.com",
+            "SMTP_FROM_EMAIL": "alerts@example.com",
+            "INTERNAL_NOTIFICATION_TO": "statements@example.com",
+        }),
+    )
+    monkeypatch.setattr(notification_service.smtplib, "SMTP", fake_smtp)
+
+    result = notification_service.send_internal_document_upload_notification(
+        form_data={
+            "upload_type": "safety_document_upload",
+            "division": "Prestig Inc",
+            "driver_name": "PG Owner",
+            "email": "owner@example.com",
+            "document_types": ["Bobtail Insurance Certificate"],
+        },
+        upload_result={"location_label": "driver-applications/safety-uploads/live/test"},
+        uploaded_documents=[{"file_name": "insurance.pdf"}],
+        supporting_document_payloads=[],
+    )
+
+    assert result["status"] == "sent"
+    assert smtp_instance is not None and smtp_instance.sent_message is not None
+    assert smtp_instance.sent_message["To"] == (
+        "statements@example.com, safety@prestige.inc, dann@prestigetransportation.com"
+    )
+    body = smtp_instance.sent_message.get_body(preferencelist=("plain",)).get_content()
+    assert "Company / division: Prestig Inc" in body
+
+
 def test_notification_skips_oversize_supporting_documents(monkeypatch):
     smtp_instance: FakeSMTP | None = None
 

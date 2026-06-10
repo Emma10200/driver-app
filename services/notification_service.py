@@ -9,7 +9,7 @@ from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
 from typing import Any
 
-from config import COMPANY_PROFILES, DEFAULT_COMPANY_SLUG
+from config import COMPANY_PROFILES, COMPANY_SLUG_ALIASES, DEFAULT_COMPANY_SLUG
 from runtime_context import is_test_mode_active
 from submission_storage import get_runtime_secret
 
@@ -114,6 +114,34 @@ def _notification_settings(company_slug: str, *, test_mode: bool, use_division_s
             (get_runtime_secret("SMTP_MAX_ATTACHMENT_BYTES", "23068672") or "23068672").strip()
         ),
     }
+
+
+def _normalize_company_slug_for_notifications(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    slug = raw.lower().replace("_", "-")
+    slug = COMPANY_SLUG_ALIASES.get(slug, slug)
+    return slug if slug in COMPANY_PROFILES else ""
+
+
+def _document_upload_company_slug(form_data: dict[str, Any]) -> str:
+    """Resolve the intended company/division for document-upload notifications."""
+    for key in ("company_slug", "company", "company_id"):
+        slug = _normalize_company_slug_for_notifications(form_data.get(key))
+        if slug:
+            return slug
+
+    division = str(
+        form_data.get("division")
+        or form_data.get("company_name")
+        or form_data.get("target_division")
+        or ""
+    ).strip()
+    if division:
+        return _safety_company_slug_for_division(division)
+
+    return DEFAULT_COMPANY_SLUG
 
 
 def _internal_recipients_only(recipients: list[str], applicant_email: str) -> list[str]:
@@ -385,7 +413,7 @@ def send_internal_document_upload_notification(
     supporting_document_payloads: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Notify staff about a document-only upload without requiring an application packet."""
-    company_slug = DEFAULT_COMPANY_SLUG
+    company_slug = _document_upload_company_slug(form_data)
     test_mode = bool(form_data.get("test_mode")) or is_test_mode_active()
 
     if not notifications_enabled(company_slug, test_mode=test_mode):
@@ -441,10 +469,13 @@ def send_internal_document_upload_notification(
         used_bytes += size
 
     selected_document_types = form_data.get("document_types") or []
+    profile = COMPANY_PROFILES.get(company_slug) or COMPANY_PROFILES.get(DEFAULT_COMPANY_SLUG)
+    division = str(form_data.get("division") or form_data.get("company_name") or (profile.name if profile else "")).strip()
     body_lines = [
         "A driver submitted documents through the document-only upload link.",
         "",
         f"Driver: {driver_name}",
+        f"Company / division: {division or 'Not provided'}",
         f"Phone: {form_data.get('phone', 'Not provided') or 'Not provided'}",
         f"Email: {form_data.get('email', 'Not provided') or 'Not provided'}",
         f"Submitted at: {form_data.get('final_submission_timestamp', 'Unknown')}",
