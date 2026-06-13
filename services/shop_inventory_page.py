@@ -49,7 +49,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.12 (sync all)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.13 (force home on cold link)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -758,6 +758,10 @@ def _go(view: str) -> None:
     previous session left a different view selected. Sub-views are shareable /
     refresh-safe because the URL carries the state.
     """
+    # Mark that this view change came from an in-app button. If the app is opened
+    # cold from a stale saved URL like ?shop=1&v=inventory, _current_view() will
+    # ignore that stale view and force the Home menu instead.
+    st.session_state["shop_allow_url_view"] = view != _VIEW_HOME
     if view == _VIEW_HOME:
         try:
             del st.query_params["v"]
@@ -787,7 +791,15 @@ def _current_view() -> str:
     raw = st.query_params.get("v", _VIEW_HOME)
     if isinstance(raw, list):
         raw = raw[0] if raw else _VIEW_HOME
-    return raw if raw in _VALID_VIEWS else _VIEW_HOME
+    if raw not in _VALID_VIEWS or raw == _VIEW_HOME:
+        return _VIEW_HOME
+    if not st.session_state.get("shop_allow_url_view"):
+        try:
+            del st.query_params["v"]
+        except Exception:  # noqa: BLE001 - best-effort cleanup only
+            pass
+        return _VIEW_HOME
+    return raw
 
 
 def _query_param_value(name: str) -> str:
