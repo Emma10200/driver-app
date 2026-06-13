@@ -130,6 +130,12 @@ as $$
          or (si.name <> '' and si.name % p_term)
       )
     order by
+        -- 1) An exact SKU match always wins, even if it is out of stock.
+        case when si.sku <> '' and lower(si.sku) = lower(trim(p_term)) then 0 else 1 end,
+        -- 2) In stock (or quantity-not-tracked) above anything out of stock,
+        --    regardless of how well the term matched.
+        case when si.qty_on_hand is null or si.qty_on_hand > 0 then 0 else 1 end,
+        -- 3) Then best fuzzy relevance within each stock tier.
         case when coalesce(trim(p_term), '') = '' then 0
              else greatest(
                 similarity(si.sku, p_term),

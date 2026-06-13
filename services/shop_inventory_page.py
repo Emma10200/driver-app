@@ -23,12 +23,14 @@ from qbo.shop_inventory_sync import (
     sync_shop_inventory,
 )
 from services.qbo_supabase import SupabaseRestClient
+from submission_storage import get_runtime_secret
 
 logger = logging.getLogger(__name__)
 
 _SEARCH_LIMIT = 50
 _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
+_DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -49,6 +51,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "updated": "Inventory last updated",
         "never": "not yet synced",
         "lang_toggle": "Език / Language",
+        "open_app": "Open in app",
         "refresh": "Refresh inventory",
         "refreshing": "Checking QuickBooks for changes…",
         "refresh_done": "Inventory updated",
@@ -74,6 +77,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "updated": "Последно обновяване",
         "never": "още не е синхронизирано",
         "lang_toggle": "Език / Language",
+        "open_app": "Отвори в приложението",
         "refresh": "Обнови наличността",
         "refreshing": "Проверка за промени в QuickBooks…",
         "refresh_done": "Наличността е обновена",
@@ -87,36 +91,82 @@ _STRINGS: dict[str, dict[str, str]] = {
 
 _MOBILE_CSS = """
 <style>
-  /* Tighten the page for phones and make everything big and tappable. */
-  .block-container { padding-top: 1rem; padding-bottom: 4rem; max-width: 720px; }
-  .shop-title { font-size: 1.9rem; font-weight: 800; margin: 0.2rem 0 0.6rem; }
-  /* Large search box. */
+  /* Neutralise Streamlit's top toolbar so our title is never clipped, and give
+     the page a clean, generous top margin for an older user on a phone. */
+  header[data-testid="stHeader"] { background: transparent; height: 0; }
+  div[data-testid="stToolbar"] { display: none; }
+  .block-container {
+      padding-top: 2.75rem;
+      padding-bottom: 4rem;
+      max-width: 680px;
+  }
+
+  /* Title: calm, high-contrast, plenty of breathing room. */
+  .shop-title {
+      font-size: 1.75rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      margin: 0.25rem 0 0.15rem;
+      color: #1f2933;
+  }
+
+  /* Large, clean search box. */
   div[data-testid="stTextInput"] input {
-      font-size: 1.25rem !important;
-      padding: 0.85rem 0.9rem !important;
-      height: 3.25rem !important;
+      font-size: 1.2rem !important;
+      padding: 0.8rem 0.95rem !important;
+      height: 3.2rem !important;
+      border-radius: 12px !important;
+      border: 1px solid #d4dae0 !important;
+      background: #ffffff !important;
+      color: #1f2933 !important;
   }
-  /* Part cards: big legible rows with clear separation. */
+  div[data-testid="stTextInput"] input::placeholder { color: #9aa5b1 !important; }
+
+  /* Buttons: flat, professional, full-width and easy to tap. */
+  div[data-testid="stButton"] > button,
+  div[data-testid="stLinkButton"] > a {
+      border-radius: 12px !important;
+      font-size: 1.08rem !important;
+      font-weight: 600 !important;
+      padding: 0.7rem 1rem !important;
+      min-height: 3rem !important;
+  }
+
+  /* Part cards: clean white "paper" rows with a soft border + subtle shadow. */
   .part-card {
-      border: 1px solid rgba(255,255,255,0.12);
+      border: 1px solid #e4e8ec;
       border-radius: 14px;
-      padding: 0.9rem 1rem;
-      margin: 0.55rem 0;
-      background: rgba(255,255,255,0.03);
+      padding: 0.95rem 1.05rem;
+      margin: 0.6rem 0;
+      background: #ffffff;
+      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
   }
-  .part-name { font-size: 1.3rem; font-weight: 700; line-height: 1.25; }
-  .part-meta { font-size: 1.02rem; color: #cfcfcf; margin-top: 0.25rem; }
-  .part-badges { margin-top: 0.55rem; display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .part-name {
+      font-size: 1.22rem;
+      font-weight: 650;
+      line-height: 1.3;
+      color: #1f2933;
+  }
+  .part-meta { font-size: 1.0rem; color: #616e7c; margin-top: 0.3rem; line-height: 1.35; }
+  .part-badges { margin-top: 0.65rem; display: flex; flex-wrap: wrap; gap: 0.4rem; }
   .badge {
-      display: inline-block; font-size: 1.0rem; font-weight: 600;
-      padding: 0.3rem 0.7rem; border-radius: 999px;
+      display: inline-block;
+      font-size: 0.95rem;
+      font-weight: 600;
+      padding: 0.32rem 0.7rem;
+      border-radius: 8px;
+      border: 1px solid transparent;
   }
-  .badge-stock { background: rgba(52,199,89,0.18); color: #8ef0a6; }
-  .badge-stock-zero { background: rgba(255,69,58,0.18); color: #ff938c; }
-  .badge-untracked { background: rgba(142,142,147,0.22); color: #d0d0d2; }
-  .badge-price { background: rgba(10,132,255,0.18); color: #8fc3ff; }
-  .badge-cost { background: rgba(175,82,222,0.18); color: #d3a4f0; }
-  .badge-sku { background: rgba(255,214,10,0.16); color: #ffe27a; }
+  /* Muted, professional palette - soft tinted fills with dark, legible text. */
+  .badge-stock { background: #e8f5ed; color: #1b7a43; border-color: #cdead8; }
+  .badge-stock-zero { background: #fdecea; color: #b42318; border-color: #f7d4cf; }
+  .badge-untracked { background: #f2f4f7; color: #4b5563; border-color: #e4e7ec; }
+  .badge-price { background: #eaf1fb; color: #1a55b0; border-color: #d3e2f6; }
+  .badge-cost { background: #f0ecf9; color: #5b3da6; border-color: #e0d8f2; }
+  .badge-sku { background: #f5f1e6; color: #7a5c12; border-color: #ece3cd; }
+
+  /* Freshness caption + section captions: quiet and unobtrusive. */
+  div[data-testid="stCaptionContainer"] { color: #8793a1 !important; }
 </style>
 """
 
@@ -268,6 +318,15 @@ def _show_refresh_flash() -> None:
     {"success": st.success, "info": st.info, "error": st.error}.get(level, st.info)(message)
 
 
+def _shop_app_url() -> str:
+    """Deep link to this page inside the Streamlit mobile app.
+
+    Reads SHOP_APP_URL (secret/env) so the deployed host can be overridden;
+    falls back to the known public URL with the ?shop=1 route.
+    """
+    return (get_runtime_secret("SHOP_APP_URL", _DEFAULT_SHOP_APP_URL) or _DEFAULT_SHOP_APP_URL).strip()
+
+
 def render_shop_inventory_page() -> None:
     """Render the mobile shop inventory list. Public-by-link for now."""
     st.markdown(_MOBILE_CSS, unsafe_allow_html=True)
@@ -290,16 +349,26 @@ def render_shop_inventory_page() -> None:
         st.info(_t(lang, "not_connected"))
         return
 
+    # Live search: the keyed text input reruns as the value changes, so the list
+    # filters without pressing a separate Search button.
     term = st.text_input(
         _t(lang, "search_label"),
-        value="",
+        key="shop_search_term",
         placeholder=_t(lang, "search_placeholder"),
         label_visibility="collapsed",
     ).strip()
 
     _show_refresh_flash()
-    if st.button(f"\U0001f504 {_t(lang, 'refresh')}", use_container_width=True):
-        _run_refresh(realm_id, lang)
+    refresh_col, open_col = st.columns(2)
+    with refresh_col:
+        if st.button(f"\U0001f504 {_t(lang, 'refresh')}", use_container_width=True):
+            _run_refresh(realm_id, lang)
+    with open_col:
+        st.link_button(
+            f"\U0001f4f1 {_t(lang, 'open_app')}",
+            _shop_app_url(),
+            use_container_width=True,
+        )
 
     try:
         items = _search_inventory(realm_id, term, _SEARCH_LIMIT)
