@@ -27,8 +27,29 @@ def search_customers(realm_id: str, term: str = "", *, limit: int = 25) -> list[
 
 
 def customer_names(realm_id: str, term: str = "", *, limit: int = 25) -> list[str]:
+    """Return cached customer names.
+
+    For blank term, return a large alphabetized list so Streamlit's selectbox can
+    do client-side type-to-filter like QuickBooks. For nonblank term, use the
+    SQL search RPC.
+    """
     names: list[str] = []
-    for row in search_customers(realm_id, term, limit=limit):
+    if not realm_id:
+        return names
+
+    if not str(term or "").strip():
+        supabase = SupabaseRestClient()
+        rows = supabase.select(
+            _TABLE,
+            select="display_name,fully_qualified_name,company_name",
+            filters={"realm_id": f"eq.{realm_id}", "active": "eq.true"},
+            order="display_name.asc",
+            limit=max(int(limit or 5000), 5000),
+        )
+    else:
+        rows = search_customers(realm_id, term, limit=limit)
+
+    for row in rows:
         name = str(row.get("display_name") or row.get("fully_qualified_name") or row.get("company_name") or "").strip()
         if name and name not in names:
             names.append(name)

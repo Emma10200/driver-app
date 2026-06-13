@@ -49,7 +49,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.13 (force home on cold link)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.14 (vehicle suggestions)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -944,7 +944,7 @@ def _render_home_view(lang: str, realm_id: str) -> None:
 
     cards = [
         (_VIEW_INVENTORY, "📦", "card_inventory", "card_inventory_desc", False),
-        (_VIEW_NEW_INVOICE, "🧾", "card_new_invoice", "card_new_invoice_desc", True),
+        (_VIEW_NEW_INVOICE, "🧾", "card_new_invoice", "card_new_invoice_desc", False),
         (_VIEW_HISTORY, "📜", "card_history", "card_history_desc", False),
         (_VIEW_SCAN, "📷", "card_scan", "card_scan_desc", True),
     ]
@@ -1104,7 +1104,7 @@ def _cached_invoice_history_synced_at(realm_id: str) -> str:
 
 @st.cache_data(ttl=_REALM_CACHE_TTL, show_spinner=False)
 def _cached_customer_names(realm_id: str) -> list[str]:
-    return customer_names(realm_id, "", limit=100)
+    return customer_names(realm_id, "", limit=5000)
 
 
 @st.cache_data(ttl=_SEARCH_CACHE_TTL, show_spinner=False)
@@ -1143,6 +1143,32 @@ def _cached_vehicle_customer_suggestions(realm_id: str, unit: str, vin: str) -> 
             scores[customer] = max(scores.get(customer, 0), score)
 
     return [name for name, _ in sorted(scores.items(), key=lambda item: (-item[1], item[0].lower()))[:8]]
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_vehicle_field_suggestions(realm_id: str, unit: str, vin: str) -> dict[str, list[str]]:
+    """Suggest VIN/unit/miles/customer values from cached invoice history."""
+    unit_norm = _norm_vehicle_key(unit)
+    vin_norm = _norm_vehicle_key(vin)
+    out: dict[str, list[str]] = {"units": [], "vins": [], "miles": [], "customers": []}
+    if not realm_id:
+        return out
+
+    for inv in list_cached_invoices(realm_id, limit=1000):
+        inv_unit = str(inv.get("unit") or "").strip()
+        inv_vin = str(inv.get("vin") or "").strip()
+        inv_miles = str(inv.get("miles") or "").strip()
+        customer = str(inv.get("customer_name") or "").strip()
+
+        unit_match = bool(unit_norm and _vehicle_match(unit_norm, inv_unit, min_len=2))
+        vin_match = bool(vin_norm and _vehicle_match(vin_norm, inv_vin, min_len=5))
+        if (unit_norm or vin_norm) and not (unit_match or vin_match):
+            continue
+
+        for key, value in (("units", inv_unit), ("vins", inv_vin), ("miles", inv_miles), ("customers", customer)):
+            if value and value not in out[key]:
+                out[key].append(value)
+    return {key: values[:25] for key, values in out.items()}
 
 
 def _norm_vehicle_key(value: str) -> str:
@@ -1488,13 +1514,58 @@ def _ensure_invoice_defaults(realm_id: str) -> None:
 
 def _render_invoice_vehicle_step(lang: str) -> None:
     st.text_input(_t(lang, "invoice_no"), key="invoice_doc_number")
-    st.text_input(_t(lang, "truck_unit"), key="invoice_truck")
-    st.text_input(_t(lang, "vin"), key="invoice_vin")
-    st.text_input(_t(lang, "miles"), key="invoice_miles")
+    try:
+        realm_id = _cached_shop_realm_id()
+        suggestions = _cached_vehicle_field_suggestions(
+            realm_id,
+            str(st.session_state.get("invoice_truck") or ""),
+            str(st.session_state.get("invoice_vin") or ""),
+        )
+    except Exception:  # noqa: BLE001 - suggestions are convenience only
+        suggestions = {"units": [], "vins": [], "miles": [], "customers": []}
+
+    unit_col, vin_col, miles_col = st.columns(3)
+    with unit_col:
+        _vehicle_field_popover(lang, "invoice_truck", "truck_unit", suggestions.get("units", []))
+    with vin_col:
+        _vehicle_field_popover(lang, "invoice_vin", "vin", suggestions.get("vins", []))
+    with miles_col:
+        _vehicle_field_popover(lang, "invoice_miles", "miles", suggestions.get("miles", []))
     st.text_area(_t(lang, "notes"), key="invoice_notes", height=80)
     if st.button(f"➡ {_t(lang, 'next')}", use_container_width=True, type="primary"):
         st.session_state["invoice_step"] = "customer"
         st.rerun()
+
+
+def _vehicle_field_popover(lang: str, state_key: str, label_key: str, suggestions: list[str]) -> None:
+    current = str(st.session_state.get(state_key) or "").strip()
+    button_label = f"{_t(lang, label_key)}: {current or '—'}"
+    with st.popover(button_label, use_container_width=True):
+        typed_value = st.text_input(_t(lang, label_key), key=state_key)
+        filtered = _filter_vehicle_suggestions(str(typed_value or ""), suggestions)
+        if filtered:
+            st.caption("Suggestions")
+            for idx, value in enumerate(filtered):
+                if st.button(value, key=f"{state_key}_suggest_{idx}_{value}", use_container_width=True):
+                    st.session_state[state_key] = value
+                    st.rerun()
+
+
+def _filter_vehicle_suggestions(typed: str, suggestions: list[str]) -> list[str]:
+    """Filter prior Unit/VIN/Miles suggestions as the shop user types.
+
+    Example: enter Unit 128, open VIN, see all prior VINs for unit 128. As the
+    user starts typing the VIN, the list narrows to suggestions containing (or
+    suffix-matching) what has been typed, while still allowing free typing.
+    """
+    typed_norm = _norm_vehicle_key(typed)
+    out: list[str] = []
+    for value in suggestions:
+        value_norm = _norm_vehicle_key(value)
+        if not typed_norm or typed_norm in value_norm or value_norm.endswith(typed_norm):
+            if value and value not in out:
+                out.append(value)
+    return out[:20]
 
 
 def _render_invoice_customer_step(lang: str, realm_id: str) -> None:
@@ -1527,36 +1598,28 @@ def _render_invoice_customer_step(lang: str, realm_id: str) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("Vehicle customer suggestions failed: %s", exc)
 
-    if suggestions:
-        st.markdown(f"**{_t(lang, 'customer_suggestions')}**")
-        for idx, name in enumerate(suggestions):
-            if st.button(name, key=f"cust_suggest_{idx}_{name}", use_container_width=True):
-                st.session_state["invoice_customer"] = name
-                st.session_state["invoice_customer_is_new"] = False
-                st.session_state["invoice_step"] = "parts"
-                st.rerun()
-    else:
-        st.info(_t(lang, "customer_not_listed"))
-
-    search = st.text_input(_t(lang, "customer_search"), key="invoice_customer_search")
     customer_options: list[str] = []
     try:
-        customer_options = _cached_customer_search(realm_id, search.strip())
+        for name in (*suggestions, *_cached_customer_names(realm_id)):
+            if name and name not in customer_options:
+                customer_options.append(name)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Cached customer lookup failed: %s", exc)
 
-    if customer_options:
-        picked = st.selectbox(_t(lang, "customer"), customer_options, key="invoice_customer_pick")
-        if st.button(f"✅ {_t(lang, 'use_customer')}", use_container_width=True):
-            st.session_state["invoice_customer"] = picked
-            st.session_state["invoice_customer_is_new"] = False
-            st.session_state["invoice_step"] = "parts"
-            st.rerun()
-
-    new_customer = st.text_input(_t(lang, "new_customer"), key="invoice_new_customer")
-    if new_customer.strip() and st.button(f"➕ {_t(lang, 'new_customer')}", use_container_width=True):
-        st.session_state["invoice_customer"] = new_customer.strip()
-        st.session_state["invoice_customer_is_new"] = True
+    if not customer_options:
+        st.info(_t(lang, "customer_not_listed"))
+    picked = st.selectbox(
+        _t(lang, "customer"),
+        customer_options or [""],
+        key="invoice_customer_pick",
+        placeholder=_t(lang, "customer_search"),
+        accept_new_options=True,
+        filter_mode="contains",
+    )
+    if picked and st.button(f"✅ {_t(lang, 'use_customer')}", use_container_width=True):
+        picked_name = str(picked).strip()
+        st.session_state["invoice_customer"] = picked_name
+        st.session_state["invoice_customer_is_new"] = picked_name not in customer_options
         st.session_state["invoice_step"] = "parts"
         st.rerun()
 
