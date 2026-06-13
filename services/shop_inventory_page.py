@@ -47,7 +47,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.5 (compact app link)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.6 (no new tab nav)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -684,21 +684,6 @@ def _go(view: str) -> None:
     st.rerun()
 
 
-def _shop_view_url(view: str) -> str:
-    """Return a URL for a shop view.
-
-    Link-buttons use this helper so browser/phone back navigation works like a
-    normal website. A bare ``?shop=1`` is the home menu.
-    """
-    if view == _VIEW_HOME:
-        return _shop_app_url()
-    return f"{_shop_app_url()}&v={view}"
-
-
-def _shop_invoice_detail_url(invoice_id: str) -> str:
-    return f"{_shop_view_url(_VIEW_INVOICE_DETAIL)}&invoice_id={_escape(invoice_id)}"
-
-
 def _open_app_square_html(lang: str) -> str:
     """Small home-page-only app link.
 
@@ -794,10 +779,13 @@ def _render_sidebar_nav(lang: str, current: str) -> None:
         ]
         for view, icon, label in nav:
             disabled = view == current
-            if disabled:
-                st.button(f"{icon}  {label}", use_container_width=True, key=f"nav_{view}", disabled=True)
-            else:
-                st.link_button(f"{icon}  {label}", _shop_view_url(view), use_container_width=True)
+            if st.button(
+                f"{icon}  {label}",
+                use_container_width=True,
+                key=f"nav_{view}",
+                disabled=disabled,
+            ):
+                _go(view)
         st.caption(_SHOP_BUILD_LABEL)
 
 
@@ -865,19 +853,21 @@ def _render_home_view(lang: str, realm_id: str) -> None:
         label = f"{icon}  {_t(lang, title_key)}"
         if soon:
             label += f"  ·  {_t(lang, 'coming_soon')}"
-        st.link_button(
+        if st.button(
             label,
-            _shop_view_url(view),
             use_container_width=True,
+            key=f"home_nav_{view}",
             help=_t(lang, desc_key),
-        )
+        ):
+            _go(view)
 
 def _render_view_header(lang: str, title_key: str) -> None:
     """Shared header for sub-views: back-to-menu + title + language toggle.
     """
     top_l, top_r = st.columns([3, 1])
     with top_l:
-        st.link_button(f"⬅ {_t(lang, 'back_to_menu')}", _shop_view_url(_VIEW_HOME))
+        if st.button(f"⬅ {_t(lang, 'back_to_menu')}", key=f"back_{title_key}"):
+            _go(_VIEW_HOME)
     with top_r:
         _render_lang_toggle(lang)
     st.markdown(f"<div class='shop-title'>{_t(lang, title_key)}</div>", unsafe_allow_html=True)
@@ -1058,12 +1048,13 @@ def _render_history_view(lang: str, realm_id: str) -> None:
     for inv in invoices:
         st.markdown(_invoice_html(inv, lang), unsafe_allow_html=True)
         inv_id = str(inv.get("qbo_invoice_id") or inv.get("Id") or "").strip()
-        if inv_id:
-            st.link_button(
+        if inv_id and st.button(
                 f"🔍 {_t(lang, 'view_details')}",
-                _shop_invoice_detail_url(inv_id),
+                key=f"inv_detail_{inv_id}",
                 use_container_width=True,
-            )
+        ):
+            st.session_state["shop_invoice_id"] = inv_id
+            _go(_VIEW_INVOICE_DETAIL)
 
 
 def _invoice_html(inv: dict[str, Any], lang: str) -> str:
@@ -1133,7 +1124,7 @@ def _render_invoice_detail_view(lang: str, realm_id: str) -> None:
     """
     _render_view_header(lang, "history_title")
 
-    inv_id = _query_param_value("invoice_id").strip()
+    inv_id = (_query_param_value("invoice_id") or str(st.session_state.get("shop_invoice_id") or "")).strip()
     if not realm_id or not inv_id:
         st.info(_t(lang, "detail_error"))
         if st.button(f"⬅ {_t(lang, 'card_history')}", key="detail_back_hist"):
