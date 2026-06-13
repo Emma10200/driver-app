@@ -22,15 +22,17 @@ from qbo.shop_inventory_sync import (
     resolve_shop_realm_id,
     sync_shop_inventory,
 )
+from qbo.shop_invoices import fetch_recent_invoices, next_invoice_number
 from services.qbo_supabase import SupabaseRestClient
 from submission_storage import get_runtime_secret
 
 logger = logging.getLogger(__name__)
 
-_PAGE_SIZE = 50  # how many more cards each "Show more" reveals
+_PAGE_SIZE = 250  # how many cards on first load and per "Show more"
 _MAX_RESULTS = 2500  # hard ceiling so a runaway list can't lock up the phone
 _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
+_INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
@@ -64,6 +66,31 @@ _STRINGS: dict[str, dict[str, str]] = {
         "not_connected": "The shop QuickBooks company is not connected yet. "
         "Ask accounting to connect it, then the inventory will appear here.",
         "load_error": "Could not load inventory right now. Please try again shortly.",
+        # Home / navigation.
+        "home_title": "Shop Menu",
+        "home_subtitle": "Tap a button to begin",
+        "menu": "Menu",
+        "nav_home": "Home",
+        "back_to_menu": "Back to menu",
+        "card_inventory": "Inventory",
+        "card_inventory_desc": "Look up parts, SKUs and stock",
+        "card_new_invoice": "New Invoice",
+        "card_new_invoice_desc": "Start an invoice for a job",
+        "card_history": "Invoice History",
+        "card_history_desc": "See past invoices",
+        "card_scan": "Scan Document",
+        "card_scan_desc": "Snap a part to find it",
+        "coming_soon": "Coming soon",
+        # Invoice history.
+        "history_title": "Invoice History",
+        "history_loading": "Loading invoices…",
+        "history_empty": "No invoices yet.",
+        "history_error": "Could not load invoices right now. Please try again shortly.",
+        "invoice_no": "Invoice",
+        "invoice_total": "Total",
+        "invoice_balance": "Balance",
+        "invoice_paid": "Paid",
+        "next_invoice_hint": "Next invoice number will be",
     },
     "bg": {
         "title": "Складова наличност",
@@ -93,6 +120,31 @@ _STRINGS: dict[str, dict[str, str]] = {
         "not_connected": "Фирмата в QuickBooks все още не е свързана. "
         "Помолете счетоводството да я свърже и наличността ще се появи тук.",
         "load_error": "Наличността не може да се зареди в момента. Опитайте отново.",
+        # Home / navigation.
+        "home_title": "Меню",
+        "home_subtitle": "Натиснете бутон, за да започнете",
+        "menu": "Меню",
+        "nav_home": "Начало",
+        "back_to_menu": "Назад към менюто",
+        "card_inventory": "Наличност",
+        "card_inventory_desc": "Търсене на части, SKU и наличност",
+        "card_new_invoice": "Нова фактура",
+        "card_new_invoice_desc": "Започни фактура за работа",
+        "card_history": "История на фактурите",
+        "card_history_desc": "Виж минали фактури",
+        "card_scan": "Сканирай документ",
+        "card_scan_desc": "Снимай част, за да я намериш",
+        "coming_soon": "Очаквайте скоро",
+        # Invoice history.
+        "history_title": "История на фактурите",
+        "history_loading": "Зареждане на фактури…",
+        "history_empty": "Все още няма фактури.",
+        "history_error": "Фактурите не могат да се заредят сега. Опитайте отново.",
+        "invoice_no": "Фактура",
+        "invoice_total": "Общо",
+        "invoice_balance": "Остатък",
+        "invoice_paid": "Платена",
+        "next_invoice_hint": "Следващ номер на фактура ще бъде",
     },
 }
 
@@ -218,6 +270,63 @@ _MOBILE_CSS = """
 
   /* Freshness caption + section captions: quiet and unobtrusive. */
   div[data-testid="stCaptionContainer"] { color: #8793a1 !important; }
+
+  /* Make the collapsed sidebar control obvious for a non-technical user:
+     a clear gray rounded square with a visible menu arrow. */
+  div[data-testid="stSidebarCollapsedControl"] button,
+  button[data-testid="stSidebarCollapseButton"],
+  [data-testid="collapsedControl"] {
+      background: #eceff3 !important;
+      border: 1px solid #cfd6de !important;
+      border-radius: 10px !important;
+      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.08) !important;
+  }
+
+  /* Home menu header. */
+  .home-title { font-size: 1.9rem; font-weight: 800; color: #1f2933; margin: 0.25rem 0 0.1rem; }
+  .home-sub { font-size: 1.05rem; color: #616e7c; margin: 0 0 0.6rem; }
+
+  /* Home menu cards: large tap targets with an icon, title and helper line. */
+  .home-card {
+      display: flex;
+      align-items: center;
+      gap: 0.9rem;
+      border: 1px solid #e4e8ec;
+      border-radius: 16px;
+      padding: 1.1rem 1.15rem;
+      margin: 0.55rem 0;
+      background: #ffffff;
+      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
+  }
+  .home-card-icon {
+      flex: 0 0 auto;
+      width: 3.1rem; height: 3.1rem;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.7rem;
+      border-radius: 12px;
+      background: #eef2f7;
+  }
+  .home-card-body { min-width: 0; }
+  .home-card-title { font-size: 1.3rem; font-weight: 750; color: #1f2933; line-height: 1.2; }
+  .home-card-desc { font-size: 1.0rem; color: #6b7682; margin-top: 0.15rem; }
+  .home-card-soon {
+      margin-left: auto; flex: 0 0 auto;
+      font-size: 0.8rem; font-weight: 700; letter-spacing: 0.02em;
+      color: #8a6d1a; background: #f7efd6; border: 1px solid #ecdcae;
+      padding: 0.2rem 0.5rem; border-radius: 999px; text-transform: uppercase;
+  }
+
+  /* Invoice history rows. */
+  .inv-card {
+      border: 1px solid #e4e8ec; border-radius: 14px;
+      padding: 0.85rem 1.05rem; margin: 0.5rem 0;
+      background: #ffffff; box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
+  }
+  .inv-top { display: flex; justify-content: space-between; align-items: baseline; gap: 0.6rem; }
+  .inv-no { font-size: 1.2rem; font-weight: 750; color: #1f2933; }
+  .inv-date { font-size: 0.98rem; color: #6b7682; white-space: nowrap; }
+  .inv-customer { font-size: 1.02rem; color: #3a4652; margin-top: 0.25rem; }
+  .inv-amounts { margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.4rem; }
 </style>
 """
 
@@ -396,25 +505,138 @@ def _shop_app_url() -> str:
     return (get_runtime_secret("SHOP_APP_URL", _DEFAULT_SHOP_APP_URL) or _DEFAULT_SHOP_APP_URL).strip()
 
 
+# Navigation views. The four shop "buttons" plus the home menu.
+_VIEW_HOME = "home"
+_VIEW_INVENTORY = "inventory"
+_VIEW_NEW_INVOICE = "new_invoice"
+_VIEW_HISTORY = "history"
+_VIEW_SCAN = "scan"
+_VALID_VIEWS = {_VIEW_HOME, _VIEW_INVENTORY, _VIEW_NEW_INVOICE, _VIEW_HISTORY, _VIEW_SCAN}
+
+
+def _go(view: str) -> None:
+    st.session_state["shop_view"] = view
+    st.rerun()
+
+
+def _render_lang_toggle(lang: str) -> None:
+    """Small BG/EN toggle, shared across views."""
+    bulgarian = st.toggle("БГ", value=(lang == "bg"), help=_t(lang, "lang_toggle"), key="shop_lang_toggle")
+    new_lang = "bg" if bulgarian else "en"
+    if new_lang != lang:
+        st.session_state["shop_lang"] = new_lang
+        st.rerun()
+
+
+def _render_sidebar_nav(lang: str, current: str) -> None:
+    """Sidebar navigation between the four buttons + home."""
+    with st.sidebar:
+        st.markdown(f"### 🔧 {_t(lang, 'menu')}")
+        nav = [
+            (_VIEW_HOME, "🏠", _t(lang, "nav_home")),
+            (_VIEW_INVENTORY, "📦", _t(lang, "card_inventory")),
+            (_VIEW_NEW_INVOICE, "🧾", _t(lang, "card_new_invoice")),
+            (_VIEW_HISTORY, "📜", _t(lang, "card_history")),
+            (_VIEW_SCAN, "📷", _t(lang, "card_scan")),
+        ]
+        for view, icon, label in nav:
+            disabled = view == current
+            if st.button(
+                f"{icon}  {label}",
+                use_container_width=True,
+                key=f"nav_{view}",
+                disabled=disabled,
+            ):
+                _go(view)
+
+
 def render_shop_inventory_page() -> None:
-    """Render the mobile shop inventory list. Public-by-link for now."""
+    """Mobile shop app entry point: home menu + four navigable views.
+
+    ``?shop=1`` lands on the home menu (four big cards). The sidebar mirrors the
+    same navigation so the user can switch views from anywhere. Public-by-link.
+    """
     st.markdown(_MOBILE_CSS, unsafe_allow_html=True)
 
     lang = st.session_state.get("shop_lang", "en")
-    header_col, lang_col = st.columns([3, 1])
-    with header_col:
-        st.markdown(f"<div class='shop-title'>🔧 {_t(lang, 'title')}</div>", unsafe_allow_html=True)
-    with lang_col:
-        bulgarian = st.toggle("БГ", value=(lang == "bg"), help=_t(lang, "lang_toggle"))
-        new_lang = "bg" if bulgarian else "en"
-        if new_lang != lang:
-            st.session_state["shop_lang"] = new_lang
-            st.rerun()
+    view = st.session_state.get("shop_view", _VIEW_HOME)
+    if view not in _VALID_VIEWS:
+        view = _VIEW_HOME
 
+    _render_sidebar_nav(lang, view)
+
+    # Resolve the realm once; every data view needs it. The home menu still
+    # renders even if the realm is missing (so the user isn't stuck).
     try:
         realm_id = _cached_shop_realm_id()
     except Exception as exc:  # noqa: BLE001 - shop company not connected yet
-        logger.warning("Shop inventory realm unavailable: %s", exc)
+        logger.warning("Shop realm unavailable: %s", exc)
+        realm_id = ""
+
+    if view == _VIEW_HOME:
+        _render_home_view(lang, realm_id)
+    elif view == _VIEW_INVENTORY:
+        _render_inventory_view(lang, realm_id)
+    elif view == _VIEW_HISTORY:
+        _render_history_view(lang, realm_id)
+    elif view == _VIEW_NEW_INVOICE:
+        _render_new_invoice_view(lang, realm_id)
+    elif view == _VIEW_SCAN:
+        _render_scan_view(lang, realm_id)
+
+
+def _render_home_view(lang: str, realm_id: str) -> None:
+    """The four-button shop menu shown at ?shop=1."""
+    header_col, lang_col = st.columns([3, 1])
+    with header_col:
+        st.markdown(f"<div class='home-title'>🔧 {_t(lang, 'home_title')}</div>", unsafe_allow_html=True)
+    with lang_col:
+        _render_lang_toggle(lang)
+    st.markdown(f"<div class='home-sub'>{_t(lang, 'home_subtitle')}</div>", unsafe_allow_html=True)
+
+    cards = [
+        (_VIEW_INVENTORY, "📦", "card_inventory", "card_inventory_desc", False),
+        (_VIEW_NEW_INVOICE, "🧾", "card_new_invoice", "card_new_invoice_desc", True),
+        (_VIEW_HISTORY, "📜", "card_history", "card_history_desc", False),
+        (_VIEW_SCAN, "📷", "card_scan", "card_scan_desc", True),
+    ]
+    for view, icon, title_key, desc_key, soon in cards:
+        soon_html = (
+            f"<span class='home-card-soon'>{_t(lang, 'coming_soon')}</span>" if soon else ""
+        )
+        st.markdown(
+            f"<div class='home-card'>"
+            f"<span class='home-card-icon'>{icon}</span>"
+            f"<span class='home-card-body'>"
+            f"<div class='home-card-title'>{_escape(_t(lang, title_key))}</div>"
+            f"<div class='home-card-desc'>{_escape(_t(lang, desc_key))}</div>"
+            f"</span>{soon_html}</div>",
+            unsafe_allow_html=True,
+        )
+        if st.button(
+            f"{icon}  {_t(lang, title_key)}",
+            use_container_width=True,
+            key=f"home_card_{view}",
+        ):
+            _go(view)
+
+
+def _render_view_header(lang: str, title_key: str) -> None:
+    """Shared header for sub-views: back-to-menu + title + language toggle."""
+    top_l, top_r = st.columns([3, 1])
+    with top_l:
+        if st.button(f"⬅ {_t(lang, 'back_to_menu')}", key=f"back_{title_key}"):
+            _go(_VIEW_HOME)
+    with top_r:
+        _render_lang_toggle(lang)
+    st.markdown(f"<div class='shop-title'>{_t(lang, title_key)}</div>", unsafe_allow_html=True)
+
+
+def _render_inventory_view(lang: str, realm_id: str) -> None:
+    """Inventory List view (Button 1): live search + paginated part cards."""
+    _render_view_header(lang, "title")
+
+    if not realm_id:
         st.info(_t(lang, "not_connected"))
         return
 
@@ -490,3 +712,94 @@ def render_shop_inventory_page() -> None:
                 visible_count + _PAGE_SIZE, _MAX_RESULTS
             )
             st.rerun()
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_recent_invoices(realm_id: str, limit: int) -> list[dict[str, Any]]:
+    qbo_client, _, _ = build_services()
+    return fetch_recent_invoices(qbo_client, realm_id, limit=limit)
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_next_invoice_number(realm_id: str) -> int | None:
+    qbo_client, _, _ = build_services()
+    return next_invoice_number(qbo_client, realm_id)
+
+
+def _render_history_view(lang: str, realm_id: str) -> None:
+    """Invoice History view (Button 3): read-only list of recent QBO invoices."""
+    _render_view_header(lang, "history_title")
+
+    if not realm_id:
+        st.info(_t(lang, "not_connected"))
+        return
+
+    try:
+        with st.spinner(_t(lang, "history_loading")):
+            invoices = _cached_recent_invoices(realm_id, 50)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Invoice history load failed: %s", exc)
+        st.error(_t(lang, "history_error"))
+        return
+
+    if not invoices:
+        st.info(_t(lang, "history_empty"))
+        return
+
+    st.markdown("".join(_invoice_html(inv, lang) for inv in invoices), unsafe_allow_html=True)
+
+
+def _invoice_html(inv: dict[str, Any], lang: str) -> str:
+    doc = str(inv.get("DocNumber") or "—").strip()
+    txn_date = str(inv.get("TxnDate") or "").strip()
+    customer = ""
+    ref = inv.get("CustomerRef")
+    if isinstance(ref, dict):
+        customer = str(ref.get("name") or "").strip()
+    total = _fmt_price(inv.get("TotalAmt"))
+    balance_raw = inv.get("Balance")
+    balance = _fmt_price(balance_raw)
+
+    badges = []
+    if total:
+        badges.append(f"<span class='badge badge-price'>{_t(lang, 'invoice_total')}: {total}</span>")
+    try:
+        is_paid = float(balance_raw or 0) <= 0
+    except (TypeError, ValueError):
+        is_paid = False
+    if is_paid:
+        badges.append(f"<span class='badge badge-stock'>{_t(lang, 'invoice_paid')}</span>")
+    elif balance:
+        badges.append(f"<span class='badge badge-stock-zero'>{_t(lang, 'invoice_balance')}: {balance}</span>")
+
+    customer_html = f"<div class='inv-customer'>{_escape(customer)}</div>" if customer else ""
+    return (
+        f"<div class='inv-card'>"
+        f"<div class='inv-top'>"
+        f"<span class='inv-no'>{_t(lang, 'invoice_no')} #{_escape(doc)}</span>"
+        f"<span class='inv-date'>{_escape(txn_date)}</span>"
+        f"</div>{customer_html}"
+        f"<div class='inv-amounts'>{''.join(badges)}</div>"
+        f"</div>"
+    )
+
+
+def _render_new_invoice_view(lang: str, realm_id: str) -> None:
+    """New Invoice view (Button 2): placeholder + next-number teaser."""
+    _render_view_header(lang, "card_new_invoice")
+    st.info(f"🧾 {_t(lang, 'coming_soon')}")
+
+    if realm_id:
+        try:
+            next_no = _cached_next_invoice_number(realm_id)
+        except Exception:  # noqa: BLE001 - teaser only; never block the view
+            next_no = None
+        if next_no:
+            st.success(f"{_t(lang, 'next_invoice_hint')}: **#{next_no}**")
+
+
+def _render_scan_view(lang: str, realm_id: str) -> None:
+    """Scan Document view (Button 4): placeholder for future OCR matching."""
+    _render_view_header(lang, "card_scan")
+    st.info(f"📷 {_t(lang, 'coming_soon')}")
+
