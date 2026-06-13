@@ -49,7 +49,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.11 (customer cache)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.12 (sync all)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -97,6 +97,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "card_scan": "Scan Document",
         "card_scan_desc": "Snap a part to find it",
         "coming_soon": "Coming soon",
+        "sync_all": "Sync all",
+        "sync_all_title": "Sync inventory, invoices, and customers",
+        "sync_all_running": "Checking QuickBooks for inventory, invoice, and customer changes…",
+        "sync_all_done": "Sync complete",
+        "sync_all_error": "Some syncs failed",
         # Invoice history.
         "history_title": "Invoice History",
         "history_loading": "Loading invoices…",
@@ -213,6 +218,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "card_scan": "Сканирай документ",
         "card_scan_desc": "Снимай част, за да я намериш",
         "coming_soon": "Очаквайте скоро",
+        "sync_all": "Синхронизирай всичко",
+        "sync_all_title": "Синхронизирай наличност, фактури и клиенти",
+        "sync_all_running": "Проверка за промени в QuickBooks…",
+        "sync_all_done": "Синхронизацията е готова",
+        "sync_all_error": "Някои синхронизации не успяха",
         # Invoice history.
         "history_title": "История на фактурите",
         "history_loading": "Зареждане на фактури…",
@@ -674,6 +684,46 @@ def _show_refresh_flash() -> None:
     {"success": st.success, "info": st.info, "error": st.error}.get(level, st.info)(message)
 
 
+def _run_sync_all(realm_id: str, lang: str) -> None:
+    """Run all shop reference-data delta syncs from the home page.
+
+    Each sync uses its own Supabase high-water cursor (QBO LastUpdatedTime), so
+    after the initial full pulls this is gentle: it only asks QuickBooks for
+    changed Inventory Items, Invoices, and Customers.
+    """
+    if not realm_id:
+        st.warning(_t(lang, "not_connected"))
+        return
+    with st.spinner(_t(lang, "sync_all_running")):
+        inventory = sync_shop_inventory(realm_id)
+        invoices = sync_shop_invoice_history(realm_id)
+        customers = sync_shop_customers(realm_id)
+
+    _search_inventory.clear()
+    _last_synced.clear()
+    _cached_recent_invoices.clear()
+    _cached_invoice_detail.clear()
+    _cached_invoice_history_synced_at.clear()
+    _cached_customer_names.clear()
+    _cached_customer_search.clear()
+    _cached_customer_synced_at.clear()
+
+    failures = [r for r in (inventory, invoices, customers) if r.status != "success"]
+    if failures:
+        st.error(
+            f"{_t(lang, 'sync_all_error')}: "
+            + "; ".join(getattr(result, "message", "") for result in failures)
+        )
+        return
+
+    changed = (
+        int(getattr(inventory, "items_upserted", 0) or 0)
+        + int(getattr(invoices, "invoices_upserted", 0) or 0)
+        + int(getattr(customers, "customers_upserted", 0) or 0)
+    )
+    st.success(f"{_t(lang, 'sync_all_done')} (+{changed})")
+
+
 def _shop_app_url() -> str:
     """Deep link to this page inside the Streamlit mobile app.
 
@@ -868,9 +918,12 @@ def render_shop_inventory_page() -> None:
 
 def _render_home_view(lang: str, realm_id: str) -> None:
     """The four-button shop menu shown at ?shop=1 (buttons only, no cards)."""
-    header_col, app_col, lang_col = st.columns([3, 0.7, 0.7])
+    header_col, sync_col, app_col, lang_col = st.columns([3, 0.65, 0.65, 0.7])
     with header_col:
         st.markdown(f"<div class='home-title'>🔧 {_t(lang, 'home_title')}</div>", unsafe_allow_html=True)
+    with sync_col:
+        if st.button("🔄", help=_t(lang, "sync_all_title"), use_container_width=True, key="home_sync_all"):
+            _run_sync_all(realm_id, lang)
     with app_col:
         st.markdown(_open_app_square_html(lang), unsafe_allow_html=True)
     with lang_col:
