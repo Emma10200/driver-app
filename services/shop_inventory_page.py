@@ -23,7 +23,6 @@ from qbo.shop_inventory_sync import (
     resolve_shop_realm_id,
     sync_shop_inventory,
 )
-from qbo.shop_invoice_sync import sync_shop_invoices
 from qbo.shop_invoices import (
     custom_field_map,
     fetch_invoice_by_id,
