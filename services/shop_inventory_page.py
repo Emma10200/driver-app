@@ -12,6 +12,7 @@ Authentication is intentionally NOT implemented here yet (owner decision pending
 
 from __future__ import annotations
 
+import hmac
 import logging
 from typing import Any
 
@@ -24,6 +25,7 @@ from qbo.shop_inventory_sync import (
 )
 from qbo.shop_invoices import fetch_recent_invoices, next_invoice_number
 from services.qbo_supabase import SupabaseRestClient
+from services.shop_invoice_queue import list_recent_drafts, submit_invoice_draft
 from submission_storage import get_runtime_secret
 
 logger = logging.getLogger(__name__)
@@ -91,6 +93,34 @@ _STRINGS: dict[str, dict[str, str]] = {
         "invoice_balance": "Balance",
         "invoice_paid": "Paid",
         "next_invoice_hint": "Next invoice number will be",
+        # New invoice / cart.
+        "add": "Add",
+        "add_to_invoice": "Add to invoice",
+        "create_new_invoice": "Start new invoice",
+        "add_to_current": "Add to current invoice",
+        "added_toast": "Added to invoice",
+        "cart_title": "Current Invoice",
+        "cart_empty": "No parts added yet. Search and tap + to add parts.",
+        "cart_search": "Search parts to add",
+        "qty": "Qty",
+        "remove": "Remove",
+        "customer": "Customer / Company",
+        "truck_unit": "Truck / Unit #",
+        "notes": "Notes",
+        "invoice_total_label": "Invoice total",
+        "finish_invoice": "Finish invoice",
+        "finish_help": "Sends this invoice to accounting for review. It is NOT final yet.",
+        "finish_ok": "Invoice sent to accounting for review.",
+        "finish_err": "Could not submit the invoice. Please try again.",
+        "clear_invoice": "Clear",
+        "recent_drafts": "Recently submitted",
+        # Auth.
+        "login_title": "Shop Login",
+        "login_user": "Username",
+        "login_pass": "Password",
+        "login_btn": "Sign in",
+        "login_err": "Wrong username or password.",
+        "logout": "Sign out",
     },
     "bg": {
         "title": "Складова наличност",
@@ -145,6 +175,34 @@ _STRINGS: dict[str, dict[str, str]] = {
         "invoice_balance": "Остатък",
         "invoice_paid": "Платена",
         "next_invoice_hint": "Следващ номер на фактура ще бъде",
+        # New invoice / cart.
+        "add": "Добави",
+        "add_to_invoice": "Добави към фактура",
+        "create_new_invoice": "Започни нова фактура",
+        "add_to_current": "Добави към текущата фактура",
+        "added_toast": "Добавено към фактурата",
+        "cart_title": "Текуща фактура",
+        "cart_empty": "Още няма добавени части. Търсете и натиснете +, за да добавите.",
+        "cart_search": "Търсете части за добавяне",
+        "qty": "Кол.",
+        "remove": "Премахни",
+        "customer": "Клиент / Фирма",
+        "truck_unit": "Камион / Номер",
+        "notes": "Бележки",
+        "invoice_total_label": "Обща сума",
+        "finish_invoice": "Завърши фактурата",
+        "finish_help": "Изпраща фактурата към счетоводството за преглед. ОЩЕ НЕ е окончателна.",
+        "finish_ok": "Фактурата е изпратена към счетоводството.",
+        "finish_err": "Фактурата не може да бъде изпратена. Опитайте отново.",
+        "clear_invoice": "Изчисти",
+        "recent_drafts": "Наскоро изпратени",
+        # Auth.
+        "login_title": "Вход за сервиз",
+        "login_user": "Потребител",
+        "login_pass": "Парола",
+        "login_btn": "Влез",
+        "login_err": "Грешен потребител или парола.",
+        "logout": "Изход",
     },
 }
 
@@ -519,6 +577,46 @@ def _go(view: str) -> None:
     st.rerun()
 
 
+def _shop_credentials() -> tuple[str, str]:
+    """Return the (username, password) the shop login accepts.
+
+    Resolved from secrets/env (SHOP_USERNAME / SHOP_PASSWORD), falling back to
+    simple defaults so the gate works out of the box. Set the secrets in
+    Streamlit Cloud to use real credentials.
+    """
+    user = (get_runtime_secret("SHOP_USERNAME", "danko") or "danko").strip()
+    pw = (get_runtime_secret("SHOP_PASSWORD", "1234") or "1234").strip()
+    return user, pw
+
+
+def _require_shop_login(lang: str) -> bool:
+    """Gate the shop app behind a simple username/password.
+
+    Returns True when authenticated. Renders a login form and returns False when
+    not. This is a lightweight access gate (the data shown is read-only); it is
+    not a substitute for per-user accounts.
+    """
+    if st.session_state.get("shop_authed"):
+        return True
+
+    expected_user, expected_pw = _shop_credentials()
+    st.markdown(f"<div class='shop-title'>🔧 {_t(lang, 'login_title')}</div>", unsafe_allow_html=True)
+    with st.form("shop_login_form"):
+        username = st.text_input(_t(lang, "login_user"))
+        password = st.text_input(_t(lang, "login_pass"), type="password")
+        submitted = st.form_submit_button(_t(lang, "login_btn"), use_container_width=True)
+    if submitted:
+        ok_user = hmac.compare_digest(username.strip(), expected_user)
+        ok_pw = hmac.compare_digest(password, expected_pw)
+        if ok_user and ok_pw:
+            st.session_state["shop_authed"] = True
+            st.session_state["shop_user"] = username.strip()
+            st.rerun()
+        else:
+            st.error(_t(lang, "login_err"))
+    return False
+
+
 def _render_lang_toggle(lang: str) -> None:
     """Small BG/EN toggle, shared across views."""
     bulgarian = st.toggle("БГ", value=(lang == "bg"), help=_t(lang, "lang_toggle"), key="shop_lang_toggle")
@@ -549,6 +647,12 @@ def _render_sidebar_nav(lang: str, current: str) -> None:
             ):
                 _go(view)
 
+        st.divider()
+        if st.button(f"🚪 {_t(lang, 'logout')}", use_container_width=True, key="nav_logout"):
+            for key in ("shop_authed", "shop_user", "shop_cart", "shop_view"):
+                st.session_state.pop(key, None)
+            st.rerun()
+
 
 def render_shop_inventory_page() -> None:
     """Mobile shop app entry point: home menu + four navigable views.
@@ -559,6 +663,11 @@ def render_shop_inventory_page() -> None:
     st.markdown(_MOBILE_CSS, unsafe_allow_html=True)
 
     lang = st.session_state.get("shop_lang", "en")
+
+    # Access gate: simple shop username/password before anything renders.
+    if not _require_shop_login(lang):
+        return
+
     view = st.session_state.get("shop_view", _VIEW_HOME)
     if view not in _VALID_VIEWS:
         view = _VIEW_HOME
@@ -698,9 +807,22 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
     else:
         st.caption(f"{_t(lang, 'showing')} {shown} {_t(lang, 'results')}")
 
-    # Render every visible card in a single markdown call for speed.
-    cards_html = "".join(_card_html(item, lang) for item in visible_items)
-    st.markdown(cards_html, unsafe_allow_html=True)
+    # When the list is narrowed by a search to a manageable size, render each
+    # card with a real interactive "+" offering Start new / Add to current
+    # invoice. When browsing the whole catalog, render fast batched HTML so the
+    # phone stays smooth (per-row widgets are far heavier than HTML).
+    _INTERACTIVE_MAX = 25
+    if term and shown <= _INTERACTIVE_MAX:
+        _show_cart_flash()
+        for item in visible_items:
+            card_col, add_col = st.columns([6, 1])
+            with card_col:
+                st.markdown(_card_html(item, lang), unsafe_allow_html=True)
+            with add_col:
+                _render_add_popover(item, lang)
+    else:
+        cards_html = "".join(_card_html(item, lang) for item in visible_items)
+        st.markdown(cards_html, unsafe_allow_html=True)
 
     if has_more:
         if st.button(
@@ -711,6 +833,28 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
             st.session_state["shop_visible_count"] = min(
                 visible_count + _PAGE_SIZE, _MAX_RESULTS
             )
+            st.rerun()
+
+
+def _render_add_popover(item: dict[str, Any], lang: str) -> None:
+    """The inventory "+" affordance: choose Start new or Add to current invoice."""
+    item_id = str(item.get("qbo_item_id") or "")
+    with st.popover("➕", use_container_width=True):
+        if st.button(
+            f"🧾 {_t(lang, 'create_new_invoice')}",
+            key=f"new_inv_{item_id}",
+            use_container_width=True,
+        ):
+            st.session_state["shop_cart"] = []
+            _cart_add(item)
+            _go(_VIEW_NEW_INVOICE)
+        if st.button(
+            f"➕ {_t(lang, 'add_to_current')}",
+            key=f"add_cur_{item_id}",
+            use_container_width=True,
+        ):
+            _cart_add(item)
+            st.session_state["shop_cart_flash"] = _t(lang, "added_toast")
             st.rerun()
 
 
@@ -785,17 +929,167 @@ def _invoice_html(inv: dict[str, Any], lang: str) -> str:
 
 
 def _render_new_invoice_view(lang: str, realm_id: str) -> None:
-    """New Invoice view (Button 2): placeholder + next-number teaser."""
-    _render_view_header(lang, "card_new_invoice")
-    st.info(f"🧾 {_t(lang, 'coming_soon')}")
+    """New Invoice view (Button 2): build a cart and submit it for review.
 
-    if realm_id:
+    The shop manager searches parts, taps + to add them, adjusts quantities, and
+    taps "Finish invoice". This does NOT post to QuickBooks - it writes a pending
+    draft to the Supabase review queue for accounting.
+    """
+    _render_view_header(lang, "card_new_invoice")
+
+    if not realm_id:
+        st.info(_t(lang, "not_connected"))
+        return
+
+    _show_cart_flash()
+
+    # Auto-suggested next invoice number (teaser; accounting assigns the final).
+    try:
+        next_no = _cached_next_invoice_number(realm_id)
+    except Exception:  # noqa: BLE001
+        next_no = None
+    if next_no:
+        st.success(f"{_t(lang, 'next_invoice_hint')}: **#{next_no}**")
+
+    # --- Add parts: compact interactive search (kept small so it stays fast). ---
+    add_term = st.text_input(
+        _t(lang, "cart_search"),
+        key="invoice_add_search",
+        placeholder=_t(lang, "search_placeholder"),
+    ).strip()
+    if add_term:
         try:
-            next_no = _cached_next_invoice_number(realm_id)
-        except Exception:  # noqa: BLE001 - teaser only; never block the view
-            next_no = None
-        if next_no:
-            st.success(f"{_t(lang, 'next_invoice_hint')}: **#{next_no}**")
+            matches = _search_inventory(realm_id, add_term, 25)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Invoice add-search failed: %s", exc)
+            matches = []
+        for item in matches:
+            label_col, add_col = st.columns([4, 1])
+            with label_col:
+                sku = str(item.get("sku") or "").strip()
+                name = str(item.get("name") or "").strip()
+                price = _fmt_price(item.get("sales_price"))
+                bits = " · ".join(b for b in (f"{_t(lang, 'sku')} {sku}" if sku else "", name, price) if b)
+                st.markdown(bits or name or "—")
+            with add_col:
+                if st.button("➕", key=f"add_{item.get('qbo_item_id')}", use_container_width=True):
+                    _cart_add(item)
+                    st.session_state["shop_cart_flash"] = _t(lang, "added_toast")
+                    st.rerun()
+
+    st.markdown(f"<div class='shop-title'>{_t(lang, 'cart_title')}</div>", unsafe_allow_html=True)
+    cart = _cart()
+    if not cart:
+        st.info(_t(lang, "cart_empty"))
+        return
+
+    # --- Cart line items with quantity steppers + remove. ---
+    total = 0.0
+    for idx, line in enumerate(cart):
+        line_total = float(line.get("unit_price") or 0) * int(line.get("qty") or 0)
+        total += line_total
+        name_col, qty_col, rm_col = st.columns([3, 2, 1])
+        with name_col:
+            sku = str(line.get("sku") or "").strip()
+            head = f"{_t(lang, 'sku')} {sku} · " if sku else ""
+            st.markdown(f"**{head}{_escape(str(line.get('name') or ''))}**")
+            st.caption(f"{_fmt_price(line.get('unit_price'))} · {_fmt_price(line_total)}")
+        with qty_col:
+            new_qty = st.number_input(
+                _t(lang, "qty"),
+                min_value=1,
+                step=1,
+                value=int(line.get("qty") or 1),
+                key=f"qty_{idx}_{line.get('qbo_item_id')}",
+            )
+            if int(new_qty) != int(line.get("qty") or 1):
+                line["qty"] = int(new_qty)
+                st.rerun()
+        with rm_col:
+            st.markdown("&nbsp;", unsafe_allow_html=True)
+            if st.button("🗑", key=f"rm_{idx}_{line.get('qbo_item_id')}", help=_t(lang, "remove")):
+                cart.pop(idx)
+                st.rerun()
+
+    st.markdown(f"### {_t(lang, 'invoice_total_label')}: {_fmt_price(total)}")
+
+    # --- Invoice metadata + submit. ---
+    customer = st.text_input(_t(lang, "customer"), key="invoice_customer")
+    truck_unit = st.text_input(_t(lang, "truck_unit"), key="invoice_truck")
+    notes = st.text_area(_t(lang, "notes"), key="invoice_notes", height=80)
+
+    st.caption(_t(lang, "finish_help"))
+    finish_col, clear_col = st.columns([3, 1])
+    with finish_col:
+        if st.button(f"✅ {_t(lang, 'finish_invoice')}", use_container_width=True, type="primary"):
+            try:
+                submit_invoice_draft(
+                    realm_id=realm_id,
+                    proposed_doc_number=str(next_no or ""),
+                    customer_name=customer,
+                    truck_unit=truck_unit,
+                    notes=notes,
+                    line_items=[
+                        {
+                            "qbo_item_id": str(line.get("qbo_item_id") or ""),
+                            "sku": str(line.get("sku") or ""),
+                            "name": str(line.get("name") or ""),
+                            "qty": int(line.get("qty") or 0),
+                            "unit_price": float(line.get("unit_price") or 0),
+                            "line_total": round(
+                                float(line.get("unit_price") or 0) * int(line.get("qty") or 0), 2
+                            ),
+                        }
+                        for line in cart
+                    ],
+                    total=total,
+                    submitted_by=str(st.session_state.get("shop_user") or ""),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Invoice draft submit failed: %s", exc)
+                st.error(_t(lang, "finish_err"))
+            else:
+                st.session_state["shop_cart"] = []
+                st.session_state["shop_cart_flash"] = _t(lang, "finish_ok")
+                st.rerun()
+    with clear_col:
+        if st.button(f"🧹 {_t(lang, 'clear_invoice')}", use_container_width=True):
+            st.session_state["shop_cart"] = []
+            st.rerun()
+
+
+def _cart() -> list[dict[str, Any]]:
+    cart = st.session_state.get("shop_cart")
+    if not isinstance(cart, list):
+        cart = []
+        st.session_state["shop_cart"] = cart
+    return cart
+
+
+def _cart_add(item: dict[str, Any]) -> None:
+    """Add a part to the cart, or bump its quantity if already present."""
+    cart = _cart()
+    item_id = str(item.get("qbo_item_id") or "")
+    for line in cart:
+        if str(line.get("qbo_item_id") or "") == item_id:
+            line["qty"] = int(line.get("qty") or 0) + 1
+            return
+    cart.append(
+        {
+            "qbo_item_id": item_id,
+            "sku": str(item.get("sku") or ""),
+            "name": str(item.get("name") or ""),
+            "unit_price": float(item.get("sales_price") or 0),
+            "qty": 1,
+        }
+    )
+
+
+def _show_cart_flash() -> None:
+    msg = st.session_state.pop("shop_cart_flash", None)
+    if msg:
+        st.success(msg)
+
 
 
 def _render_scan_view(lang: str, realm_id: str) -> None:
