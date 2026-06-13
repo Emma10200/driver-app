@@ -25,6 +25,7 @@ from qbo.shop_inventory_sync import (
 )
 from qbo.shop_customer_sync import sync_shop_customers
 from qbo.shop_invoices import (
+    custom_field_map,
     custom_field_items,
     fetch_invoice_by_id,
     fetch_recent_invoices,
@@ -49,7 +50,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.14 (vehicle suggestions)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.15 (vehicle dropdowns)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -1155,9 +1156,10 @@ def _cached_vehicle_field_suggestions(realm_id: str, unit: str, vin: str) -> dic
         return out
 
     for inv in list_cached_invoices(realm_id, limit=1000):
-        inv_unit = str(inv.get("unit") or "").strip()
-        inv_vin = str(inv.get("vin") or "").strip()
-        inv_miles = str(inv.get("miles") or "").strip()
+        vehicle = _invoice_vehicle_values(inv)
+        inv_unit = vehicle["unit"]
+        inv_vin = vehicle["vin"]
+        inv_miles = vehicle["miles"]
         customer = str(inv.get("customer_name") or "").strip()
 
         unit_match = bool(unit_norm and _vehicle_match(unit_norm, inv_unit, min_len=2))
@@ -1169,6 +1171,17 @@ def _cached_vehicle_field_suggestions(realm_id: str, unit: str, vin: str) -> dic
             if value and value not in out[key]:
                 out[key].append(value)
     return {key: values[:25] for key, values in out.items()}
+
+
+def _invoice_vehicle_values(inv: dict[str, Any]) -> dict[str, str]:
+    """Return Unit/VIN/Miles from cache columns or raw QBO custom fields."""
+    raw_invoice = inv.get("raw") if isinstance(inv.get("raw"), dict) else {}
+    custom = custom_field_map(raw_invoice)
+    return {
+        "unit": str(inv.get("unit") or custom.get("unit") or "").strip(),
+        "vin": str(inv.get("vin") or custom.get("vin") or "").strip(),
+        "miles": str(inv.get("miles") or custom.get("miles") or "").strip(),
+    }
 
 
 def _norm_vehicle_key(value: str) -> str:
@@ -1539,16 +1552,31 @@ def _render_invoice_vehicle_step(lang: str) -> None:
 
 def _vehicle_field_popover(lang: str, state_key: str, label_key: str, suggestions: list[str]) -> None:
     current = str(st.session_state.get(state_key) or "").strip()
-    button_label = f"{_t(lang, label_key)}: {current or '—'}"
-    with st.popover(button_label, use_container_width=True):
-        typed_value = st.text_input(_t(lang, label_key), key=state_key)
-        filtered = _filter_vehicle_suggestions(str(typed_value or ""), suggestions)
-        if filtered:
-            st.caption("Suggestions")
-            for idx, value in enumerate(filtered):
-                if st.button(value, key=f"{state_key}_suggest_{idx}_{value}", use_container_width=True):
-                    st.session_state[state_key] = value
-                    st.rerun()
+    options = _vehicle_select_options(current, suggestions)
+    picked = st.selectbox(
+        _t(lang, label_key),
+        options,
+        index=options.index(current) if current in options else 0,
+        key=f"{state_key}_select",
+        placeholder=_t(lang, label_key),
+        accept_new_options=True,
+        filter_mode="contains",
+    )
+    picked_value = str(picked or "").strip()
+    if picked_value != current:
+        st.session_state[state_key] = picked_value
+        st.rerun()
+
+
+def _vehicle_select_options(current: str, suggestions: list[str]) -> list[str]:
+    options: list[str] = []
+    if current:
+        options.append(current)
+    for value in suggestions:
+        value = str(value or "").strip()
+        if value and value not in options:
+            options.append(value)
+    return options or [""]
 
 
 def _filter_vehicle_suggestions(typed: str, suggestions: list[str]) -> list[str]:
