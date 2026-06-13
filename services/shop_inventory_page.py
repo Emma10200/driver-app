@@ -50,7 +50,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.15 (vehicle dropdowns)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.16 (blank invoice + real vehicle dropdowns)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -959,7 +959,10 @@ def _render_home_view(lang: str, realm_id: str) -> None:
             key=f"home_nav_{view}",
             help=_t(lang, desc_key),
         ):
-            _go(view)
+            if view == _VIEW_NEW_INVOICE:
+                _start_new_invoice()
+            else:
+                _go(view)
 
 def _render_view_header(lang: str, title_key: str) -> None:
     """Shared header for sub-views: back-to-menu + title + language toggle.
@@ -1069,6 +1072,8 @@ def _render_add_popover(item: dict[str, Any], lang: str) -> None:
             key=f"new_inv_{item_id}",
             use_container_width=True,
         ):
+            for key in _INVOICE_FIELD_KEYS:
+                st.session_state.pop(key, None)
             st.session_state["shop_cart"] = []
             _cart_add(item)
             _go(_VIEW_NEW_INVOICE)
@@ -1148,29 +1153,53 @@ def _cached_vehicle_customer_suggestions(realm_id: str, unit: str, vin: str) -> 
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
 def _cached_vehicle_field_suggestions(realm_id: str, unit: str, vin: str) -> dict[str, list[str]]:
-    """Suggest VIN/unit/miles/customer values from cached invoice history."""
+    """Suggest unit/VIN/miles values from cached invoice history.
+
+    - ``units``: every distinct unit ever seen, so the unit dropdown can search
+      the full list client-side.
+    - ``vins`` / ``miles``: when a unit (or VIN) is already entered, narrow to the
+      vehicles that match it; otherwise fall back to every distinct value so the
+      dropdown is never empty.
+    """
     unit_norm = _norm_vehicle_key(unit)
     vin_norm = _norm_vehicle_key(vin)
-    out: dict[str, list[str]] = {"units": [], "vins": [], "miles": [], "customers": []}
+    all_units: list[str] = []
+    all_vins: list[str] = []
+    all_miles: list[str] = []
+    matched_vins: list[str] = []
+    matched_miles: list[str] = []
     if not realm_id:
-        return out
+        return {"units": [], "vins": [], "miles": []}
 
-    for inv in list_cached_invoices(realm_id, limit=1000):
+    for inv in list_cached_invoices(realm_id, limit=2000):
         vehicle = _invoice_vehicle_values(inv)
         inv_unit = vehicle["unit"]
         inv_vin = vehicle["vin"]
         inv_miles = vehicle["miles"]
-        customer = str(inv.get("customer_name") or "").strip()
+
+        if inv_unit and inv_unit not in all_units:
+            all_units.append(inv_unit)
+        if inv_vin and inv_vin not in all_vins:
+            all_vins.append(inv_vin)
+        if inv_miles and inv_miles not in all_miles:
+            all_miles.append(inv_miles)
 
         unit_match = bool(unit_norm and _vehicle_match(unit_norm, inv_unit, min_len=2))
         vin_match = bool(vin_norm and _vehicle_match(vin_norm, inv_vin, min_len=5))
-        if (unit_norm or vin_norm) and not (unit_match or vin_match):
-            continue
+        if unit_match or vin_match:
+            if inv_vin and inv_vin not in matched_vins:
+                matched_vins.append(inv_vin)
+            if inv_miles and inv_miles not in matched_miles:
+                matched_miles.append(inv_miles)
 
-        for key, value in (("units", inv_unit), ("vins", inv_vin), ("miles", inv_miles), ("customers", customer)):
-            if value and value not in out[key]:
-                out[key].append(value)
-    return {key: values[:25] for key, values in out.items()}
+    has_query = bool(unit_norm or vin_norm)
+    vins = matched_vins if (has_query and matched_vins) else all_vins
+    miles = matched_miles if (has_query and matched_miles) else all_miles
+    return {
+        "units": all_units[:1000],
+        "vins": vins[:1000],
+        "miles": miles[:500],
+    }
 
 
 def _invoice_vehicle_values(inv: dict[str, Any]) -> dict[str, str]:
@@ -1525,6 +1554,30 @@ def _ensure_invoice_defaults(realm_id: str) -> None:
             st.session_state["invoice_doc_number"] = str(next_no)
 
 
+# Session keys that make up a single in-progress invoice draft.
+_INVOICE_FIELD_KEYS = (
+    "invoice_step",
+    "invoice_doc_number",
+    "invoice_truck",
+    "invoice_vin",
+    "invoice_miles",
+    "invoice_notes",
+    "invoice_customer",
+    "invoice_customer_is_new",
+    "invoice_customer_pick",
+    "invoice_add_search",
+)
+
+
+def _start_new_invoice() -> None:
+    """Clear any in-progress invoice so New Invoice always opens blank."""
+    for key in _INVOICE_FIELD_KEYS:
+        st.session_state.pop(key, None)
+    st.session_state["shop_cart"] = []
+    _go(_VIEW_NEW_INVOICE)
+
+
+
 def _render_invoice_vehicle_step(lang: str) -> None:
     st.text_input(_t(lang, "invoice_no"), key="invoice_doc_number")
     try:
@@ -1551,49 +1604,29 @@ def _render_invoice_vehicle_step(lang: str) -> None:
 
 
 def _vehicle_field_popover(lang: str, state_key: str, label_key: str, suggestions: list[str]) -> None:
+    """Searchable dropdown for a vehicle field (Unit / VIN / Miles).
+
+    Uses the canonical session key directly so there is no auto-fill: the first
+    option is blank, the user can type to filter the cached suggestions, and any
+    new value they type is accepted. Behaves like the QuickBooks-style customer
+    picker.
+    """
     current = str(st.session_state.get(state_key) or "").strip()
-    options = _vehicle_select_options(current, suggestions)
-    picked = st.selectbox(
-        _t(lang, label_key),
-        options,
-        index=options.index(current) if current in options else 0,
-        key=f"{state_key}_select",
-        placeholder=_t(lang, label_key),
-        accept_new_options=True,
-        filter_mode="contains",
-    )
-    picked_value = str(picked or "").strip()
-    if picked_value != current:
-        st.session_state[state_key] = picked_value
-        st.rerun()
-
-
-def _vehicle_select_options(current: str, suggestions: list[str]) -> list[str]:
-    options: list[str] = []
-    if current:
+    options: list[str] = [""]
+    if current and current not in options:
         options.append(current)
     for value in suggestions:
         value = str(value or "").strip()
         if value and value not in options:
             options.append(value)
-    return options or [""]
-
-
-def _filter_vehicle_suggestions(typed: str, suggestions: list[str]) -> list[str]:
-    """Filter prior Unit/VIN/Miles suggestions as the shop user types.
-
-    Example: enter Unit 128, open VIN, see all prior VINs for unit 128. As the
-    user starts typing the VIN, the list narrows to suggestions containing (or
-    suffix-matching) what has been typed, while still allowing free typing.
-    """
-    typed_norm = _norm_vehicle_key(typed)
-    out: list[str] = []
-    for value in suggestions:
-        value_norm = _norm_vehicle_key(value)
-        if not typed_norm or typed_norm in value_norm or value_norm.endswith(typed_norm):
-            if value and value not in out:
-                out.append(value)
-    return out[:20]
+    st.selectbox(
+        _t(lang, label_key),
+        options,
+        key=state_key,
+        placeholder=_t(lang, label_key),
+        accept_new_options=True,
+        filter_mode="contains",
+    )
 
 
 def _render_invoice_customer_step(lang: str, realm_id: str) -> None:
