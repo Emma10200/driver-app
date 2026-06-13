@@ -31,17 +31,22 @@ def submit_invoice_draft(
     line_items: list[dict[str, Any]],
     total: float,
     submitted_by: str,
+    status: str = "pending",
+    customer_is_new: bool = False,
 ) -> dict[str, Any]:
-    """Insert a pending invoice draft for accounting review.
+    """Insert a shop invoice draft for accounting review.
 
     Returns the inserted row. Raises on failure so the caller can surface it.
     """
     supabase = SupabaseRestClient()
+    normalized_status = status if status in {"draft", "pending"} else "pending"
+    now = datetime.now(UTC).isoformat()
     row = {
         "realm_id": realm_id,
         "proposed_doc_number": proposed_doc_number or "",
-        "status": "pending",
+        "status": normalized_status,
         "customer_name": customer_name or "",
+        "customer_is_new": bool(customer_is_new),
         "truck_unit": truck_unit or "",
         "vin": vin or "",
         "miles": miles or "",
@@ -49,8 +54,8 @@ def submit_invoice_draft(
         "line_items": line_items,
         "total": round(float(total or 0), 2),
         "submitted_by": submitted_by or "",
-        "shop_locked_at": datetime.now(UTC).isoformat(),
-        "last_shop_edit_at": datetime.now(UTC).isoformat(),
+        "shop_locked_at": now if normalized_status == "pending" else None,
+        "last_shop_edit_at": now,
     }
     inserted = supabase.insert(_TABLE, row)
     return inserted[0] if inserted else row

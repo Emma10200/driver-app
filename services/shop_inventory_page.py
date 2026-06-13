@@ -143,6 +143,18 @@ _STRINGS: dict[str, dict[str, str]] = {
         "finish_help": "Sends this invoice to accounting for review. It is NOT final yet.",
         "finish_ok": "Invoice sent to accounting for review.",
         "finish_err": "Could not submit the invoice. Please try again.",
+        "save_draft": "Save draft",
+        "draft_ok": "Draft saved.",
+        "draft_err": "Could not save draft. Please try again.",
+        "next": "Next",
+        "edit_header": "Edit unit/VIN/customer",
+        "choose_customer": "Choose customer",
+        "customer_suggestions": "Suggested customers",
+        "customer_not_listed": "Customer not listed",
+        "customer_search": "Search existing customers",
+        "new_customer": "New customer name",
+        "use_customer": "Use this customer",
+        "header_ready": "Invoice header locked in — add parts below.",
         "clear_invoice": "Clear",
         "recent_drafts": "Recently submitted",
         # Auth.
@@ -243,6 +255,18 @@ _STRINGS: dict[str, dict[str, str]] = {
         "finish_help": "Изпраща фактурата към счетоводството за преглед. ОЩЕ НЕ е окончателна.",
         "finish_ok": "Фактурата е изпратена към счетоводството.",
         "finish_err": "Фактурата не може да бъде изпратена. Опитайте отново.",
+        "save_draft": "Запази чернова",
+        "draft_ok": "Черновата е запазена.",
+        "draft_err": "Черновата не може да бъде запазена. Опитайте отново.",
+        "next": "Напред",
+        "edit_header": "Редактирай номер/VIN/клиент",
+        "choose_customer": "Избери клиент",
+        "customer_suggestions": "Предложени клиенти",
+        "customer_not_listed": "Клиентът не е в списъка",
+        "customer_search": "Търси съществуващи клиенти",
+        "new_customer": "Име на нов клиент",
+        "use_customer": "Използвай този клиент",
+        "header_ready": "Данните са готови — добавете части долу.",
         "clear_invoice": "Изчисти",
         "recent_drafts": "Наскоро изпратени",
         # Auth.
@@ -1011,21 +1035,42 @@ def _cached_customer_names(realm_id: str) -> list[str]:
 
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
-def _cached_vin_customer_suggestions(realm_id: str, vin: str) -> list[str]:
-    vin_norm = "".join(ch for ch in str(vin or "").upper() if ch.isalnum())
-    if len(vin_norm) < 5:
+def _cached_vehicle_customer_suggestions(realm_id: str, unit: str, vin: str) -> list[str]:
+    unit_norm = _norm_vehicle_key(unit)
+    vin_norm = _norm_vehicle_key(vin)
+    if len(unit_norm) < 2 and len(vin_norm) < 5:
         return []
-    suggestions: list[str] = []
+
+    scores: dict[str, int] = {}
     for inv in list_cached_invoices(realm_id, limit=1000):
-        candidates = [str(inv.get("vin") or "")]
+        customer = str(inv.get("customer_name") or "").strip()
+        if not customer:
+            continue
         raw = inv.get("raw") if isinstance(inv.get("raw"), dict) else {}
-        for _, value in custom_field_items(raw):
-            candidates.append(value)
-        if any(vin_norm in "".join(ch for ch in c.upper() if ch.isalnum()) for c in candidates):
-            customer = str(inv.get("customer_name") or "").strip()
-            if customer and customer not in suggestions:
-                suggestions.append(customer)
-    return suggestions[:8]
+        custom_values = [value for _, value in custom_field_items(raw)]
+        unit_candidates = [str(inv.get("unit") or ""), *custom_values]
+        vin_candidates = [str(inv.get("vin") or ""), *custom_values]
+
+        score = 0
+        if unit_norm and any(_vehicle_match(unit_norm, c, min_len=2) for c in unit_candidates):
+            score += 3
+        if vin_norm and any(_vehicle_match(vin_norm, c, min_len=5) for c in vin_candidates):
+            score += 5
+        if score:
+            scores[customer] = max(scores.get(customer, 0), score)
+
+    return [name for name, _ in sorted(scores.items(), key=lambda item: (-item[1], item[0].lower()))[:8]]
+
+
+def _norm_vehicle_key(value: str) -> str:
+    return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+
+
+def _vehicle_match(needle: str, candidate: str, *, min_len: int) -> bool:
+    haystack = _norm_vehicle_key(candidate)
+    if len(needle) < min_len or len(haystack) < min_len:
+        return False
+    return needle in haystack or haystack in needle or needle[-min_len:] == haystack[-min_len:]
 
 
 def _render_history_view(lang: str, realm_id: str) -> None:
@@ -1253,50 +1298,17 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
 
     _show_cart_flash()
 
-    # Auto-suggested next invoice number (teaser; accounting assigns the final).
-    try:
-        next_no = _cached_next_invoice_number(realm_id)
-    except Exception:  # noqa: BLE001
-        next_no = None
-    if next_no:
-        st.success(f"{_t(lang, 'next_invoice_hint')}: **#{next_no}**")
+    _ensure_invoice_defaults(realm_id)
+    step = st.session_state.get("invoice_step", "vehicle")
 
-    proposed_doc_number = st.text_input(
-        _t(lang, "invoice_no"),
-        value=str(next_no or ""),
-        key="invoice_doc_number",
-    )
-    customer = st.text_input(_t(lang, "customer"), key="invoice_customer")
-    vin = st.text_input(_t(lang, "vin"), key="invoice_vin")
-    truck_unit = st.text_input(_t(lang, "truck_unit"), key="invoice_truck")
-    miles = st.text_input(_t(lang, "miles"), key="invoice_miles")
-    notes = st.text_area(_t(lang, "notes"), key="invoice_notes", height=80)
+    if step == "vehicle":
+        _render_invoice_vehicle_step(lang)
+        return
+    if step == "customer":
+        _render_invoice_customer_step(lang, realm_id)
+        return
 
-    # Suggestions: customers from prior invoices with the same VIN first, then
-    # matching QBO customer names. Kept optional: shop guy can still type freely.
-    suggestions: list[str] = []
-    try:
-        suggestions.extend(_cached_vin_customer_suggestions(realm_id, vin))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("VIN customer suggestions failed: %s", exc)
-    try:
-        typed = customer.strip().lower()
-        for name in _cached_customer_names(realm_id):
-            if (not typed or typed in name.lower()) and name not in suggestions:
-                suggestions.append(name)
-            if len(suggestions) >= 12:
-                break
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("QBO customer suggestions failed: %s", exc)
-    if suggestions:
-        picked = st.selectbox(
-            "Customer suggestions",
-            [""] + suggestions,
-            key="invoice_customer_suggestion",
-        )
-        if picked and picked != customer:
-            st.session_state["invoice_customer"] = picked
-            st.rerun()
+    _render_invoice_locked_header(lang)
 
     # --- Add parts: compact interactive search (kept small so it stays fast). ---
     add_term = st.text_input(
@@ -1361,7 +1373,10 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
     st.markdown(f"### {_t(lang, 'invoice_total_label')}: {_fmt_price(total)}")
 
     st.caption(_t(lang, "finish_help"))
-    finish_col, clear_col = st.columns([3, 1])
+    save_col, finish_col, clear_col = st.columns([2, 3, 1])
+    with save_col:
+        if st.button(f"💾 {_t(lang, 'save_draft')}", use_container_width=True):
+            _submit_shop_invoice(lang, realm_id, status="draft", total=total)
     with finish_col:
         if st.button(
             f"✅ {_t(lang, 'finish_invoice')}",
@@ -1369,42 +1384,148 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
             type="primary",
             disabled=not bool(cart),
         ):
-            try:
-                submit_invoice_draft(
-                    realm_id=realm_id,
-                    proposed_doc_number=proposed_doc_number,
-                    customer_name=customer,
-                    truck_unit=truck_unit,
-                    vin=vin,
-                    miles=miles,
-                    notes=notes,
-                    line_items=[
-                        {
-                            "qbo_item_id": str(line.get("qbo_item_id") or ""),
-                            "sku": str(line.get("sku") or ""),
-                            "name": str(line.get("name") or ""),
-                            "qty": int(line.get("qty") or 0),
-                            "unit_price": float(line.get("unit_price") or 0),
-                            "line_total": round(
-                                float(line.get("unit_price") or 0) * int(line.get("qty") or 0), 2
-                            ),
-                        }
-                        for line in cart
-                    ],
-                    total=total,
-                    submitted_by=str(st.session_state.get("shop_user") or ""),
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Invoice draft submit failed: %s", exc)
-                st.error(_t(lang, "finish_err"))
-            else:
-                st.session_state["shop_cart"] = []
-                st.session_state["shop_cart_flash"] = _t(lang, "finish_ok")
-                st.rerun()
+            _submit_shop_invoice(lang, realm_id, status="pending", total=total)
     with clear_col:
         if st.button(f"🧹 {_t(lang, 'clear_invoice')}", use_container_width=True):
             st.session_state["shop_cart"] = []
             st.rerun()
+
+
+def _ensure_invoice_defaults(realm_id: str) -> None:
+    if "invoice_step" not in st.session_state:
+        st.session_state["invoice_step"] = "vehicle"
+    if not st.session_state.get("invoice_doc_number"):
+        try:
+            next_no = _cached_next_invoice_number(realm_id)
+        except Exception:  # noqa: BLE001
+            next_no = None
+        if next_no:
+            st.session_state["invoice_doc_number"] = str(next_no)
+
+
+def _render_invoice_vehicle_step(lang: str) -> None:
+    st.text_input(_t(lang, "invoice_no"), key="invoice_doc_number")
+    st.text_input(_t(lang, "truck_unit"), key="invoice_truck")
+    st.text_input(_t(lang, "vin"), key="invoice_vin")
+    st.text_input(_t(lang, "miles"), key="invoice_miles")
+    st.text_area(_t(lang, "notes"), key="invoice_notes", height=80)
+    if st.button(f"➡ {_t(lang, 'next')}", use_container_width=True, type="primary"):
+        st.session_state["invoice_step"] = "customer"
+        st.rerun()
+
+
+def _render_invoice_customer_step(lang: str, realm_id: str) -> None:
+    unit = str(st.session_state.get("invoice_truck") or "")
+    vin = str(st.session_state.get("invoice_vin") or "")
+    st.markdown(f"### {_t(lang, 'choose_customer')}")
+    st.caption(f"{_t(lang, 'truck_unit')}: {unit or '—'} · {_t(lang, 'vin')}: {vin or '—'}")
+
+    suggestions: list[str] = []
+    try:
+        suggestions = _cached_vehicle_customer_suggestions(realm_id, unit, vin)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Vehicle customer suggestions failed: %s", exc)
+
+    if suggestions:
+        st.markdown(f"**{_t(lang, 'customer_suggestions')}**")
+        for idx, name in enumerate(suggestions):
+            if st.button(name, key=f"cust_suggest_{idx}_{name}", use_container_width=True):
+                st.session_state["invoice_customer"] = name
+                st.session_state["invoice_customer_is_new"] = False
+                st.session_state["invoice_step"] = "parts"
+                st.rerun()
+    else:
+        st.info(_t(lang, "customer_not_listed"))
+
+    search = st.text_input(_t(lang, "customer_search"), key="invoice_customer_search")
+    customer_options: list[str] = []
+    try:
+        typed = search.strip().lower()
+        for name in _cached_customer_names(realm_id):
+            if not typed or typed in name.lower():
+                customer_options.append(name)
+            if len(customer_options) >= 25:
+                break
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("QBO customer lookup failed: %s", exc)
+
+    if customer_options:
+        picked = st.selectbox(_t(lang, "customer"), customer_options, key="invoice_customer_pick")
+        if st.button(f"✅ {_t(lang, 'use_customer')}", use_container_width=True):
+            st.session_state["invoice_customer"] = picked
+            st.session_state["invoice_customer_is_new"] = False
+            st.session_state["invoice_step"] = "parts"
+            st.rerun()
+
+    new_customer = st.text_input(_t(lang, "new_customer"), key="invoice_new_customer")
+    if new_customer.strip() and st.button(f"➕ {_t(lang, 'new_customer')}", use_container_width=True):
+        st.session_state["invoice_customer"] = new_customer.strip()
+        st.session_state["invoice_customer_is_new"] = True
+        st.session_state["invoice_step"] = "parts"
+        st.rerun()
+
+    if st.button(f"⬅ {_t(lang, 'edit_header')}", key="customer_back_vehicle"):
+        st.session_state["invoice_step"] = "vehicle"
+        st.rerun()
+
+
+def _render_invoice_locked_header(lang: str) -> None:
+    customer = str(st.session_state.get("invoice_customer") or "")
+    doc = str(st.session_state.get("invoice_doc_number") or "")
+    unit = str(st.session_state.get("invoice_truck") or "")
+    vin = str(st.session_state.get("invoice_vin") or "")
+    miles = str(st.session_state.get("invoice_miles") or "")
+    st.success(_t(lang, "header_ready"))
+    st.caption(
+        f"#{doc or '—'} · {customer or '—'} · {_t(lang, 'truck_unit')}: {unit or '—'} · "
+        f"{_t(lang, 'vin')}: {vin or '—'} · {_t(lang, 'miles')}: {miles or '—'}"
+    )
+    if st.button(f"✏️ {_t(lang, 'edit_header')}", use_container_width=True):
+        st.session_state["invoice_step"] = "vehicle"
+        st.rerun()
+
+
+def _submit_shop_invoice(lang: str, realm_id: str, *, status: str, total: float) -> None:
+    cart = _cart()
+    try:
+        submit_invoice_draft(
+            realm_id=realm_id,
+            proposed_doc_number=str(st.session_state.get("invoice_doc_number") or ""),
+            customer_name=str(st.session_state.get("invoice_customer") or ""),
+            customer_is_new=bool(st.session_state.get("invoice_customer_is_new")),
+            truck_unit=str(st.session_state.get("invoice_truck") or ""),
+            vin=str(st.session_state.get("invoice_vin") or ""),
+            miles=str(st.session_state.get("invoice_miles") or ""),
+            notes=str(st.session_state.get("invoice_notes") or ""),
+            line_items=[
+                {
+                    "qbo_item_id": str(line.get("qbo_item_id") or ""),
+                    "sku": str(line.get("sku") or ""),
+                    "name": str(line.get("name") or ""),
+                    "qty": int(line.get("qty") or 0),
+                    "unit_price": float(line.get("unit_price") or 0),
+                    "line_total": round(float(line.get("unit_price") or 0) * int(line.get("qty") or 0), 2),
+                }
+                for line in cart
+            ],
+            total=total,
+            submitted_by=str(st.session_state.get("shop_user") or ""),
+            status=status,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Invoice draft submit failed: %s", exc)
+        st.error(_t(lang, "draft_err" if status == "draft" else "finish_err"))
+    else:
+        if status == "pending":
+            for key in (
+                "shop_cart", "invoice_step", "invoice_doc_number", "invoice_customer",
+                "invoice_customer_is_new", "invoice_truck", "invoice_vin", "invoice_miles", "invoice_notes",
+            ):
+                st.session_state.pop(key, None)
+            st.session_state["shop_cart_flash"] = _t(lang, "finish_ok")
+        else:
+            st.session_state["shop_cart_flash"] = _t(lang, "draft_ok")
+        st.rerun()
 
 
 def _cart() -> list[dict[str, Any]]:
