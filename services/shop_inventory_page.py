@@ -619,6 +619,10 @@ def render_shop_inventory_page() -> None:
 
     lang = st.session_state.get("shop_lang", "en")
 
+    # Visible build stamp at the very top (sidebar is collapsed by default) so we
+    # can confirm at a glance whether Streamlit Cloud is serving the new code.
+    st.caption(_SHOP_BUILD_LABEL)
+
     # Existing browser sessions may have been left inside the old Inventory-only
     # screen before the four-card router existed. Initialise once to Home so the
     # upgraded menu becomes visible after redeploy, then let navigation persist.
