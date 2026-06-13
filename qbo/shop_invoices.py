@@ -62,6 +62,47 @@ def next_invoice_number(qbo_client: QboClient, realm_id: str) -> int | None:
     return highest + 1 if highest else None
 
 
+def fetch_invoice_by_id(
+    qbo_client: QboClient, realm_id: str, invoice_id: str
+) -> dict[str, Any] | None:
+    """Return a single full invoice (with line items + custom fields) by Id.
+
+    Returns ``None`` if not found or on error.
+    """
+    invoice_id = str(invoice_id or "").strip()
+    if not invoice_id:
+        return None
+    try:
+        response = qbo_client.get(f"/invoice/{invoice_id}", realm_id=realm_id).json()
+    except Exception as exc:  # noqa: BLE001 - caller shows a friendly error
+        logger.warning("Invoice fetch by id failed (%s): %s", invoice_id, exc)
+        return None
+    return response.get("Invoice")
+
+
+def custom_field_map(inv: dict[str, Any]) -> dict[str, str]:
+    """Return a {lowercased field name: value} map of an invoice's CustomFields.
+
+    QBO custom fields arrive as a ``CustomField`` list of
+    ``{"Name": "Unit", "StringValue": "457", ...}``. We key by lowercased name so
+    callers can pull "unit" / "vin" / "miles" regardless of QBO casing.
+    """
+    out: dict[str, str] = {}
+    for field in inv.get("CustomField") or []:
+        if not isinstance(field, dict):
+            continue
+        name = str(field.get("Name") or "").strip().lower()
+        value = str(
+            field.get("StringValue")
+            or field.get("NumberValue")
+            or field.get("DateValue")
+            or ""
+        ).strip()
+        if name:
+            out[name] = value
+    return out
+
+
 def _query_invoices(
     qbo_client: QboClient, realm_id: str, sql: str
 ) -> list[dict[str, Any]] | None:

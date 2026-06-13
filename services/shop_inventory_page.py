@@ -16,14 +16,27 @@ import logging
 from typing import Any
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from qbo.shop_inventory_sync import (
     build_services,
     resolve_shop_realm_id,
     sync_shop_inventory,
 )
-from qbo.shop_invoices import fetch_recent_invoices, next_invoice_number
+from qbo.shop_invoice_sync import sync_shop_invoices
+from qbo.shop_invoices import (
+    custom_field_map,
+    fetch_invoice_by_id,
+    fetch_recent_invoices,
+    next_invoice_number,
+)
+from qbo.shop_invoice_history_sync import sync_shop_invoice_history
 from services.qbo_supabase import SupabaseRestClient
+from services.shop_invoice_history_cache import (
+    get_cached_invoice,
+    last_invoice_history_sync,
+    list_cached_invoices,
+)
 from services.shop_invoice_queue import list_recent_drafts, submit_invoice_draft
 from submission_storage import get_runtime_secret
 
@@ -35,7 +48,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.3 (URL nav)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.4 (cached invoice history)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -88,11 +101,29 @@ _STRINGS: dict[str, dict[str, str]] = {
         "history_loading": "Loading invoices…",
         "history_empty": "No invoices yet.",
         "history_error": "Could not load invoices right now. Please try again shortly.",
+        "history_refresh": "Refresh invoices",
+        "history_refreshing": "Checking QuickBooks for invoice changes…",
+        "history_refresh_done": "Invoice history updated",
+        "history_refresh_none": "Invoice history already up to date",
         "invoice_no": "Invoice",
         "invoice_total": "Total",
         "invoice_balance": "Balance",
         "invoice_paid": "Paid",
         "next_invoice_hint": "Next invoice number will be",
+        "view_details": "View details",
+        "unit": "Unit",
+        "vin": "VIN",
+        "miles": "Miles",
+        "line_items": "Line items",
+        "li_item": "Item",
+        "li_desc": "Description",
+        "li_qty": "Qty",
+        "li_rate": "Rate",
+        "li_amount": "Amount",
+        "no_lines": "No line items on this invoice.",
+        "detail_error": "Could not open this invoice. Please go back and try again.",
+        "refresh_invoices": "Refresh invoices",
+        "invoices_never": "Invoices not synced yet. Tap Refresh invoices.",
         # New invoice / cart.
         "add": "Add",
         "add_to_invoice": "Add to invoice",
@@ -170,11 +201,29 @@ _STRINGS: dict[str, dict[str, str]] = {
         "history_loading": "Зареждане на фактури…",
         "history_empty": "Все още няма фактури.",
         "history_error": "Фактурите не могат да се заредят сега. Опитайте отново.",
+        "history_refresh": "Обнови фактурите",
+        "history_refreshing": "Проверка за промени във фактурите…",
+        "history_refresh_done": "Историята е обновена",
+        "history_refresh_none": "Историята вече е актуална",
         "invoice_no": "Фактура",
         "invoice_total": "Общо",
         "invoice_balance": "Остатък",
         "invoice_paid": "Платена",
         "next_invoice_hint": "Следващ номер на фактура ще бъде",
+        "view_details": "Виж детайли",
+        "unit": "Номер",
+        "vin": "VIN",
+        "miles": "Мили",
+        "line_items": "Редове",
+        "li_item": "Артикул",
+        "li_desc": "Описание",
+        "li_qty": "Кол.",
+        "li_rate": "Цена",
+        "li_amount": "Сума",
+        "no_lines": "Няма редове в тази фактура.",
+        "detail_error": "Фактурата не може да се отвори. Върнете се и опитайте отново.",
+        "refresh_invoices": "Обнови фактурите",
+        "invoices_never": "Фактурите още не са синхронизирани. Натиснете Обнови фактурите.",
         # New invoice / cart.
         "add": "Добави",
         "add_to_invoice": "Добави към фактура",
@@ -384,7 +433,25 @@ _MOBILE_CSS = """
   .inv-no { font-size: 1.2rem; font-weight: 750; color: #1f2933; }
   .inv-date { font-size: 0.98rem; color: #6b7682; white-space: nowrap; }
   .inv-customer { font-size: 1.02rem; color: #3a4652; margin-top: 0.25rem; }
+  .inv-meta { font-size: 0.95rem; color: #6b7682; margin-top: 0.25rem; }
   .inv-amounts { margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.4rem; }
+
+  /* Invoice detail line items. */
+  .li-card {
+      border: 1px solid #e9edf1; border-radius: 12px;
+      padding: 0.7rem 0.9rem; margin: 0.4rem 0;
+      background: #fbfcfd;
+  }
+  .li-name { font-size: 1.08rem; font-weight: 700; color: #1f2933; }
+  .li-desc { font-size: 0.98rem; color: #616e7c; margin-top: 0.2rem; line-height: 1.35; }
+    .inv-meta { font-size: 0.98rem; color: #52606d; margin-top: 0.25rem; line-height: 1.35; }
+    .li-card {
+            border: 1px solid #e4e8ec; border-radius: 12px;
+            padding: 0.8rem 0.95rem; margin: 0.45rem 0;
+            background: #ffffff;
+    }
+    .li-name { font-size: 1.08rem; font-weight: 700; color: #1f2933; }
+    .li-desc { font-size: 0.98rem; color: #616e7c; margin-top: 0.25rem; line-height: 1.35; }
 </style>
 """
 
@@ -568,8 +635,16 @@ _VIEW_HOME = "home"
 _VIEW_INVENTORY = "inventory"
 _VIEW_NEW_INVOICE = "new_invoice"
 _VIEW_HISTORY = "history"
+_VIEW_INVOICE_DETAIL = "invoice"
 _VIEW_SCAN = "scan"
-_VALID_VIEWS = {_VIEW_HOME, _VIEW_INVENTORY, _VIEW_NEW_INVOICE, _VIEW_HISTORY, _VIEW_SCAN}
+_VALID_VIEWS = {
+    _VIEW_HOME,
+    _VIEW_INVENTORY,
+    _VIEW_NEW_INVOICE,
+    _VIEW_HISTORY,
+    _VIEW_INVOICE_DETAIL,
+    _VIEW_SCAN,
+}
 
 
 def _go(view: str) -> None:
@@ -590,12 +665,66 @@ def _go(view: str) -> None:
     st.rerun()
 
 
+def _shop_view_url(view: str) -> str:
+    """Return a URL for a shop view.
+
+    Link-buttons use this helper so browser/phone back navigation works like a
+    normal website. A bare ``?shop=1`` is the home menu.
+    """
+    if view == _VIEW_HOME:
+        return _shop_app_url()
+    return f"{_shop_app_url()}&v={view}"
+
+
 def _current_view() -> str:
     """Resolve the active view from the URL, defaulting to home."""
     raw = st.query_params.get("v", _VIEW_HOME)
     if isinstance(raw, list):
         raw = raw[0] if raw else _VIEW_HOME
     return raw if raw in _VALID_VIEWS else _VIEW_HOME
+
+
+def _wire_shop_back_button(view: str) -> None:
+    """Map the phone/browser back gesture to the in-app back button.
+
+    On any sub-view we push a synthetic history entry and listen for popstate.
+    When the user taps the phone's back key, we click the in-page back button
+    (text starting with "⬅") instead of letting the browser exit the app, so
+    back naturally walks Detail -> History -> Home. On the home menu we do
+    nothing, so back there exits the app normally.
+    """
+    if view == _VIEW_HOME:
+        return
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            const pw = window.parent;
+            const pd = pw.document;
+            const tag = "shop-{view}";
+            if (!(pw.history.state && pw.history.state.shopView === tag)) {{
+                try {{ pw.history.pushState({{ shopView: tag }}, "", pw.location.href); }} catch (e) {{}}
+            }}
+            if (pd.body && pd.body.dataset.shopBackBound !== '1') {{
+                pd.body.dataset.shopBackBound = '1';
+                pw.addEventListener('popstate', () => {{
+                    const buttons = pd.querySelectorAll('button');
+                    for (const btn of buttons) {{
+                        const text = (btn.innerText || '').trim();
+                        if (text.startsWith('⬅')) {{
+                            btn.click();
+                            try {{ pw.history.pushState({{ shopView: tag }}, "", pw.location.href); }} catch (e) {{}}
+                            return;
+                        }}
+                    }}
+                }});
+            }}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
 
 
 
@@ -621,13 +750,10 @@ def _render_sidebar_nav(lang: str, current: str) -> None:
         ]
         for view, icon, label in nav:
             disabled = view == current
-            if st.button(
-                f"{icon}  {label}",
-                use_container_width=True,
-                key=f"nav_{view}",
-                disabled=disabled,
-            ):
-                _go(view)
+            if disabled:
+                st.button(f"{icon}  {label}", use_container_width=True, key=f"nav_{view}", disabled=True)
+            else:
+                st.link_button(f"{icon}  {label}", _shop_view_url(view), use_container_width=True)
         st.caption(_SHOP_BUILD_LABEL)
 
 
@@ -649,6 +775,7 @@ def render_shop_inventory_page() -> None:
     # always lands on the home menu regardless of any prior session state.
     view = _current_view()
 
+    _wire_shop_back_button(view)
     _render_sidebar_nav(lang, view)
 
     # Resolve the realm once; every data view needs it. The home menu still
@@ -665,6 +792,8 @@ def render_shop_inventory_page() -> None:
         _render_inventory_view(lang, realm_id)
     elif view == _VIEW_HISTORY:
         _render_history_view(lang, realm_id)
+    elif view == _VIEW_INVOICE_DETAIL:
+        _render_invoice_detail_view(lang, realm_id)
     elif view == _VIEW_NEW_INVOICE:
         _render_new_invoice_view(lang, realm_id)
     elif view == _VIEW_SCAN:
@@ -672,7 +801,7 @@ def render_shop_inventory_page() -> None:
 
 
 def _render_home_view(lang: str, realm_id: str) -> None:
-    """The four-button shop menu shown at ?shop=1."""
+    """The four-button shop menu shown at ?shop=1 (buttons only, no cards)."""
     header_col, lang_col = st.columns([3, 1])
     with header_col:
         st.markdown(f"<div class='home-title'>🔧 {_t(lang, 'home_title')}</div>", unsafe_allow_html=True)
@@ -687,35 +816,39 @@ def _render_home_view(lang: str, realm_id: str) -> None:
         (_VIEW_SCAN, "📷", "card_scan", "card_scan_desc", True),
     ]
     for view, icon, title_key, desc_key, soon in cards:
-        soon_html = (
-            f"<span class='home-card-soon'>{_t(lang, 'coming_soon')}</span>" if soon else ""
-        )
-        st.markdown(
-            f"<div class='home-card'>"
-            f"<span class='home-card-icon'>{icon}</span>"
-            f"<span class='home-card-body'>"
-            f"<div class='home-card-title'>{_escape(_t(lang, title_key))}</div>"
-            f"<div class='home-card-desc'>{_escape(_t(lang, desc_key))}</div>"
-            f"</span>{soon_html}</div>",
-            unsafe_allow_html=True,
-        )
-        if st.button(
-            f"{icon}  {_t(lang, title_key)}",
+        label = f"{icon}  {_t(lang, title_key)}"
+        if soon:
+            label += f"  ·  {_t(lang, 'coming_soon')}"
+        st.link_button(
+            label,
+            _shop_view_url(view),
             use_container_width=True,
-            key=f"home_card_{view}",
-        ):
-            _go(view)
+            help=_t(lang, desc_key),
+        )
+
+    st.link_button(
+        f"\U0001f4f1 {_t(lang, 'open_app')}",
+        _shop_app_url(),
+        use_container_width=True,
+    )
 
 
 def _render_view_header(lang: str, title_key: str) -> None:
-    """Shared header for sub-views: back-to-menu + title + language toggle."""
+    """Shared header for sub-views: back-to-menu + title + language toggle.
+
+    Also exposes the "Open in app" deep link on every shop page.
+    """
     top_l, top_r = st.columns([3, 1])
     with top_l:
-        if st.button(f"⬅ {_t(lang, 'back_to_menu')}", key=f"back_{title_key}"):
-            _go(_VIEW_HOME)
+        st.link_button(f"⬅ {_t(lang, 'back_to_menu')}", _shop_view_url(_VIEW_HOME))
     with top_r:
         _render_lang_toggle(lang)
     st.markdown(f"<div class='shop-title'>{_t(lang, title_key)}</div>", unsafe_allow_html=True)
+    st.link_button(
+        f"\U0001f4f1 {_t(lang, 'open_app')}",
+        _shop_app_url(),
+        use_container_width=True,
+    )
 
 
 def _render_inventory_view(lang: str, realm_id: str) -> None:
@@ -736,16 +869,8 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
     ).strip()
 
     _show_refresh_flash()
-    refresh_col, open_col = st.columns(2)
-    with refresh_col:
-        if st.button(f"\U0001f504 {_t(lang, 'refresh')}", use_container_width=True):
-            _run_refresh(realm_id, lang)
-    with open_col:
-        st.link_button(
-            f"\U0001f4f1 {_t(lang, 'open_app')}",
-            _shop_app_url(),
-            use_container_width=True,
-        )
+    if st.button(f"\U0001f504 {_t(lang, 'refresh')}", use_container_width=True):
+        _run_refresh(realm_id, lang)
 
     # Reset how many cards are shown whenever the search term changes, so a new
     # search always starts at the top with the first page.
@@ -837,8 +962,7 @@ def _render_add_popover(item: dict[str, Any], lang: str) -> None:
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
 def _cached_recent_invoices(realm_id: str, limit: int) -> list[dict[str, Any]]:
-    qbo_client, _, _ = build_services()
-    return fetch_recent_invoices(qbo_client, realm_id, limit=limit)
+    return list_cached_invoices(realm_id, limit=limit)
 
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
@@ -847,13 +971,45 @@ def _cached_next_invoice_number(realm_id: str) -> int | None:
     return next_invoice_number(qbo_client, realm_id)
 
 
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_invoice_detail(realm_id: str, invoice_id: str) -> dict[str, Any] | None:
+    return get_cached_invoice(realm_id, invoice_id)
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_invoice_history_synced_at(realm_id: str) -> str:
+    return last_invoice_history_sync(realm_id)
+
+
 def _render_history_view(lang: str, realm_id: str) -> None:
-    """Invoice History view (Button 3): read-only list of recent QBO invoices."""
+    """Invoice History view (Button 3): read-only list of recent QBO invoices.
+
+    Each invoice shows its custom Unit / VIN / Miles fields and a button to open
+    a full detail view with all line items.
+    """
     _render_view_header(lang, "history_title")
 
     if not realm_id:
         st.info(_t(lang, "not_connected"))
         return
+
+    synced_at = _cached_invoice_history_synced_at(realm_id)
+    if synced_at:
+        st.caption(f"{_t(lang, 'updated')}: {synced_at.replace('T', ' ')[:16]}")
+    if st.button(f"🔄 {_t(lang, 'history_refresh')}", use_container_width=True):
+        with st.spinner(_t(lang, "history_refreshing")):
+            result = sync_shop_invoice_history(realm_id)
+        _cached_recent_invoices.clear()
+        _cached_invoice_detail.clear()
+        _cached_invoice_history_synced_at.clear()
+        if result.status == "success":
+            if result.invoices_upserted:
+                st.success(f"{_t(lang, 'history_refresh_done')} (+{result.invoices_upserted})")
+            else:
+                st.info(_t(lang, "history_refresh_none"))
+        else:
+            st.error(f"{_t(lang, 'history_error')} {result.message}")
+        st.rerun()
 
     try:
         with st.spinner(_t(lang, "history_loading")):
@@ -867,19 +1023,48 @@ def _render_history_view(lang: str, realm_id: str) -> None:
         st.info(_t(lang, "history_empty"))
         return
 
-    st.markdown("".join(_invoice_html(inv, lang) for inv in invoices), unsafe_allow_html=True)
+    for inv in invoices:
+        st.markdown(_invoice_html(inv, lang), unsafe_allow_html=True)
+        inv_id = str(inv.get("Id") or "").strip()
+        doc = str(inv.get("DocNumber") or "").strip()
+        if inv_id and st.button(
+            f"🔍 {_t(lang, 'view_details')}",
+            key=f"inv_open_{inv_id}",
+            use_container_width=True,
+        ):
+            st.session_state["shop_invoice_id"] = inv_id
+            st.session_state["shop_invoice_doc"] = doc
+            _go(_VIEW_INVOICE_DETAIL)
 
 
 def _invoice_html(inv: dict[str, Any], lang: str) -> str:
-    doc = str(inv.get("DocNumber") or "—").strip()
-    txn_date = str(inv.get("TxnDate") or "").strip()
-    customer = ""
-    ref = inv.get("CustomerRef")
-    if isinstance(ref, dict):
-        customer = str(ref.get("name") or "").strip()
-    total = _fmt_price(inv.get("TotalAmt"))
-    balance_raw = inv.get("Balance")
+    doc = str(inv.get("doc_number") or inv.get("DocNumber") or "—").strip()
+    txn_date = str(inv.get("txn_date") or inv.get("TxnDate") or "").strip()
+    customer = str(inv.get("customer_name") or "").strip()
+    if not customer:
+        ref = inv.get("CustomerRef")
+        if isinstance(ref, dict):
+            customer = str(ref.get("name") or "").strip()
+    total = _fmt_price(inv.get("total", inv.get("TotalAmt")))
+    balance_raw = inv.get("balance", inv.get("Balance"))
     balance = _fmt_price(balance_raw)
+
+    # Custom QBO fields (Unit / VIN / Miles) shown as a small meta line.
+    fields = {
+        "unit": str(inv.get("unit") or ""),
+        "vin": str(inv.get("vin") or ""),
+        "miles": str(inv.get("miles") or ""),
+    }
+    if not any(fields.values()):
+        fields = custom_field_map(inv)
+    meta_bits = []
+    for key in ("unit", "vin", "miles"):
+        value = fields.get(key)
+        if value:
+            meta_bits.append(f"{_t(lang, key)}: {_escape(value)}")
+    custom_html = (
+        f"<div class='inv-meta'>{' · '.join(meta_bits)}</div>" if meta_bits else ""
+    )
 
     badges = []
     if total:
@@ -899,10 +1084,107 @@ def _invoice_html(inv: dict[str, Any], lang: str) -> str:
         f"<div class='inv-top'>"
         f"<span class='inv-no'>{_t(lang, 'invoice_no')} #{_escape(doc)}</span>"
         f"<span class='inv-date'>{_escape(txn_date)}</span>"
-        f"</div>{customer_html}"
+        f"</div>{customer_html}{custom_html}"
         f"<div class='inv-amounts'>{''.join(badges)}</div>"
         f"</div>"
     )
+
+
+def _render_invoice_detail_view(lang: str, realm_id: str) -> None:
+    """Full read-only invoice detail: header, custom fields, and all line items.
+
+    Mirrors how the invoice looks when editing in QuickBooks (item, description,
+    qty, rate, amount), scrollable for long invoices.
+    """
+    _render_view_header(lang, "history_title")
+
+    inv_id = str(st.session_state.get("shop_invoice_id") or "").strip()
+    if not realm_id or not inv_id:
+        st.info(_t(lang, "detail_error"))
+        if st.button(f"⬅ {_t(lang, 'card_history')}", key="detail_back_hist"):
+            _go(_VIEW_HISTORY)
+        return
+
+    if st.button(f"⬅ {_t(lang, 'card_history')}", key="detail_back_hist_top"):
+        _go(_VIEW_HISTORY)
+
+    try:
+        with st.spinner(_t(lang, "history_loading")):
+            inv = _cached_invoice_detail(realm_id, inv_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Invoice detail load failed: %s", exc)
+        inv = None
+    if not inv:
+        st.error(_t(lang, "detail_error"))
+        return
+
+    # Header card (reuse the list card layout) + line items below.
+    st.markdown(_invoice_html(inv, lang), unsafe_allow_html=True)
+
+    lines = inv.get("line_items") or []
+    if not lines:
+        lines = [
+            line for line in (inv.get("Line") or [])
+            if str(line.get("DetailType") or "") == "SalesItemLineDetail"
+        ]
+    if not lines:
+        st.info(_t(lang, "no_lines"))
+        return
+
+    st.markdown(f"<div class='shop-title'>{_t(lang, 'line_items')}</div>", unsafe_allow_html=True)
+    st.markdown("".join(_line_item_html(line, lang) for line in lines), unsafe_allow_html=True)
+
+
+def _line_item_html(line: dict[str, Any], lang: str) -> str:
+    if "item_name" in line or "unit_price" in line:
+        item_name = str(line.get("item_name") or "").strip()
+        description = str(line.get("description") or "").strip()
+        qty = line.get("qty")
+        rate = line.get("unit_price")
+        amount = line.get("amount")
+        return _line_item_flat_html(item_name, description, qty, rate, amount, lang)
+
+    detail = line.get("SalesItemLineDetail") or {}
+    item_ref = detail.get("ItemRef") or {}
+    item_name = str(item_ref.get("name") or "").strip() if isinstance(item_ref, dict) else ""
+    description = str(line.get("Description") or "").strip()
+    qty = detail.get("Qty")
+    rate = detail.get("UnitPrice")
+    amount = line.get("Amount")
+
+    return _line_item_flat_html(item_name, description, qty, rate, amount, lang)
+
+
+def _line_item_flat_html(
+    item_name: str,
+    description: str,
+    qty: Any,
+    rate: Any,
+    amount: Any,
+    lang: str,
+) -> str:
+
+    qty_str = _fmt_qty(qty)
+    rate_str = _fmt_price(rate)
+    amount_str = _fmt_price(amount)
+
+    desc_html = f"<div class='li-desc'>{_escape(description)}</div>" if description else ""
+    chips = []
+    if qty_str is not None:
+        chips.append(f"<span class='badge badge-untracked'>{_t(lang, 'li_qty')}: {qty_str}</span>")
+    if rate_str:
+        chips.append(f"<span class='badge badge-price'>{_t(lang, 'li_rate')}: {rate_str}</span>")
+    if amount_str:
+        chips.append(f"<span class='badge badge-cost'>{_t(lang, 'li_amount')}: {amount_str}</span>")
+
+    return (
+        f"<div class='li-card'>"
+        f"<div class='li-name'>{_escape(item_name or '—')}</div>"
+        f"{desc_html}"
+        f"<div class='part-badges'>{''.join(chips)}</div>"
+        f"</div>"
+    )
+
 
 
 def _render_new_invoice_view(lang: str, realm_id: str) -> None:
