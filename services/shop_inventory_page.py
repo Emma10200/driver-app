@@ -147,6 +147,24 @@ _MOBILE_CSS = """
       line-height: 1.3;
       color: #1f2933;
   }
+  /* Tier 1: part number + SKU share a prominent header row. */
+  .part-header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 0.5rem 0.6rem;
+  }
+  .part-sku {
+      font-size: 1.05rem;
+      font-weight: 800;
+      letter-spacing: 0.01em;
+      color: #1a55b0;
+      background: #eaf1fb;
+      border: 1px solid #d3e2f6;
+      border-radius: 8px;
+      padding: 0.18rem 0.55rem;
+      white-space: nowrap;
+  }
   .part-meta { font-size: 1.0rem; color: #616e7c; margin-top: 0.3rem; line-height: 1.35; }
   .part-badges { margin-top: 0.65rem; display: flex; flex-wrap: wrap; gap: 0.4rem; }
   .badge {
@@ -238,6 +256,20 @@ def _render_part_card(item: dict[str, Any], lang: str) -> None:
     price = _fmt_price(item.get("sales_price"))
     cost = _fmt_price(item.get("purchase_cost"))
 
+    # Tier 1 (most prominent): part number (QBO item name) + SKU shelf reference.
+    sku_html = (
+        f"<span class='part-sku'>{_t(lang, 'sku')} {_escape(sku)}</span>" if sku else ""
+    )
+    header_html = (
+        f"<div class='part-header'>"
+        f"<span class='part-name'>{_escape(name)}</span>{sku_html}"
+        f"</div>"
+    )
+
+    # Tier 2: description.
+    meta_html = f"<div class='part-meta'>{_escape(description)}</div>" if description else ""
+
+    # Tier 3 (least prominent): stock + prices as small badges.
     badges: list[str] = []
     if qty is None:
         badges.append(f"<span class='badge badge-untracked'>{_t(lang, 'no_qty')}</span>")
@@ -253,14 +285,11 @@ def _render_part_card(item: dict[str, Any], lang: str) -> None:
         badges.append(f"<span class='badge badge-price'>{_t(lang, 'price')}: {price}</span>")
     if cost:
         badges.append(f"<span class='badge badge-cost'>{_t(lang, 'cost')}: {cost}</span>")
-    if sku:
-        badges.append(f"<span class='badge badge-sku'>{_t(lang, 'sku')}: {_escape(sku)}</span>")
 
-    meta_html = f"<div class='part-meta'>{_escape(description)}</div>" if description else ""
     st.markdown(
         f"""
         <div class='part-card'>
-            <div class='part-name'>{_escape(name)}</div>
+            {header_html}
             {meta_html}
             <div class='part-badges'>{''.join(badges)}</div>
         </div>
