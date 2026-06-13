@@ -16,7 +16,7 @@ def list_cached_invoices(realm_id: str, *, limit: int = 100) -> list[dict[str, A
     supabase = SupabaseRestClient()
     return supabase.select(
         _TABLE,
-        select="realm_id,qbo_invoice_id,doc_number,txn_date,customer_name,total,balance,unit,vin,miles,line_items,qbo_last_updated_at,last_synced",
+        select="realm_id,qbo_invoice_id,doc_number,txn_date,customer_name,total,balance,unit,vin,miles,line_items,qbo_last_updated_at,last_synced,raw",
         filters={"realm_id": f"eq.{realm_id}"},
         order="txn_date.desc,doc_number.desc",
         limit=limit,

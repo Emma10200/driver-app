@@ -24,7 +24,7 @@ from qbo.shop_inventory_sync import (
     sync_shop_inventory,
 )
 from qbo.shop_invoices import (
-    custom_field_map,
+    custom_field_items,
     fetch_invoice_by_id,
     fetch_recent_invoices,
     next_invoice_number,
@@ -695,6 +695,10 @@ def _shop_view_url(view: str) -> str:
     return f"{_shop_app_url()}&v={view}"
 
 
+def _shop_invoice_detail_url(invoice_id: str) -> str:
+    return f"{_shop_view_url(_VIEW_INVOICE_DETAIL)}&invoice_id={_escape(invoice_id)}"
+
+
 def _open_app_square_html(lang: str) -> str:
     """Small home-page-only app link.
 
@@ -715,6 +719,13 @@ def _current_view() -> str:
     if isinstance(raw, list):
         raw = raw[0] if raw else _VIEW_HOME
     return raw if raw in _VALID_VIEWS else _VIEW_HOME
+
+
+def _query_param_value(name: str) -> str:
+    raw = st.query_params.get(name, "")
+    if isinstance(raw, list):
+        raw = raw[0] if raw else ""
+    return str(raw or "")
 
 
 def _wire_shop_back_button(view: str) -> None:
@@ -1046,16 +1057,13 @@ def _render_history_view(lang: str, realm_id: str) -> None:
 
     for inv in invoices:
         st.markdown(_invoice_html(inv, lang), unsafe_allow_html=True)
-        inv_id = str(inv.get("Id") or "").strip()
-        doc = str(inv.get("DocNumber") or "").strip()
-        if inv_id and st.button(
-            f"🔍 {_t(lang, 'view_details')}",
-            key=f"inv_open_{inv_id}",
-            use_container_width=True,
-        ):
-            st.session_state["shop_invoice_id"] = inv_id
-            st.session_state["shop_invoice_doc"] = doc
-            _go(_VIEW_INVOICE_DETAIL)
+        inv_id = str(inv.get("qbo_invoice_id") or inv.get("Id") or "").strip()
+        if inv_id:
+            st.link_button(
+                f"🔍 {_t(lang, 'view_details')}",
+                _shop_invoice_detail_url(inv_id),
+                use_container_width=True,
+            )
 
 
 def _invoice_html(inv: dict[str, Any], lang: str) -> str:
@@ -1070,19 +1078,25 @@ def _invoice_html(inv: dict[str, Any], lang: str) -> str:
     balance_raw = inv.get("balance", inv.get("Balance"))
     balance = _fmt_price(balance_raw)
 
-    # Custom QBO fields (Unit / VIN / Miles) shown as a small meta line.
-    fields = {
-        "unit": str(inv.get("unit") or ""),
-        "vin": str(inv.get("vin") or ""),
-        "miles": str(inv.get("miles") or ""),
-    }
-    if not any(fields.values()):
-        fields = custom_field_map(inv)
-    meta_bits = []
-    for key in ("unit", "vin", "miles"):
-        value = fields.get(key)
-        if value:
-            meta_bits.append(f"{_t(lang, key)}: {_escape(value)}")
+    # Custom QBO fields shown as a small meta line. Prefer the actual QBO labels
+    # from raw.CustomField so this works even if names are "Unit #" / "Mileage"
+    # etc. Fallback to cache columns for already-synced older rows.
+    raw_invoice = inv.get("raw") if isinstance(inv.get("raw"), dict) else inv
+    meta_bits = [
+        f"{_escape(label)}: {_escape(value)}"
+        for label, value in custom_field_items(raw_invoice)
+    ]
+    if not meta_bits:
+        fields = {
+            "unit": str(inv.get("unit") or ""),
+            "vin": str(inv.get("vin") or ""),
+            "miles": str(inv.get("miles") or ""),
+        }
+        meta_bits = [
+            f"{_t(lang, key)}: {_escape(value)}"
+            for key, value in fields.items()
+            if value
+        ]
     custom_html = (
         f"<div class='inv-meta'>{' · '.join(meta_bits)}</div>" if meta_bits else ""
     )
@@ -1119,7 +1133,7 @@ def _render_invoice_detail_view(lang: str, realm_id: str) -> None:
     """
     _render_view_header(lang, "history_title")
 
-    inv_id = str(st.session_state.get("shop_invoice_id") or "").strip()
+    inv_id = _query_param_value("invoice_id").strip()
     if not realm_id or not inv_id:
         st.info(_t(lang, "detail_error"))
         if st.button(f"⬅ {_t(lang, 'card_history')}", key="detail_back_hist"):

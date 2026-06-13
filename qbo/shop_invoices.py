@@ -10,6 +10,7 @@ Per the project's separation of concerns, all QBO API access lives in the
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from qbo.api_client import QboClient
@@ -91,7 +92,8 @@ def custom_field_map(inv: dict[str, Any]) -> dict[str, str]:
     for field in inv.get("CustomField") or []:
         if not isinstance(field, dict):
             continue
-        name = str(field.get("Name") or "").strip().lower()
+        raw_name = str(field.get("Name") or "").strip()
+        name = _canonical_custom_field_name(raw_name)
         value = str(
             field.get("StringValue")
             or field.get("NumberValue")
@@ -101,6 +103,42 @@ def custom_field_map(inv: dict[str, Any]) -> dict[str, str]:
         if name:
             out[name] = value
     return out
+
+
+def custom_field_items(inv: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return all invoice custom fields as (display label, value) pairs.
+
+    This is intentionally name-agnostic for the shop UI. General Truck Service's
+    invoice custom fields are the only ones in the company file, so rendering all
+    non-empty custom fields is more reliable than exact character-for-character
+    matching on "Unit" / "VIN" / "Miles".
+    """
+    out: list[tuple[str, str]] = []
+    for field in inv.get("CustomField") or []:
+        if not isinstance(field, dict):
+            continue
+        name = str(field.get("Name") or "").strip()
+        value = str(
+            field.get("StringValue")
+            or field.get("NumberValue")
+            or field.get("DateValue")
+            or ""
+        ).strip()
+        if name and value:
+            out.append((name, value))
+    return out
+
+
+def _canonical_custom_field_name(raw_name: str) -> str:
+    """Map QBO custom field labels to canonical keys used by the shop UI."""
+    normalized = re.sub(r"[^a-z0-9]+", "", str(raw_name or "").lower())
+    if normalized in {"unit", "unitno", "unitnumber", "truck", "truckunit"}:
+        return "unit"
+    if normalized in {"vin", "vinnumber"}:
+        return "vin"
+    if normalized in {"mile", "miles", "mileage", "odometer", "odom"}:
+        return "miles"
+    return normalized
 
 
 def _query_invoices(
