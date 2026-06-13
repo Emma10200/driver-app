@@ -26,8 +26,30 @@ def list_cached_invoices(realm_id: str, *, limit: int = 100) -> list[dict[str, A
         order="doc_number.desc,txn_date.desc",
         limit=fetch_limit,
     )
+    rows = [row for row in rows if _is_display_invoice_doc(row.get("doc_number"))]
     rows.sort(key=_invoice_sort_key)
     return rows[: max(1, int(limit or 100))]
+
+
+def _is_display_invoice_doc(value: Any) -> bool:
+    """True for normal shop invoice numbers shown to the shop user.
+
+    The QBO file contains some non-invoice accounting artifacts in DocNumber,
+    e.g. ``refund check 57804`` or ``check# 55788 & 55868``. Those should stay in
+    the cache for audit/history purposes but not clutter the shop-facing history.
+
+    Expected shop invoice shapes:
+    - 6483
+    - 6498a
+    - 6498.0
+
+    This intentionally rejects long/freeform text and suffixes like
+    ``6706-REFUND CHECK``.
+    """
+    doc = str(value or "").strip()
+    if not doc or len(doc) > 8:
+        return False
+    return bool(re.fullmatch(r"\d{4,6}(?:[A-Za-z]|\.\d{1,2})?", doc))
 
 
 def _invoice_sort_key(row: dict[str, Any]) -> tuple:
