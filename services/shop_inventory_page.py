@@ -23,7 +23,7 @@ from qbo.shop_inventory_sync import (
     resolve_shop_realm_id,
     sync_shop_inventory,
 )
-from qbo.catalog import QboCatalog
+from qbo.shop_customer_sync import sync_shop_customers
 from qbo.shop_invoices import (
     custom_field_items,
     fetch_invoice_by_id,
@@ -32,6 +32,7 @@ from qbo.shop_invoices import (
 )
 from qbo.shop_invoice_history_sync import sync_shop_invoice_history
 from services.qbo_supabase import SupabaseRestClient
+from services.shop_customer_cache import customer_names, last_customer_sync
 from services.shop_invoice_history_cache import (
     get_cached_invoice,
     last_invoice_history_sync,
@@ -48,7 +49,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.10 (vehicle invoice wizard)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.11 (customer cache)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -152,6 +153,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "customer_suggestions": "Suggested customers",
         "customer_not_listed": "Customer not listed",
         "customer_search": "Search existing customers",
+        "refresh_customers": "Refresh customers",
+        "customers_refreshing": "Checking QuickBooks for customer changes…",
+        "customers_refresh_done": "Customer list updated",
+        "customers_refresh_none": "Customer list already up to date",
         "new_customer": "New customer name",
         "use_customer": "Use this customer",
         "header_ready": "Invoice header locked in — add parts below.",
@@ -264,6 +269,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "customer_suggestions": "Предложени клиенти",
         "customer_not_listed": "Клиентът не е в списъка",
         "customer_search": "Търси съществуващи клиенти",
+        "refresh_customers": "Обнови клиентите",
+        "customers_refreshing": "Проверка за промени в клиентите…",
+        "customers_refresh_done": "Списъкът с клиенти е обновен",
+        "customers_refresh_none": "Списъкът с клиенти вече е актуален",
         "new_customer": "Име на нов клиент",
         "use_customer": "Използвай този клиент",
         "header_ready": "Данните са готови — добавете части долу.",
@@ -1030,8 +1039,17 @@ def _cached_invoice_history_synced_at(realm_id: str) -> str:
 
 @st.cache_data(ttl=_REALM_CACHE_TTL, show_spinner=False)
 def _cached_customer_names(realm_id: str) -> list[str]:
-    qbo_client, _, _ = build_services()
-    return QboCatalog(qbo_client).list_customers(realm_id)
+    return customer_names(realm_id, "", limit=100)
+
+
+@st.cache_data(ttl=_SEARCH_CACHE_TTL, show_spinner=False)
+def _cached_customer_search(realm_id: str, term: str) -> list[str]:
+    return customer_names(realm_id, term, limit=25)
+
+
+@st.cache_data(ttl=_REALM_CACHE_TTL, show_spinner=False)
+def _cached_customer_synced_at(realm_id: str) -> str:
+    return last_customer_sync(realm_id)
 
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
@@ -1420,6 +1438,24 @@ def _render_invoice_customer_step(lang: str, realm_id: str) -> None:
     st.markdown(f"### {_t(lang, 'choose_customer')}")
     st.caption(f"{_t(lang, 'truck_unit')}: {unit or '—'} · {_t(lang, 'vin')}: {vin or '—'}")
 
+    customer_synced_at = _cached_customer_synced_at(realm_id)
+    if customer_synced_at:
+        st.caption(f"{_t(lang, 'updated')}: {customer_synced_at.replace('T', ' ')[:16]}")
+    if st.button(f"🔄 {_t(lang, 'refresh_customers')}", use_container_width=True):
+        with st.spinner(_t(lang, "customers_refreshing")):
+            result = sync_shop_customers(realm_id)
+        _cached_customer_names.clear()
+        _cached_customer_search.clear()
+        _cached_customer_synced_at.clear()
+        if result.status == "success":
+            if result.customers_upserted:
+                st.success(f"{_t(lang, 'customers_refresh_done')} (+{result.customers_upserted})")
+            else:
+                st.info(_t(lang, "customers_refresh_none"))
+        else:
+            st.error(result.message)
+        st.rerun()
+
     suggestions: list[str] = []
     try:
         suggestions = _cached_vehicle_customer_suggestions(realm_id, unit, vin)
@@ -1440,14 +1476,9 @@ def _render_invoice_customer_step(lang: str, realm_id: str) -> None:
     search = st.text_input(_t(lang, "customer_search"), key="invoice_customer_search")
     customer_options: list[str] = []
     try:
-        typed = search.strip().lower()
-        for name in _cached_customer_names(realm_id):
-            if not typed or typed in name.lower():
-                customer_options.append(name)
-            if len(customer_options) >= 25:
-                break
+        customer_options = _cached_customer_search(realm_id, search.strip())
     except Exception as exc:  # noqa: BLE001
-        logger.warning("QBO customer lookup failed: %s", exc)
+        logger.warning("Cached customer lookup failed: %s", exc)
 
     if customer_options:
         picked = st.selectbox(_t(lang, "customer"), customer_options, key="invoice_customer_pick")
