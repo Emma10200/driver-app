@@ -58,7 +58,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.18 (inventory add to draft)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.19 (bigger add button + prior miles)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -366,6 +366,18 @@ _MOBILE_CSS = """
       font-weight: 600 !important;
       padding: 0.7rem 1rem !important;
       min-height: 3rem !important;
+  }
+  /* Inventory "Add" popover trigger: big, green and obviously tappable. */
+  div[data-testid="stPopover"] > div > button,
+  div[data-testid="stPopover"] button[aria-haspopup="dialog"] {
+      background: #2f9e54 !important;
+      color: #ffffff !important;
+      border: 1px solid #248045 !important;
+      border-radius: 12px !important;
+      font-size: 1.2rem !important;
+      font-weight: 800 !important;
+      min-height: 3.4rem !important;
+      box-shadow: 0 2px 4px rgba(16, 24, 40, 0.12) !important;
   }
   /* Home-only compact "open in app" square. Hidden in PWA/standalone contexts
      where the page is already inside an app-like wrapper. */
@@ -1086,7 +1098,7 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
     if term and shown <= _INTERACTIVE_MAX:
         _show_cart_flash()
         for item in visible_items:
-            card_col, add_col = st.columns([6, 1])
+            card_col, add_col = st.columns([5, 2])
             with card_col:
                 st.markdown(_card_html(item, lang), unsafe_allow_html=True)
             with add_col:
@@ -1110,7 +1122,7 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
 def _render_add_popover(item: dict[str, Any], lang: str, realm_id: str) -> None:
     """The inventory "+" affordance: add the part to a draft or a new invoice."""
     item_id = str(item.get("qbo_item_id") or "")
-    with st.popover("➕", use_container_width=True):
+    with st.popover(f"➕ {_t(lang, 'add')}", use_container_width=True):
         # Existing drafts first, so a started invoice is the easiest target.
         try:
             drafts = list_drafts(realm_id, limit=15)
@@ -1715,14 +1727,13 @@ def _start_new_invoice() -> None:
 
 def _render_invoice_vehicle_step(lang: str) -> None:
     st.text_input(_t(lang, "invoice_no"), key="invoice_doc_number")
+    unit_now = str(st.session_state.get("invoice_truck") or "")
+    vin_now = str(st.session_state.get("invoice_vin") or "")
     try:
         realm_id = _cached_shop_realm_id()
-        suggestions = _cached_vehicle_field_suggestions(
-            realm_id,
-            str(st.session_state.get("invoice_truck") or ""),
-            str(st.session_state.get("invoice_vin") or ""),
-        )
+        suggestions = _cached_vehicle_field_suggestions(realm_id, unit_now, vin_now)
     except Exception:  # noqa: BLE001 - suggestions are convenience only
+        realm_id = ""
         suggestions = {"units": [], "vins": [], "miles": [], "customers": []}
 
     unit_col, vin_col, miles_col = st.columns(3)
@@ -1731,7 +1742,26 @@ def _render_invoice_vehicle_step(lang: str) -> None:
     with vin_col:
         _vehicle_field_popover(lang, "invoice_vin", "vin", suggestions.get("vins", []))
     with miles_col:
+        # Miles is a free-typed value (NOT a dropdown).
         st.text_input(_t(lang, "miles"), key="invoice_miles")
+
+    # Show the previous miles recorded for this unit/VIN right here, so the shop
+    # manager has a reference while typing the current odometer reading.
+    if unit_now or vin_now:
+        try:
+            prior = _last_invoice_for_unit(realm_id, unit_now, vin_now)
+        except Exception:  # noqa: BLE001
+            prior = {}
+        if prior.get("miles") or prior.get("doc"):
+            bits = []
+            if prior.get("miles"):
+                bits.append(f"{_t(lang, 'miles')}: {prior['miles']}")
+            if prior.get("doc"):
+                bits.append(f"#{prior['doc']}")
+            if prior.get("date"):
+                bits.append(prior["date"])
+            st.info(f"{_t(lang, 'prior_invoice')}: " + " · ".join(bits))
+
     st.text_area(_t(lang, "notes"), key="invoice_notes", height=80)
     if st.button(f"➡ {_t(lang, 'next')}", use_container_width=True, type="primary"):
         st.session_state["invoice_step"] = "customer"
