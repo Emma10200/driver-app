@@ -8,6 +8,16 @@
 -- Run AFTER 0005_shop_invoice_queue.sql in the Supabase SQL editor. Idempotent.
 -- Server-side Streamlit uses the service-role key, so RLS targets service_role.
 
+-- Re-declare the shared updated_at trigger fn so this migration is safe even if
+-- the earlier migration that first introduced it was not applied in this project.
+create or replace function public.gps_touch_updated_at()
+returns trigger as $$
+begin
+    new.updated_at = timezone('utc', now());
+    return new;
+end;
+$$ language plpgsql;
+
 create table if not exists public.shop_invoice_history_cache (
     realm_id text not null,
     qbo_invoice_id text not null,
