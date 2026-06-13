@@ -47,7 +47,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.4 (cached invoice history)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.5 (compact app link)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -295,6 +295,26 @@ _MOBILE_CSS = """
       font-weight: 600 !important;
       padding: 0.7rem 1rem !important;
       min-height: 3rem !important;
+  }
+  /* Home-only compact "open in app" square. Hidden in PWA/standalone contexts
+     where the page is already inside an app-like wrapper. */
+  .open-app-wrap { display: flex; justify-content: flex-end; }
+  .open-app-square {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2.75rem;
+      height: 2.75rem;
+      border-radius: 10px;
+      border: 1px solid #cfd6de;
+      background: #ffffff;
+      color: #1f2933;
+      text-decoration: none !important;
+      font-size: 1.35rem;
+      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+  }
+  @media all and (display-mode: standalone) {
+      .open-app-wrap { display: none !important; }
   }
 
   /* Part cards: clean white "paper" rows with a soft border + subtle shadow. */
@@ -675,6 +695,20 @@ def _shop_view_url(view: str) -> str:
     return f"{_shop_app_url()}&v={view}"
 
 
+def _open_app_square_html(lang: str) -> str:
+    """Small home-page-only app link.
+
+    Rendered as raw HTML instead of ``st.link_button`` so it can be a compact
+    square rather than a full-width button.
+    """
+    return (
+        f"<div class='open-app-wrap'>"
+        f"<a class='open-app-square' href='{_escape(_shop_app_url())}' "
+        f"title='{_escape(_t(lang, 'open_app'))}' aria-label='{_escape(_t(lang, 'open_app'))}'>📱</a>"
+        f"</div>"
+    )
+
+
 def _current_view() -> str:
     """Resolve the active view from the URL, defaulting to home."""
     raw = st.query_params.get("v", _VIEW_HOME)
@@ -801,9 +835,11 @@ def render_shop_inventory_page() -> None:
 
 def _render_home_view(lang: str, realm_id: str) -> None:
     """The four-button shop menu shown at ?shop=1 (buttons only, no cards)."""
-    header_col, lang_col = st.columns([3, 1])
+    header_col, app_col, lang_col = st.columns([3, 0.7, 0.7])
     with header_col:
         st.markdown(f"<div class='home-title'>🔧 {_t(lang, 'home_title')}</div>", unsafe_allow_html=True)
+    with app_col:
+        st.markdown(_open_app_square_html(lang), unsafe_allow_html=True)
     with lang_col:
         _render_lang_toggle(lang)
     st.markdown(f"<div class='home-sub'>{_t(lang, 'home_subtitle')}</div>", unsafe_allow_html=True)
@@ -825,17 +861,8 @@ def _render_home_view(lang: str, realm_id: str) -> None:
             help=_t(lang, desc_key),
         )
 
-    st.link_button(
-        f"\U0001f4f1 {_t(lang, 'open_app')}",
-        _shop_app_url(),
-        use_container_width=True,
-    )
-
-
 def _render_view_header(lang: str, title_key: str) -> None:
     """Shared header for sub-views: back-to-menu + title + language toggle.
-
-    Also exposes the "Open in app" deep link on every shop page.
     """
     top_l, top_r = st.columns([3, 1])
     with top_l:
@@ -843,11 +870,6 @@ def _render_view_header(lang: str, title_key: str) -> None:
     with top_r:
         _render_lang_toggle(lang)
     st.markdown(f"<div class='shop-title'>{_t(lang, title_key)}</div>", unsafe_allow_html=True)
-    st.link_button(
-        f"\U0001f4f1 {_t(lang, 'open_app')}",
-        _shop_app_url(),
-        use_container_width=True,
-    )
 
 
 def _render_inventory_view(lang: str, realm_id: str) -> None:
