@@ -12,7 +12,6 @@ Authentication is intentionally NOT implemented here yet (owner decision pending
 
 from __future__ import annotations
 
-import hmac
 import logging
 from typing import Any
 
@@ -36,6 +35,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.2"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -577,46 +577,6 @@ def _go(view: str) -> None:
     st.rerun()
 
 
-def _shop_credentials() -> tuple[str, str]:
-    """Return the (username, password) the shop login accepts.
-
-    Resolved from secrets/env (SHOP_USERNAME / SHOP_PASSWORD), falling back to
-    simple defaults so the gate works out of the box. Set the secrets in
-    Streamlit Cloud to use real credentials.
-    """
-    user = (get_runtime_secret("SHOP_USERNAME", "danko") or "danko").strip()
-    pw = (get_runtime_secret("SHOP_PASSWORD", "1234") or "1234").strip()
-    return user, pw
-
-
-def _require_shop_login(lang: str) -> bool:
-    """Gate the shop app behind a simple username/password.
-
-    Returns True when authenticated. Renders a login form and returns False when
-    not. This is a lightweight access gate (the data shown is read-only); it is
-    not a substitute for per-user accounts.
-    """
-    if st.session_state.get("shop_authed"):
-        return True
-
-    expected_user, expected_pw = _shop_credentials()
-    st.markdown(f"<div class='shop-title'>🔧 {_t(lang, 'login_title')}</div>", unsafe_allow_html=True)
-    with st.form("shop_login_form"):
-        username = st.text_input(_t(lang, "login_user"))
-        password = st.text_input(_t(lang, "login_pass"), type="password")
-        submitted = st.form_submit_button(_t(lang, "login_btn"), use_container_width=True)
-    if submitted:
-        ok_user = hmac.compare_digest(username.strip(), expected_user)
-        ok_pw = hmac.compare_digest(password, expected_pw)
-        if ok_user and ok_pw:
-            st.session_state["shop_authed"] = True
-            st.session_state["shop_user"] = username.strip()
-            st.rerun()
-        else:
-            st.error(_t(lang, "login_err"))
-    return False
-
-
 def _render_lang_toggle(lang: str) -> None:
     """Small BG/EN toggle, shared across views."""
     bulgarian = st.toggle("БГ", value=(lang == "bg"), help=_t(lang, "lang_toggle"), key="shop_lang_toggle")
@@ -646,12 +606,7 @@ def _render_sidebar_nav(lang: str, current: str) -> None:
                 disabled=disabled,
             ):
                 _go(view)
-
-        st.divider()
-        if st.button(f"🚪 {_t(lang, 'logout')}", use_container_width=True, key="nav_logout"):
-            for key in ("shop_authed", "shop_user", "shop_cart", "shop_view"):
-                st.session_state.pop(key, None)
-            st.rerun()
+        st.caption(_SHOP_BUILD_LABEL)
 
 
 def render_shop_inventory_page() -> None:
@@ -664,9 +619,12 @@ def render_shop_inventory_page() -> None:
 
     lang = st.session_state.get("shop_lang", "en")
 
-    # Access gate: simple shop username/password before anything renders.
-    if not _require_shop_login(lang):
-        return
+    # Existing browser sessions may have been left inside the old Inventory-only
+    # screen before the four-card router existed. Initialise once to Home so the
+    # upgraded menu becomes visible after redeploy, then let navigation persist.
+    if not st.session_state.get("shop_view_initialized"):
+        st.session_state["shop_view"] = _VIEW_HOME
+        st.session_state["shop_view_initialized"] = True
 
     view = st.session_state.get("shop_view", _VIEW_HOME)
     if view not in _VALID_VIEWS:
