@@ -93,6 +93,15 @@ def _safety_portal_requested() -> bool:
     )
 
 
+def _shop_inventory_requested() -> bool:
+    """Local route check for the mobile shop Inventory List (General Truck Service)."""
+    route = _query_param_value("route").strip().lower().replace("_", "-")
+    return (
+        _truthy_query_param(_query_param_value("shop"))
+        or route in {"shop", "inventory", "shop-inventory"}
+    )
+
+
 def _safety_upload_token() -> str:
     """Return a recipient-specific safety upload token, if present."""
     for key in ("safety_upload", "safety_token"):
@@ -155,6 +164,17 @@ if _safety_portal_requested():
     from services.safety_portal_page import render_safety_portal_page
 
     render_safety_portal_page(SUBMISSIONS_DIR)
+    render_version_footer()
+    st.stop()
+
+
+# Standalone mobile shop Inventory List (General Truck Service repair shop).
+# Reachable via ?shop=1 (also ?route=inventory / ?route=shop). Read-only browser
+# over the QBO-synced parts catalog. Public-by-link for now; auth is pending.
+if _shop_inventory_requested():
+    from services.shop_inventory_page import render_shop_inventory_page
+
+    render_shop_inventory_page()
     render_version_footer()
     st.stop()
 

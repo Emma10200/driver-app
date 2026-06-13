@@ -1,0 +1,77 @@
+name: Sync shop inventory from QBO
+
+# Delta-syncs the General Truck Service shop inventory from QuickBooks Online
+# into Supabase (public.shop_inventory) so the mobile "Inventory List" view
+# reads fresh data. Runs as a separate process from the Streamlit app because
+# Streamlit Community Cloud has no scheduler.
+#
+# The cron fires on a UTC window that covers US Central business hours in both
+# DST states; the runner itself enforces the exact 07:00-17:00 Central, Mon-Sat
+# gate (DST-aware) and skips anything outside it.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   SUPABASE_URL              shared Supabase project URL
+#   SUPABASE_SERVICE_KEY      service-role key (state read/write)
+#   QBO_CLIENT_ID             QBO OAuth app client id
+#   QBO_CLIENT_SECRET         QBO OAuth app client secret
+#   QBO_ENVIRONMENT           optional; defaults to "production"
+#   SHOP_REALM_ID             optional; otherwise resolved by company name
+#   SHOP_COMPANY_NAME         optional; defaults to "General Truck Service"
+
+on:
+  # Automated schedule is POSTPONED for now. The shop Inventory page has a manual
+  # "Refresh inventory" button that runs the same delta sync on demand. When you
+  # want hands-off syncing again, uncomment the schedule block below.
+  # schedule:
+  #   # Every ~3 hours within a UTC window spanning Central business hours
+  #   # (CST 13:00-23:00 UTC / CDT 12:00-22:00 UTC), Mon-Sat. The runner refines
+  #   # this to exactly 07:00-17:00 Central and skips off-hours/Sundays.
+  #   - cron: "0 12-23/3 * * 1-6"
+  workflow_dispatch:
+    inputs:
+      full_sync:
+        description: "Force a full re-pull (ignore the delta cursor)"
+        type: boolean
+        default: false
+      force:
+        description: "Run even outside business hours"
+        type: boolean
+        default: true
+
+# Never let two syncs overlap and double-write the same realm.
+concurrency:
+  group: sync-shop-inventory
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Sync shop inventory
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          QBO_CLIENT_ID: ${{ secrets.QBO_CLIENT_ID }}
+          QBO_CLIENT_SECRET: ${{ secrets.QBO_CLIENT_SECRET }}
+          QBO_ENVIRONMENT: ${{ secrets.QBO_ENVIRONMENT }}
+          SHOP_REALM_ID: ${{ secrets.SHOP_REALM_ID }}
+          SHOP_COMPANY_NAME: ${{ secrets.SHOP_COMPANY_NAME }}
+          # workflow_dispatch overrides; harmless/no-op on scheduled runs.
+          SHOP_FULL_SYNC: ${{ inputs.full_sync && '1' || '' }}
+          SHOP_FORCE: ${{ inputs.force && '1' || '' }}
+        run: python -m scripts.sync_shop_inventory
