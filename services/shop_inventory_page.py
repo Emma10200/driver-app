@@ -23,6 +23,7 @@ from qbo.shop_inventory_sync import (
     resolve_shop_realm_id,
     sync_shop_inventory,
 )
+from qbo.catalog import QboCatalog
 from qbo.shop_invoices import (
     custom_field_items,
     fetch_invoice_by_id,
@@ -47,7 +48,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.8 (invoice doc filter)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.9 (invoice draft flow)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -1003,6 +1004,30 @@ def _cached_invoice_history_synced_at(realm_id: str) -> str:
     return last_invoice_history_sync(realm_id)
 
 
+@st.cache_data(ttl=_REALM_CACHE_TTL, show_spinner=False)
+def _cached_customer_names(realm_id: str) -> list[str]:
+    qbo_client, _, _ = build_services()
+    return QboCatalog(qbo_client).list_customers(realm_id)
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_vin_customer_suggestions(realm_id: str, vin: str) -> list[str]:
+    vin_norm = "".join(ch for ch in str(vin or "").upper() if ch.isalnum())
+    if len(vin_norm) < 5:
+        return []
+    suggestions: list[str] = []
+    for inv in list_cached_invoices(realm_id, limit=1000):
+        candidates = [str(inv.get("vin") or "")]
+        raw = inv.get("raw") if isinstance(inv.get("raw"), dict) else {}
+        for _, value in custom_field_items(raw):
+            candidates.append(value)
+        if any(vin_norm in "".join(ch for ch in c.upper() if ch.isalnum()) for c in candidates):
+            customer = str(inv.get("customer_name") or "").strip()
+            if customer and customer not in suggestions:
+                suggestions.append(customer)
+    return suggestions[:8]
+
+
 def _render_history_view(lang: str, realm_id: str) -> None:
     """Invoice History view (Button 3): read-only list of recent QBO invoices.
 
@@ -1236,6 +1261,43 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
     if next_no:
         st.success(f"{_t(lang, 'next_invoice_hint')}: **#{next_no}**")
 
+    proposed_doc_number = st.text_input(
+        _t(lang, "invoice_no"),
+        value=str(next_no or ""),
+        key="invoice_doc_number",
+    )
+    customer = st.text_input(_t(lang, "customer"), key="invoice_customer")
+    vin = st.text_input(_t(lang, "vin"), key="invoice_vin")
+    truck_unit = st.text_input(_t(lang, "truck_unit"), key="invoice_truck")
+    miles = st.text_input(_t(lang, "miles"), key="invoice_miles")
+    notes = st.text_area(_t(lang, "notes"), key="invoice_notes", height=80)
+
+    # Suggestions: customers from prior invoices with the same VIN first, then
+    # matching QBO customer names. Kept optional: shop guy can still type freely.
+    suggestions: list[str] = []
+    try:
+        suggestions.extend(_cached_vin_customer_suggestions(realm_id, vin))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("VIN customer suggestions failed: %s", exc)
+    try:
+        typed = customer.strip().lower()
+        for name in _cached_customer_names(realm_id):
+            if (not typed or typed in name.lower()) and name not in suggestions:
+                suggestions.append(name)
+            if len(suggestions) >= 12:
+                break
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("QBO customer suggestions failed: %s", exc)
+    if suggestions:
+        picked = st.selectbox(
+            "Customer suggestions",
+            [""] + suggestions,
+            key="invoice_customer_suggestion",
+        )
+        if picked and picked != customer:
+            st.session_state["invoice_customer"] = picked
+            st.rerun()
+
     # --- Add parts: compact interactive search (kept small so it stays fast). ---
     add_term = st.text_input(
         _t(lang, "cart_search"),
@@ -1266,53 +1328,55 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
     cart = _cart()
     if not cart:
         st.info(_t(lang, "cart_empty"))
-        return
-
-    # --- Cart line items with quantity steppers + remove. ---
-    total = 0.0
-    for idx, line in enumerate(cart):
-        line_total = float(line.get("unit_price") or 0) * int(line.get("qty") or 0)
-        total += line_total
-        name_col, qty_col, rm_col = st.columns([3, 2, 1])
-        with name_col:
-            sku = str(line.get("sku") or "").strip()
-            head = f"{_t(lang, 'sku')} {sku} · " if sku else ""
-            st.markdown(f"**{head}{_escape(str(line.get('name') or ''))}**")
-            st.caption(f"{_fmt_price(line.get('unit_price'))} · {_fmt_price(line_total)}")
-        with qty_col:
-            new_qty = st.number_input(
-                _t(lang, "qty"),
-                min_value=1,
-                step=1,
-                value=int(line.get("qty") or 1),
-                key=f"qty_{idx}_{line.get('qbo_item_id')}",
-            )
-            if int(new_qty) != int(line.get("qty") or 1):
-                line["qty"] = int(new_qty)
-                st.rerun()
-        with rm_col:
-            st.markdown("&nbsp;", unsafe_allow_html=True)
-            if st.button("🗑", key=f"rm_{idx}_{line.get('qbo_item_id')}", help=_t(lang, "remove")):
-                cart.pop(idx)
-                st.rerun()
+        total = 0.0
+    else:
+        # --- Cart line items with quantity steppers + remove. ---
+        total = 0.0
+        for idx, line in enumerate(cart):
+            line_total = float(line.get("unit_price") or 0) * int(line.get("qty") or 0)
+            total += line_total
+            name_col, qty_col, rm_col = st.columns([3, 2, 1])
+            with name_col:
+                sku = str(line.get("sku") or "").strip()
+                head = f"{_t(lang, 'sku')} {sku} · " if sku else ""
+                st.markdown(f"**{head}{_escape(str(line.get('name') or ''))}**")
+                st.caption(f"{_fmt_price(line.get('unit_price'))} · {_fmt_price(line_total)}")
+            with qty_col:
+                new_qty = st.number_input(
+                    _t(lang, "qty"),
+                    min_value=1,
+                    step=1,
+                    value=int(line.get("qty") or 1),
+                    key=f"qty_{idx}_{line.get('qbo_item_id')}",
+                )
+                if int(new_qty) != int(line.get("qty") or 1):
+                    line["qty"] = int(new_qty)
+                    st.rerun()
+            with rm_col:
+                st.markdown("&nbsp;", unsafe_allow_html=True)
+                if st.button("🗑", key=f"rm_{idx}_{line.get('qbo_item_id')}", help=_t(lang, "remove")):
+                    cart.pop(idx)
+                    st.rerun()
 
     st.markdown(f"### {_t(lang, 'invoice_total_label')}: {_fmt_price(total)}")
-
-    # --- Invoice metadata + submit. ---
-    customer = st.text_input(_t(lang, "customer"), key="invoice_customer")
-    truck_unit = st.text_input(_t(lang, "truck_unit"), key="invoice_truck")
-    notes = st.text_area(_t(lang, "notes"), key="invoice_notes", height=80)
 
     st.caption(_t(lang, "finish_help"))
     finish_col, clear_col = st.columns([3, 1])
     with finish_col:
-        if st.button(f"✅ {_t(lang, 'finish_invoice')}", use_container_width=True, type="primary"):
+        if st.button(
+            f"✅ {_t(lang, 'finish_invoice')}",
+            use_container_width=True,
+            type="primary",
+            disabled=not bool(cart),
+        ):
             try:
                 submit_invoice_draft(
                     realm_id=realm_id,
-                    proposed_doc_number=str(next_no or ""),
+                    proposed_doc_number=proposed_doc_number,
                     customer_name=customer,
                     truck_unit=truck_unit,
+                    vin=vin,
+                    miles=miles,
                     notes=notes,
                     line_items=[
                         {

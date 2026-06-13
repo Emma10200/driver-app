@@ -58,8 +58,9 @@ def next_invoice_number(qbo_client: QboClient, realm_id: str) -> int | None:
     highest = 0
     for inv in rows:
         doc = str(inv.get("DocNumber") or "").strip()
-        if doc.isdigit():
-            highest = max(highest, int(doc))
+        match = re.search(r"\d+", doc)
+        if match:
+            highest = max(highest, int(match.group(0)))
     return highest + 1 if highest else None
 
 
