@@ -58,7 +58,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.17 (autosave drafts)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.18 (inventory add to draft)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -144,6 +144,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "add_to_invoice": "Add to invoice",
         "create_new_invoice": "Start new invoice",
         "add_to_current": "Add to current invoice",
+        "add_to_draft": "Add to draft",
         "added_toast": "Added to invoice",
         "cart_title": "Current Invoice",
         "cart_empty": "No parts added yet. Search and tap + to add parts.",
@@ -273,6 +274,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "add_to_invoice": "Добави към фактура",
         "create_new_invoice": "Започни нова фактура",
         "add_to_current": "Добави към текущата фактура",
+        "add_to_draft": "Добави към чернова",
         "added_toast": "Добавено към фактурата",
         "cart_title": "Текуща фактура",
         "cart_empty": "Още няма добавени части. Търсете и натиснете +, за да добавите.",
@@ -1088,7 +1090,7 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
             with card_col:
                 st.markdown(_card_html(item, lang), unsafe_allow_html=True)
             with add_col:
-                _render_add_popover(item, lang)
+                _render_add_popover(item, lang, realm_id)
     else:
         cards_html = "".join(_card_html(item, lang) for item in visible_items)
         st.markdown(cards_html, unsafe_allow_html=True)
@@ -1105,10 +1107,26 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
             st.rerun()
 
 
-def _render_add_popover(item: dict[str, Any], lang: str) -> None:
-    """The inventory "+" affordance: choose Start new or Add to current invoice."""
+def _render_add_popover(item: dict[str, Any], lang: str, realm_id: str) -> None:
+    """The inventory "+" affordance: add the part to a draft or a new invoice."""
     item_id = str(item.get("qbo_item_id") or "")
     with st.popover("➕", use_container_width=True):
+        # Existing drafts first, so a started invoice is the easiest target.
+        try:
+            drafts = list_drafts(realm_id, limit=15)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not load drafts for add popover: %s", exc)
+            drafts = []
+        for draft in drafts:
+            draft_id = str(draft.get("id") or "")
+            doc = str(draft.get("proposed_doc_number") or "—")
+            customer = str(draft.get("customer_name") or "").strip()
+            label = f"📝 {_t(lang, 'add_to_draft')} #{doc}"
+            if customer:
+                label += f" · {customer}"
+            if st.button(label, key=f"add_draft_{draft_id}_{item_id}", use_container_width=True):
+                _add_item_to_draft(realm_id, draft_id, item)
+
         if st.button(
             f"🧾 {_t(lang, 'create_new_invoice')}",
             key=f"new_inv_{item_id}",
@@ -1127,6 +1145,26 @@ def _render_add_popover(item: dict[str, Any], lang: str) -> None:
             _cart_add(item)
             st.session_state["shop_cart_flash"] = _t(lang, "added_toast")
             st.rerun()
+
+
+def _add_item_to_draft(realm_id: str, draft_id: str, item: dict[str, Any]) -> None:
+    """Load a saved draft, add the part, persist, and open it in New Invoice."""
+    draft = get_draft(draft_id)
+    if not draft:
+        st.session_state["shop_cart_flash"] = _t(st.session_state.get("shop_lang", "en"), "draft_err")
+        st.rerun()
+        return
+    _load_draft_into_session(draft, navigate=False)
+    _cart_add(item)
+    # Persist immediately so the added part is saved even if he backs out.
+    try:
+        total = sum(
+            float(li.get("unit_price") or 0) * int(li.get("qty") or 0) for li in _cart()
+        )
+        _autosave_draft(realm_id, total)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Autosave after add-to-draft failed: %s", exc)
+    _go(_VIEW_NEW_INVOICE)
 
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
@@ -1864,7 +1902,7 @@ def _discard_current_invoice(*, delete_remote: bool) -> None:
     st.session_state["shop_cart"] = []
 
 
-def _load_draft_into_session(draft: dict[str, Any]) -> None:
+def _load_draft_into_session(draft: dict[str, Any], *, navigate: bool = True) -> None:
     """Load a saved draft back into the New Invoice flow for editing."""
     for key in _INVOICE_FIELD_KEYS:
         st.session_state.pop(key, None)
@@ -1889,7 +1927,8 @@ def _load_draft_into_session(draft: dict[str, Any]) -> None:
             }
         )
     st.session_state["shop_cart"] = cart
-    _go(_VIEW_NEW_INVOICE)
+    if navigate:
+        _go(_VIEW_NEW_INVOICE)
 
 
 
