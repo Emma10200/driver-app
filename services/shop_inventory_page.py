@@ -41,6 +41,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "no_qty": "Not tracked",
         "sku": "SKU",
         "price": "Price",
+        "cost": "Cost",
         "no_results": "No parts found. Try a shorter or different word.",
         "type_to_search": "Start typing to search the parts catalog.",
         "showing": "Showing",
@@ -65,6 +66,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "no_qty": "Не се следи",
         "sku": "SKU",
         "price": "Цена",
+        "cost": "Себестойност",
         "no_results": "Няма намерени части. Опитайте по-кратка или друга дума.",
         "type_to_search": "Започнете да пишете, за да търсите в каталога.",
         "showing": "Показани",
@@ -113,6 +115,7 @@ _MOBILE_CSS = """
   .badge-stock-zero { background: rgba(255,69,58,0.18); color: #ff938c; }
   .badge-untracked { background: rgba(142,142,147,0.22); color: #d0d0d2; }
   .badge-price { background: rgba(10,132,255,0.18); color: #8fc3ff; }
+  .badge-cost { background: rgba(175,82,222,0.18); color: #d3a4f0; }
   .badge-sku { background: rgba(255,214,10,0.16); color: #ffe27a; }
 </style>
 """
@@ -178,9 +181,12 @@ def _fmt_qty(value: Any) -> str | None:
 def _render_part_card(item: dict[str, Any], lang: str) -> None:
     name = str(item.get("fully_qualified_name") or item.get("name") or "").strip() or "—"
     sku = str(item.get("sku") or "").strip()
-    description = str(item.get("description") or "").strip()
+    description = str(
+        item.get("sales_description") or item.get("purchase_description") or ""
+    ).strip()
     qty = _fmt_qty(item.get("qty_on_hand"))
-    price = _fmt_price(item.get("unit_price"))
+    price = _fmt_price(item.get("sales_price"))
+    cost = _fmt_price(item.get("purchase_cost"))
 
     badges: list[str] = []
     if qty is None:
@@ -195,6 +201,8 @@ def _render_part_card(item: dict[str, Any], lang: str) -> None:
         )
     if price:
         badges.append(f"<span class='badge badge-price'>{_t(lang, 'price')}: {price}</span>")
+    if cost:
+        badges.append(f"<span class='badge badge-cost'>{_t(lang, 'cost')}: {cost}</span>")
     if sku:
         badges.append(f"<span class='badge badge-sku'>{_t(lang, 'sku')}: {_escape(sku)}</span>")
 

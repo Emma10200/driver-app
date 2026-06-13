@@ -31,14 +31,16 @@ create table if not exists public.shop_inventory (
     name text not null default '',
     fully_qualified_name text not null default '',  -- includes parent for sub-items
     sku text not null default '',
-    description text not null default '',            -- sales/purchase description
-    item_type text not null default '',             -- Inventory | NonInventory | Service
-    qty_on_hand numeric(14, 2),                      -- NULL for non-inventory items
-    reorder_point numeric(14, 2),                    -- QBO ReorderPoint when present
-    unit_price numeric(14, 2),                       -- UnitPrice (sales price)
-    purchase_cost numeric(14, 2),                    -- PurchaseCost when present
-    income_account_name text not null default '',
-    asset_account_name text not null default '',
+    sales_description text not null default '',       -- Item.Description (sales forms)
+    purchase_description text not null default '',    -- Item.PurchaseDesc (purchase forms)
+    item_type text not null default '',               -- Inventory | NonInventory | Service
+    qty_on_hand numeric(14, 2),                       -- NULL for non-inventory items
+    reorder_point numeric(14, 2),                     -- QBO ReorderPoint when present
+    sales_price numeric(14, 2),                       -- Item.UnitPrice (sales price / rate)
+    purchase_cost numeric(14, 2),                     -- Item.PurchaseCost (cost / purchase price)
+    income_account_name text not null default '',     -- IncomeAccountRef
+    expense_account_name text not null default '',    -- ExpenseAccountRef
+    asset_account_name text not null default '',      -- AssetAccountRef (inventory asset)
     taxable boolean,
     active boolean not null default true,
     qbo_last_updated_at timestamptz,                 -- Item.MetaData.LastUpdatedTime (delta cursor)
@@ -56,13 +58,15 @@ create index if not exists idx_shop_inventory_realm_active
 create index if not exists idx_shop_inventory_updated
     on public.shop_inventory(realm_id, qbo_last_updated_at desc);
 
--- Trigram indexes for fuzzy / partial search by SKU, name, and description.
+-- Trigram indexes for fuzzy / partial search by SKU, name, and descriptions.
 create index if not exists idx_shop_inventory_sku_trgm
     on public.shop_inventory using gin (sku gin_trgm_ops);
 create index if not exists idx_shop_inventory_name_trgm
     on public.shop_inventory using gin (name gin_trgm_ops);
-create index if not exists idx_shop_inventory_desc_trgm
-    on public.shop_inventory using gin (description gin_trgm_ops);
+create index if not exists idx_shop_inventory_sales_desc_trgm
+    on public.shop_inventory using gin (sales_description gin_trgm_ops);
+create index if not exists idx_shop_inventory_purchase_desc_trgm
+    on public.shop_inventory using gin (purchase_description gin_trgm_ops);
 
 drop trigger if exists shop_inventory_touch_updated_at on public.shop_inventory;
 create trigger shop_inventory_touch_updated_at
@@ -119,7 +123,8 @@ as $$
             coalesce(trim(p_term), '') = ''
          or si.sku ilike '%' || p_term || '%'
          or si.name ilike '%' || p_term || '%'
-         or si.description ilike '%' || p_term || '%'
+         or si.sales_description ilike '%' || p_term || '%'
+         or si.purchase_description ilike '%' || p_term || '%'
          or si.fully_qualified_name ilike '%' || p_term || '%'
          or (si.sku <> '' and si.sku % p_term)
          or (si.name <> '' and si.name % p_term)
@@ -129,7 +134,7 @@ as $$
              else greatest(
                 similarity(si.sku, p_term),
                 similarity(si.name, p_term),
-                similarity(si.description, p_term)
+                similarity(si.sales_description, p_term)
              )
         end desc,
         si.name asc
