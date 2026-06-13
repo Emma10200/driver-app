@@ -35,7 +35,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.2"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.3 (URL nav)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -573,8 +573,30 @@ _VALID_VIEWS = {_VIEW_HOME, _VIEW_INVENTORY, _VIEW_NEW_INVOICE, _VIEW_HISTORY, _
 
 
 def _go(view: str) -> None:
-    st.session_state["shop_view"] = view
+    """Navigate by writing the view into the URL (single source of truth).
+
+    Using a query param (``v``) instead of session_state makes navigation
+    deterministic: a bare ``?shop=1`` always shows the home menu, even if a
+    previous session left a different view selected. Sub-views are shareable /
+    refresh-safe because the URL carries the state.
+    """
+    if view == _VIEW_HOME:
+        try:
+            del st.query_params["v"]
+        except (KeyError, Exception):  # noqa: BLE001 - tolerate API differences
+            st.query_params["v"] = _VIEW_HOME
+    else:
+        st.query_params["v"] = view
     st.rerun()
+
+
+def _current_view() -> str:
+    """Resolve the active view from the URL, defaulting to home."""
+    raw = st.query_params.get("v", _VIEW_HOME)
+    if isinstance(raw, list):
+        raw = raw[0] if raw else _VIEW_HOME
+    return raw if raw in _VALID_VIEWS else _VIEW_HOME
+
 
 
 def _render_lang_toggle(lang: str) -> None:
@@ -623,16 +645,9 @@ def render_shop_inventory_page() -> None:
     # can confirm at a glance whether Streamlit Cloud is serving the new code.
     st.caption(_SHOP_BUILD_LABEL)
 
-    # Existing browser sessions may have been left inside the old Inventory-only
-    # screen before the four-card router existed. Initialise once to Home so the
-    # upgraded menu becomes visible after redeploy, then let navigation persist.
-    if not st.session_state.get("shop_view_initialized"):
-        st.session_state["shop_view"] = _VIEW_HOME
-        st.session_state["shop_view_initialized"] = True
-
-    view = st.session_state.get("shop_view", _VIEW_HOME)
-    if view not in _VALID_VIEWS:
-        view = _VIEW_HOME
+    # The active view comes from the URL (?...&v=inventory), so a bare ?shop=1
+    # always lands on the home menu regardless of any prior session state.
+    view = _current_view()
 
     _render_sidebar_nav(lang, view)
 
