@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from services.qbo_supabase import SupabaseRestClient
@@ -14,13 +15,49 @@ def list_cached_invoices(realm_id: str, *, limit: int = 100) -> list[dict[str, A
     if not realm_id:
         return []
     supabase = SupabaseRestClient()
-    return supabase.select(
+    # Fetch a generous window and sort in Python so invoice numbers like
+    # 6498 / 6498a / 6498.0 stay grouped together. PostgREST's simple text sort
+    # cannot do this natural-number grouping without an extra SQL function.
+    fetch_limit = max(int(limit or 100), 1000)
+    rows = supabase.select(
         _TABLE,
         select="realm_id,qbo_invoice_id,doc_number,txn_date,customer_name,total,balance,unit,vin,miles,line_items,qbo_last_updated_at,last_synced,raw",
         filters={"realm_id": f"eq.{realm_id}"},
-        order="txn_date.desc,doc_number.desc",
-        limit=limit,
+        order="doc_number.desc,txn_date.desc",
+        limit=fetch_limit,
     )
+    rows.sort(key=_invoice_sort_key)
+    return rows[: max(1, int(limit or 100))]
+
+
+def _invoice_sort_key(row: dict[str, Any]) -> tuple:
+    """Natural descending invoice sort with date as secondary.
+
+    Examples that group together:
+    - 6498
+    - 6498.0
+    - 6498a
+
+    The primary key is the first numeric run in the DocNumber, descending. The
+    suffix is then sorted alphabetically within that invoice number group, and
+    date is only a secondary/tertiary tie-breaker.
+    """
+    doc = str(row.get("doc_number") or "").strip()
+    match = re.search(r"\d+", doc)
+    base_number = int(match.group(0)) if match else -1
+    suffix = doc[match.end():].lower() if match else doc.lower()
+    # Keep the plain number first within the group, then dotted/lettered variants.
+    suffix_rank = 0 if suffix == "" else 1
+    txn_date = str(row.get("txn_date") or "")
+    return (-base_number, suffix_rank, suffix, -_yyyymmdd(txn_date), doc.lower())
+
+
+def _yyyymmdd(value: str) -> int:
+    digits = re.sub(r"\D+", "", str(value or ""))[:8]
+    try:
+        return int(digits) if digits else 0
+    except ValueError:
+        return 0
 
 
 def get_cached_invoice(realm_id: str, invoice_id: str) -> dict[str, Any] | None:
