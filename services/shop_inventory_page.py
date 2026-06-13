@@ -27,7 +27,8 @@ from submission_storage import get_runtime_secret
 
 logger = logging.getLogger(__name__)
 
-_SEARCH_LIMIT = 50
+_PAGE_SIZE = 50  # how many more cards each "Show more" reveals
+_MAX_RESULTS = 2500  # hard ceiling so a runaway list can't lock up the phone
 _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
@@ -48,6 +49,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "type_to_search": "Start typing to search the parts catalog.",
         "showing": "Showing",
         "results": "parts",
+        "of": "of",
+        "show_more": "Show more parts",
+        "add_hint": "Add to invoice (coming soon)",
         "updated": "Inventory last updated",
         "never": "not yet synced",
         "lang_toggle": "Език / Language",
@@ -74,6 +78,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "type_to_search": "Започнете да пишете, за да търсите в каталога.",
         "showing": "Показани",
         "results": "части",
+        "of": "от",
+        "show_more": "Покажи още части",
+        "add_hint": "Добави към фактура (скоро)",
         "updated": "Последно обновяване",
         "never": "още не е синхронизирано",
         "lang_toggle": "Език / Language",
@@ -150,9 +157,17 @@ _MOBILE_CSS = """
   /* Tier 1: part number + SKU share a prominent header row. */
   .part-header {
       display: flex;
+      flex-wrap: nowrap;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 0.6rem;
+  }
+  .part-head-main {
+      display: flex;
       flex-wrap: wrap;
       align-items: baseline;
       gap: 0.5rem 0.6rem;
+      min-width: 0;
   }
   .part-sku {
       font-size: 1.05rem;
@@ -164,6 +179,24 @@ _MOBILE_CSS = """
       border-radius: 8px;
       padding: 0.18rem 0.55rem;
       white-space: nowrap;
+  }
+  /* Placeholder "add to invoice" affordance (not wired yet). */
+  .part-add {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2.1rem;
+      height: 2.1rem;
+      border-radius: 999px;
+      font-size: 1.5rem;
+      font-weight: 600;
+      line-height: 1;
+      color: #2f7a48;
+      background: #e8f5ed;
+      border: 1px solid #cdead8;
+      cursor: pointer;
+      user-select: none;
   }
   .part-meta { font-size: 1.0rem; color: #616e7c; margin-top: 0.3rem; line-height: 1.35; }
   .part-badges { margin-top: 0.65rem; display: flex; flex-wrap: wrap; gap: 0.4rem; }
@@ -246,7 +279,13 @@ def _fmt_qty(value: Any) -> str | None:
     return f"{int(number)}" if number == int(number) else f"{number:g}"
 
 
-def _render_part_card(item: dict[str, Any], lang: str) -> None:
+def _card_html(item: dict[str, Any], lang: str) -> str:
+    """Build one part card as a single flat HTML string.
+
+    Returns HTML (rather than rendering) so the caller can join many cards into
+    a single ``st.markdown`` call - far faster than one markdown call per card
+    when showing hundreds of rows.
+    """
     name = str(item.get("fully_qualified_name") or item.get("name") or "").strip() or "—"
     sku = str(item.get("sku") or "").strip()
     description = str(
@@ -256,13 +295,19 @@ def _render_part_card(item: dict[str, Any], lang: str) -> None:
     price = _fmt_price(item.get("sales_price"))
     cost = _fmt_price(item.get("purchase_cost"))
 
-    # Tier 1 (most prominent): part number (QBO item name) + SKU shelf reference.
+    # Tier 1 (most prominent): part number (QBO item name) + SKU shelf reference,
+    # with a placeholder "+" affordance for the future "add to invoice" flow.
     sku_html = (
         f"<span class='part-sku'>{_t(lang, 'sku')} {_escape(sku)}</span>" if sku else ""
     )
+    add_html = (
+        f"<span class='part-add' title='{_escape(_t(lang, 'add_hint'))}'>+</span>"
+    )
     header_html = (
         f"<div class='part-header'>"
+        f"<span class='part-head-main'>"
         f"<span class='part-name'>{_escape(name)}</span>{sku_html}"
+        f"</span>{add_html}"
         f"</div>"
     )
 
@@ -286,16 +331,11 @@ def _render_part_card(item: dict[str, Any], lang: str) -> None:
     if cost:
         badges.append(f"<span class='badge badge-cost'>{_t(lang, 'cost')}: {cost}</span>")
 
-    st.markdown(
-        f"""
-        <div class='part-card'>
-            {header_html}
-            {meta_html}
-            <div class='part-badges'>{''.join(badges)}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    # NOTE: keep this HTML flat (no leading indentation). Streamlit's Markdown
+    # renderer treats 4+ leading spaces as a code block and would print the raw
+    # tags instead of rendering them.
+    badges_html = f"<div class='part-badges'>{''.join(badges)}</div>"
+    return f"<div class='part-card'>{header_html}{meta_html}{badges_html}</div>"
 
 
 def _escape(value: str) -> str:
@@ -399,8 +439,18 @@ def render_shop_inventory_page() -> None:
             use_container_width=True,
         )
 
+    # Reset how many cards are shown whenever the search term changes, so a new
+    # search always starts at the top with the first page.
+    if st.session_state.get("shop_last_term") != term:
+        st.session_state["shop_last_term"] = term
+        st.session_state["shop_visible_count"] = _PAGE_SIZE
+    visible_count = int(st.session_state.get("shop_visible_count", _PAGE_SIZE))
+
+    # Fetch one extra row beyond what we show so we know whether a "Show more"
+    # button is warranted without a separate count query.
+    fetch_limit = min(visible_count + 1, _MAX_RESULTS + 1)
     try:
-        items = _search_inventory(realm_id, term, _SEARCH_LIMIT)
+        items = _search_inventory(realm_id, term, fetch_limit)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Shop inventory search failed: %s", exc)
         st.error(_t(lang, "load_error"))
@@ -417,6 +467,26 @@ def render_shop_inventory_page() -> None:
         st.warning(_t(lang, "no_results"))
         return
 
-    st.caption(f"{_t(lang, 'showing')} {len(items)} {_t(lang, 'results')}")
-    for item in items:
-        _render_part_card(item, lang)
+    has_more = len(items) > visible_count
+    visible_items = items[:visible_count]
+
+    shown = len(visible_items)
+    if has_more:
+        st.caption(f"{_t(lang, 'showing')} {shown}+ {_t(lang, 'results')}")
+    else:
+        st.caption(f"{_t(lang, 'showing')} {shown} {_t(lang, 'results')}")
+
+    # Render every visible card in a single markdown call for speed.
+    cards_html = "".join(_card_html(item, lang) for item in visible_items)
+    st.markdown(cards_html, unsafe_allow_html=True)
+
+    if has_more:
+        if st.button(
+            f"\u2b07\ufe0f {_t(lang, 'show_more')}",
+            use_container_width=True,
+            key="shop_show_more",
+        ):
+            st.session_state["shop_visible_count"] = min(
+                visible_count + _PAGE_SIZE, _MAX_RESULTS
+            )
+            st.rerun()
