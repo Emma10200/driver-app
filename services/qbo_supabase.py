@@ -106,6 +106,10 @@ class SupabaseRestClient:
             return None
         return response.json()
 
+    def delete(self, table: str, *, filters: dict[str, Any]) -> None:
+        params = urlencode(filters)
+        self._request("DELETE", f"/{table}?{params}")
+
     def _request(
         self,
         method: str,

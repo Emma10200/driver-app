@@ -39,7 +39,15 @@ from services.shop_invoice_history_cache import (
     last_invoice_history_sync,
     list_cached_invoices,
 )
-from services.shop_invoice_queue import list_recent_drafts, submit_invoice_draft
+from services.shop_invoice_queue import (
+    delete_draft,
+    finalize_invoice_draft,
+    get_draft,
+    list_drafts,
+    list_recent_drafts,
+    save_invoice_draft,
+    submit_invoice_draft,
+)
 from submission_storage import get_runtime_secret
 
 logger = logging.getLogger(__name__)
@@ -50,7 +58,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.16 (blank invoice + real vehicle dropdowns)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.17 (autosave drafts)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -153,6 +161,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "save_draft": "Save draft",
         "draft_ok": "Draft saved.",
         "draft_err": "Could not save draft. Please try again.",
+        "draft_autosaved": "📝 Draft — saved automatically (not in QuickBooks yet)",
+        "drafts_title": "📝 Your drafts",
+        "drafts_help": "Saved here only — NOT in QuickBooks yet",
+        "qbo_invoices_title": "✅ In QuickBooks",
+        "edit_draft": "Edit",
+        "delete_draft": "Delete",
+        "prior_invoice": "Last invoice for this unit",
+        "no_drafts": "No saved drafts.",
         "next": "Next",
         "edit_header": "Edit unit/VIN/customer",
         "choose_customer": "Choose customer",
@@ -274,6 +290,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "save_draft": "Запази чернова",
         "draft_ok": "Черновата е запазена.",
         "draft_err": "Черновата не може да бъде запазена. Опитайте отново.",
+        "draft_autosaved": "📝 Чернова — автоматично запазена (още не е в QuickBooks)",
+        "drafts_title": "📝 Вашите чернови",
+        "drafts_help": "Само тук — ОЩЕ НЕ са в QuickBooks",
+        "qbo_invoices_title": "✅ В QuickBooks",
+        "edit_draft": "Редактирай",
+        "delete_draft": "Изтрий",
+        "prior_invoice": "Последна фактура за този номер",
+        "no_drafts": "Няма запазени чернови.",
         "next": "Напред",
         "edit_header": "Редактирай номер/VIN/клиент",
         "choose_customer": "Избери клиент",
@@ -516,6 +540,24 @@ _MOBILE_CSS = """
     }
     .li-name { font-size: 1.08rem; font-weight: 700; color: #1f2933; }
     .li-desc { font-size: 0.98rem; color: #616e7c; margin-top: 0.25rem; line-height: 1.35; }
+
+  /* Draft vs QuickBooks distinction. Drafts use a warm amber treatment to make
+     it obvious they are NOT yet in QuickBooks. */
+  .drafts-banner {
+      margin: 0.4rem 0 0.2rem; font-size: 1.2rem; font-weight: 800; color: #92400e;
+  }
+  .drafts-sub {
+      display: block; font-size: 0.95rem; font-weight: 600; color: #b45309; margin-top: 0.1rem;
+  }
+  .draft-card {
+      border: 1px solid #f5d9a8; border-left: 6px solid #f59e0b; border-radius: 12px;
+      padding: 0.75rem 0.95rem; margin: 0.45rem 0; background: #fffbeb;
+  }
+  .draft-top { display: flex; justify-content: space-between; align-items: center; gap: 0.6rem; }
+  .draft-badge {
+      font-size: 0.78rem; font-weight: 800; letter-spacing: 0.02em; text-transform: uppercase;
+      color: #92400e; background: #fde68a; border-radius: 999px; padding: 0.15rem 0.5rem;
+  }
 </style>
 """
 
@@ -1254,6 +1296,13 @@ def _render_history_view(lang: str, realm_id: str) -> None:
             st.error(f"{_t(lang, 'history_error')} {result.message}")
         st.rerun()
 
+    # --- Your drafts (in Supabase only, NOT in QuickBooks). Clear distinction. ---
+    _render_drafts_section(lang, realm_id)
+
+    st.markdown(
+        f"<div class='shop-title'>{_t(lang, 'qbo_invoices_title')}</div>",
+        unsafe_allow_html=True,
+    )
     try:
         with st.spinner(_t(lang, "history_loading")):
             invoices = _cached_recent_invoices(realm_id, 50)
@@ -1276,6 +1325,51 @@ def _render_history_view(lang: str, realm_id: str) -> None:
         ):
             st.session_state["shop_invoice_id"] = inv_id
             _go(_VIEW_INVOICE_DETAIL)
+
+
+def _render_drafts_section(lang: str, realm_id: str) -> None:
+    """Show shop drafts (Supabase only) with a clear 'not in QuickBooks' banner."""
+    try:
+        drafts = list_drafts(realm_id, limit=50)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not load drafts: %s", exc)
+        drafts = []
+
+    st.markdown(
+        f"<div class='drafts-banner'>{_t(lang, 'drafts_title')}"
+        f"<span class='drafts-sub'>{_t(lang, 'drafts_help')}</span></div>",
+        unsafe_allow_html=True,
+    )
+    if not drafts:
+        st.caption(_t(lang, "no_drafts"))
+        return
+
+    for draft in drafts:
+        draft_id = str(draft.get("id") or "")
+        doc = str(draft.get("proposed_doc_number") or "—")
+        customer = str(draft.get("customer_name") or "")
+        unit = str(draft.get("truck_unit") or "")
+        total = _fmt_price(draft.get("total"))
+        n_lines = len(draft.get("line_items") or [])
+        st.markdown(
+            f"<div class='draft-card'>"
+            f"<div class='draft-top'><span class='draft-badge'>{_t(lang, 'drafts_title')}</span>"
+            f"<span class='inv-no'>#{_escape(doc)}</span></div>"
+            f"<div class='inv-customer'>{_escape(customer)}</div>"
+            f"<div class='inv-meta'>{_t(lang, 'truck_unit')}: {_escape(unit) or '—'} · "
+            f"{n_lines} {_t(lang, 'results')} · {total}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        edit_col, del_col = st.columns(2)
+        with edit_col:
+            if st.button(f"✏️ {_t(lang, 'edit_draft')}", key=f"draft_edit_{draft_id}", use_container_width=True):
+                full = get_draft(draft_id) or draft
+                _load_draft_into_session(full)
+        with del_col:
+            if st.button(f"🗑 {_t(lang, 'delete_draft')}", key=f"draft_del_{draft_id}", use_container_width=True):
+                delete_draft(draft_id)
+                st.rerun()
 
 
 def _invoice_html(inv: dict[str, Any], lang: str) -> str:
@@ -1523,11 +1617,12 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
 
     st.markdown(f"### {_t(lang, 'invoice_total_label')}: {_fmt_price(total)}")
 
+    # Perpetual autosave: writes to Supabase only when the draft actually changed.
+    _autosave_draft(realm_id, total)
+    st.caption(_t(lang, "draft_autosaved"))
+
     st.caption(_t(lang, "finish_help"))
-    save_col, finish_col, clear_col = st.columns([2, 3, 1])
-    with save_col:
-        if st.button(f"💾 {_t(lang, 'save_draft')}", use_container_width=True):
-            _submit_shop_invoice(lang, realm_id, status="draft", total=total)
+    finish_col, clear_col = st.columns([3, 1])
     with finish_col:
         if st.button(
             f"✅ {_t(lang, 'finish_invoice')}",
@@ -1538,7 +1633,7 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
             _submit_shop_invoice(lang, realm_id, status="pending", total=total)
     with clear_col:
         if st.button(f"🧹 {_t(lang, 'clear_invoice')}", use_container_width=True):
-            st.session_state["shop_cart"] = []
+            _discard_current_invoice(delete_remote=True)
             st.rerun()
 
 
@@ -1566,6 +1661,8 @@ _INVOICE_FIELD_KEYS = (
     "invoice_customer_is_new",
     "invoice_customer_pick",
     "invoice_add_search",
+    "invoice_draft_id",
+    "invoice_draft_sig",
 )
 
 
@@ -1596,7 +1693,7 @@ def _render_invoice_vehicle_step(lang: str) -> None:
     with vin_col:
         _vehicle_field_popover(lang, "invoice_vin", "vin", suggestions.get("vins", []))
     with miles_col:
-        _vehicle_field_popover(lang, "invoice_miles", "miles", suggestions.get("miles", []))
+        st.text_input(_t(lang, "miles"), key="invoice_miles")
     st.text_area(_t(lang, "notes"), key="invoice_notes", height=80)
     if st.button(f"➡ {_t(lang, 'next')}", use_container_width=True, type="primary"):
         st.session_state["invoice_step"] = "customer"
@@ -1700,52 +1797,100 @@ def _render_invoice_locked_header(lang: str) -> None:
         f"#{doc or '—'} · {customer or '—'} · {_t(lang, 'truck_unit')}: {unit or '—'} · "
         f"{_t(lang, 'vin')}: {vin or '—'} · {_t(lang, 'miles')}: {miles or '—'}"
     )
+
+    # Helpful context: last invoice number + miles previously recorded for this unit.
+    try:
+        realm_id = _cached_shop_realm_id()
+        prior = _last_invoice_for_unit(realm_id, unit, vin)
+    except Exception:  # noqa: BLE001
+        prior = {}
+    if prior.get("doc") or prior.get("miles"):
+        bits = []
+        if prior.get("doc"):
+            bits.append(f"#{prior['doc']}")
+        if prior.get("date"):
+            bits.append(prior["date"])
+        if prior.get("miles"):
+            bits.append(f"{_t(lang, 'miles')}: {prior['miles']}")
+        st.info(f"{_t(lang, 'prior_invoice')}: " + " · ".join(bits))
+
     if st.button(f"✏️ {_t(lang, 'edit_header')}", use_container_width=True):
         st.session_state["invoice_step"] = "vehicle"
         st.rerun()
 
 
 def _submit_shop_invoice(lang: str, realm_id: str, *, status: str, total: float) -> None:
-    cart = _cart()
+    # Make sure the latest state is persisted, then finalize that same draft row.
+    _autosave_draft(realm_id, total)
+    draft_id = str(st.session_state.get("invoice_draft_id") or "")
     try:
-        submit_invoice_draft(
-            realm_id=realm_id,
-            proposed_doc_number=str(st.session_state.get("invoice_doc_number") or ""),
-            customer_name=str(st.session_state.get("invoice_customer") or ""),
-            customer_is_new=bool(st.session_state.get("invoice_customer_is_new")),
-            truck_unit=str(st.session_state.get("invoice_truck") or ""),
-            vin=str(st.session_state.get("invoice_vin") or ""),
-            miles=str(st.session_state.get("invoice_miles") or ""),
-            notes=str(st.session_state.get("invoice_notes") or ""),
-            line_items=[
-                {
-                    "qbo_item_id": str(line.get("qbo_item_id") or ""),
-                    "sku": str(line.get("sku") or ""),
-                    "name": str(line.get("name") or ""),
-                    "qty": int(line.get("qty") or 0),
-                    "unit_price": float(line.get("unit_price") or 0),
-                    "line_total": round(float(line.get("unit_price") or 0) * int(line.get("qty") or 0), 2),
-                }
-                for line in cart
-            ],
-            total=total,
-            submitted_by=str(st.session_state.get("shop_user") or ""),
-            status=status,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Invoice draft submit failed: %s", exc)
-        st.error(_t(lang, "draft_err" if status == "draft" else "finish_err"))
-    else:
-        if status == "pending":
-            for key in (
-                "shop_cart", "invoice_step", "invoice_doc_number", "invoice_customer",
-                "invoice_customer_is_new", "invoice_truck", "invoice_vin", "invoice_miles", "invoice_notes",
-            ):
-                st.session_state.pop(key, None)
-            st.session_state["shop_cart_flash"] = _t(lang, "finish_ok")
+        if draft_id:
+            finalize_invoice_draft(draft_id)
         else:
-            st.session_state["shop_cart_flash"] = _t(lang, "draft_ok")
-        st.rerun()
+            submit_invoice_draft(
+                realm_id=realm_id,
+                proposed_doc_number=str(st.session_state.get("invoice_doc_number") or ""),
+                customer_name=str(st.session_state.get("invoice_customer") or ""),
+                customer_is_new=bool(st.session_state.get("invoice_customer_is_new")),
+                truck_unit=str(st.session_state.get("invoice_truck") or ""),
+                vin=str(st.session_state.get("invoice_vin") or ""),
+                miles=str(st.session_state.get("invoice_miles") or ""),
+                notes=str(st.session_state.get("invoice_notes") or ""),
+                line_items=_invoice_line_items(),
+                total=total,
+                submitted_by=str(st.session_state.get("shop_user") or ""),
+                status="pending",
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Invoice submit failed: %s", exc)
+        st.error(_t(lang, "finish_err"))
+        return
+    _discard_current_invoice(delete_remote=False)
+    st.session_state["shop_cart_flash"] = _t(lang, "finish_ok")
+    st.rerun()
+
+
+def _discard_current_invoice(*, delete_remote: bool) -> None:
+    """Clear the in-progress invoice from the session (and optionally Supabase)."""
+    if delete_remote:
+        draft_id = str(st.session_state.get("invoice_draft_id") or "")
+        if draft_id:
+            try:
+                delete_draft(draft_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not delete draft on discard: %s", exc)
+    for key in _INVOICE_FIELD_KEYS:
+        st.session_state.pop(key, None)
+    st.session_state["shop_cart"] = []
+
+
+def _load_draft_into_session(draft: dict[str, Any]) -> None:
+    """Load a saved draft back into the New Invoice flow for editing."""
+    for key in _INVOICE_FIELD_KEYS:
+        st.session_state.pop(key, None)
+    st.session_state["invoice_draft_id"] = str(draft.get("id") or "")
+    st.session_state["invoice_doc_number"] = str(draft.get("proposed_doc_number") or "")
+    st.session_state["invoice_customer"] = str(draft.get("customer_name") or "")
+    st.session_state["invoice_customer_is_new"] = bool(draft.get("customer_is_new"))
+    st.session_state["invoice_truck"] = str(draft.get("truck_unit") or "")
+    st.session_state["invoice_vin"] = str(draft.get("vin") or "")
+    st.session_state["invoice_miles"] = str(draft.get("miles") or "")
+    st.session_state["invoice_notes"] = str(draft.get("notes") or "")
+    st.session_state["invoice_step"] = "parts"
+    cart = []
+    for li in draft.get("line_items") or []:
+        cart.append(
+            {
+                "qbo_item_id": str(li.get("qbo_item_id") or ""),
+                "sku": str(li.get("sku") or ""),
+                "name": str(li.get("name") or ""),
+                "unit_price": float(li.get("unit_price") or 0),
+                "qty": int(li.get("qty") or 1),
+            }
+        )
+    st.session_state["shop_cart"] = cart
+    _go(_VIEW_NEW_INVOICE)
+
 
 
 def _cart() -> list[dict[str, Any]]:
@@ -1754,6 +1899,87 @@ def _cart() -> list[dict[str, Any]]:
         cart = []
         st.session_state["shop_cart"] = cart
     return cart
+
+
+def _invoice_line_items() -> list[dict[str, Any]]:
+    """Normalize the current cart into stored line-item dicts."""
+    return [
+        {
+            "qbo_item_id": str(line.get("qbo_item_id") or ""),
+            "sku": str(line.get("sku") or ""),
+            "name": str(line.get("name") or ""),
+            "qty": int(line.get("qty") or 0),
+            "unit_price": float(line.get("unit_price") or 0),
+            "line_total": round(float(line.get("unit_price") or 0) * int(line.get("qty") or 0), 2),
+        }
+        for line in _cart()
+    ]
+
+
+def _invoice_state_signature(line_items: list[dict[str, Any]]) -> str:
+    """Stable signature of the in-progress invoice for change detection."""
+    header = "|".join(
+        str(st.session_state.get(key) or "")
+        for key in ("invoice_doc_number", "invoice_customer", "invoice_truck", "invoice_vin", "invoice_miles", "invoice_notes")
+    )
+    body = ";".join(
+        f"{li['qbo_item_id']}x{li['qty']}@{li['unit_price']}" for li in line_items
+    )
+    return f"{header}#{body}"
+
+
+def _autosave_draft(realm_id: str, total: float) -> None:
+    """Perpetually save the draft to Supabase whenever it changes.
+
+    Event-driven (not a timer): Streamlit reruns on every interaction, and we
+    only write when a signature of the invoice state actually changed. That keeps
+    Supabase writes to one-per-real-change, never on idle reruns.
+    """
+    line_items = _invoice_line_items()
+    signature = _invoice_state_signature(line_items)
+    if signature == st.session_state.get("invoice_draft_sig"):
+        return
+    try:
+        saved = save_invoice_draft(
+            draft_id=str(st.session_state.get("invoice_draft_id") or "") or None,
+            realm_id=realm_id,
+            proposed_doc_number=str(st.session_state.get("invoice_doc_number") or ""),
+            customer_name=str(st.session_state.get("invoice_customer") or ""),
+            customer_is_new=bool(st.session_state.get("invoice_customer_is_new")),
+            truck_unit=str(st.session_state.get("invoice_truck") or ""),
+            vin=str(st.session_state.get("invoice_vin") or ""),
+            miles=str(st.session_state.get("invoice_miles") or ""),
+            notes=str(st.session_state.get("invoice_notes") or ""),
+            line_items=line_items,
+            total=total,
+            submitted_by=str(st.session_state.get("shop_user") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - autosave must never crash the page
+        logger.warning("Draft autosave failed: %s", exc)
+        return
+    if saved.get("id"):
+        st.session_state["invoice_draft_id"] = str(saved.get("id"))
+    st.session_state["invoice_draft_sig"] = signature
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _last_invoice_for_unit(realm_id: str, unit: str, vin: str) -> dict[str, str]:
+    """Return the most recent invoice doc/date/miles for a unit (or VIN)."""
+    unit_norm = _norm_vehicle_key(unit)
+    vin_norm = _norm_vehicle_key(vin)
+    if not realm_id or (not unit_norm and not vin_norm):
+        return {}
+    for inv in list_cached_invoices(realm_id, limit=2000):
+        vehicle = _invoice_vehicle_values(inv)
+        if (unit_norm and _vehicle_match(unit_norm, vehicle["unit"], min_len=2)) or (
+            vin_norm and _vehicle_match(vin_norm, vehicle["vin"], min_len=5)
+        ):
+            return {
+                "doc": str(inv.get("doc_number") or ""),
+                "date": str(inv.get("txn_date") or ""),
+                "miles": vehicle["miles"],
+            }
+    return {}
 
 
 def _cart_add(item: dict[str, Any]) -> None:
