@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.44 (revert keyboard scroll, native focus)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.45 (live remaining stock, qty=0 removes w/ confirm, small + square)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -167,6 +167,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "on_drafts": "On drafts",
         "on_hand_label": "📦 In stock now",
         "qty_to_add": "Qty to invoice",
+        "confirm_remove_q": "Remove this part from the invoice?",
+        "confirm_remove_yes": "Remove",
+        "confirm_remove_no": "Keep",
         "no_negatives": "No negative-stock parts. 🎉",
         "cart_title": "Current Invoice",
         "cart_empty": "No parts added yet. Search and tap + to add parts.",
@@ -319,6 +322,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "on_drafts": "В чернови",
         "on_hand_label": "📦 Налично сега",
         "qty_to_add": "Кол. за фактура",
+        "confirm_remove_q": "Да премахна ли тази част от фактурата?",
+        "confirm_remove_yes": "Премахни",
+        "confirm_remove_no": "Запази",
         "no_negatives": "Няма части с отрицателна наличност. 🎉",
         "cart_title": "Текуща фактура",
         "cart_empty": "Още няма добавени части. Търсете и натиснете +, за да добавите.",
@@ -470,6 +476,10 @@ _MOBILE_CSS = """
   div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:last-child {
       flex: 0 0 auto !important;
       width: auto !important;
+  }
+  div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:last-child div[data-testid="stPopover"] {
+      display: flex !important;
+      justify-content: flex-end !important;
   }
   .part-card-bare { padding: 0; margin: 0; background: transparent; }
 
@@ -633,7 +643,9 @@ _MOBILE_CSS = """
       padding: 0.7rem 1rem !important;
       min-height: 3rem !important;
   }
-  /* Inventory "Add" popover trigger: small, compact green square per part row. */
+  /* Inventory "Add" popover trigger: a small fixed green square, never the
+     full-width bar Streamlit defaults buttons to (which on phones dropped it
+     under the card). Fixed width keeps it a tidy square in the card's corner. */
   div[data-testid="stPopover"] button,
   [data-testid="stPopover"] button,
   div[data-testid="stPopover"] > div > button,
@@ -644,8 +656,12 @@ _MOBILE_CSS = """
       border-radius: 10px !important;
       font-size: 1.05rem !important;
       font-weight: 700 !important;
-      min-height: 2.6rem !important;
-      padding: 0.25rem 0.4rem !important;
+      width: 3rem !important;
+      min-width: 3rem !important;
+      max-width: 3rem !important;
+      height: 3rem !important;
+      min-height: 3rem !important;
+      padding: 0 !important;
       box-shadow: 0 1px 2px rgba(16, 24, 40, 0.1) !important;
   }
   /* Home-only compact "open in app" square. Hidden in PWA/standalone contexts
@@ -2261,22 +2277,63 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
             on_hand = line.get("on_hand")
             if on_hand is None:
                 on_hand = on_hand_by_id.get(str(line.get("qbo_item_id") or ""))
+            # Live "remaining in stock" = current on hand minus what's on this
+            # invoice line, so it ticks down as he adds and back up as he removes.
+            remaining = on_hand
+            if on_hand is not None:
+                try:
+                    remaining = float(on_hand) - qty
+                except (TypeError, ValueError):
+                    remaining = on_hand
+            item_id = str(line.get("qbo_item_id") or "")
+            confirm_key = f"confirm_remove_{idx}_{item_id}"
             with st.container(border=True):
                 st.markdown(
-                    _cart_line_html(lang, idx + 1, line, unit_price, line_total, on_hand),
+                    _cart_line_html(lang, idx + 1, line, unit_price, line_total, remaining),
                     unsafe_allow_html=True,
                 )
+                # Removal confirmation (triggered by the trash button or by setting
+                # the quantity to 0) so a part is never dropped by accident.
+                if st.session_state.get(confirm_key):
+                    st.warning(_t(lang, "confirm_remove_q"))
+                    yes_col, no_col = st.columns(2)
+                    with yes_col:
+                        if st.button(
+                            f"🗑 {_t(lang, 'confirm_remove_yes')}",
+                            key=f"rm_yes_{idx}_{item_id}",
+                            use_container_width=True,
+                            type="primary",
+                        ):
+                            cart.pop(idx)
+                            st.session_state.pop(confirm_key, None)
+                            st.rerun()
+                    with no_col:
+                        if st.button(
+                            _t(lang, "confirm_remove_no"),
+                            key=f"rm_no_{idx}_{item_id}",
+                            use_container_width=True,
+                        ):
+                            if int(line.get("qty") or 0) <= 0:
+                                line["qty"] = 1
+                            st.session_state.pop(confirm_key, None)
+                            st.rerun()
+                    continue
                 qty_col, rate_col, rm_col = st.columns([2, 2, 1], vertical_alignment="bottom")
                 with qty_col:
                     new_qty = st.number_input(
                         _t(lang, "qty_to_add"),
-                        min_value=1,
+                        min_value=0,
                         step=1,
-                        value=max(1, qty),
-                        key=f"qty_{idx}_{line.get('qbo_item_id')}",
+                        value=max(0, qty),
+                        key=f"qty_{idx}_{item_id}",
                     )
                     if int(new_qty) != qty:
-                        line["qty"] = int(new_qty)
+                        if int(new_qty) <= 0:
+                            # Setting qty to 0 asks to remove the part.
+                            st.session_state[confirm_key] = True
+                            line["qty"] = 0
+                        else:
+                            line["qty"] = int(new_qty)
                         st.rerun()
                 with rate_col:
                     st.markdown(
@@ -2288,11 +2345,11 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
                     st.markdown("<div class='li-rate-label'>&nbsp;</div>", unsafe_allow_html=True)
                     if st.button(
                         "🗑",
-                        key=f"rm_{idx}_{line.get('qbo_item_id')}",
+                        key=f"rm_{idx}_{item_id}",
                         help=_t(lang, "remove"),
                         use_container_width=True,
                     ):
-                        cart.pop(idx)
+                        st.session_state[confirm_key] = True
                         st.rerun()
 
     st.markdown(f"### {_t(lang, 'invoice_total_label')}: {_fmt_price(total)}")
