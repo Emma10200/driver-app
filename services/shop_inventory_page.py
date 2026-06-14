@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.50 (add/use buttons above pickers)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.51 (picker add row top, no notes)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -1313,6 +1313,61 @@ def _wire_shop_back_button(view: str) -> None:
     )
 
 
+def _wire_selectbox_add_option_to_top() -> None:
+    """Promote Streamlit's built-in "Add ..." selectbox row to the top.
+
+    ``st.selectbox(..., accept_new_options=True)`` renders the "Add typed value"
+    row inside the frontend dropdown menu; Python can't control its order. This
+    best-effort DOM helper watches open listboxes and moves that Add row to the
+    top, with a plus marker, without changing any underlying widget state or
+    matching behavior.
+    """
+    st.iframe(
+        """
+        <script>
+        (function() {
+            const pw = window.parent;
+            const pd = pw.document;
+            if (!pd || !pd.body) return;
+            if (!pd.getElementById('shop-add-option-style')) {
+                const style = pd.createElement('style');
+                style.id = 'shop-add-option-style';
+                style.textContent = `
+                    .shop-add-option-top { font-weight: 750 !important; }
+                    .shop-add-option-top::before { content: "➕ "; }
+                `;
+                pd.head.appendChild(style);
+            }
+            function promoteAddOptions() {
+                const menus = pd.querySelectorAll('[role="listbox"], ul[role="listbox"]');
+                menus.forEach((menu) => {
+                    const options = Array.from(menu.querySelectorAll('[role="option"], li'));
+                    const addOption = options.find((opt) => {
+                        const text = (opt.innerText || opt.textContent || '').trim();
+                           const lower = text.toLowerCase();
+                           return lower.startsWith('add ') || lower === 'add' ||
+                               lower.startsWith('+ add ') || lower.startsWith('➕ add ');
+                    });
+                    if (!addOption) return;
+                    addOption.classList.add('shop-add-option-top');
+                    if (options[0] !== addOption) {
+                        menu.insertBefore(addOption, options[0] || null);
+                    }
+                });
+            }
+            promoteAddOptions();
+            if (pd.body.dataset.shopAddTopBound !== '1') {
+                pd.body.dataset.shopAddTopBound = '1';
+                const obs = new MutationObserver(promoteAddOptions);
+                obs.observe(pd.body, { childList: true, subtree: true });
+            }
+        })();
+        </script>
+        """,
+        height=1,
+    )
+
+
 
 
 def _render_lang_toggle(lang: str) -> None:
@@ -1366,6 +1421,7 @@ def render_shop_inventory_page() -> None:
     view = _current_view()
 
     _wire_shop_back_button(view)
+    _wire_selectbox_add_option_to_top()
     _render_sidebar_nav(lang, view)
 
     # Resolve the realm once; every data view needs it. The home menu still
@@ -2206,21 +2262,7 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
 
     nonce = int(st.session_state.get("invoice_part_nonce", 0))
     pick_key = f"invoice_part_pick_{nonce}"
-    picked_before = str(st.session_state.get(pick_key) or "")
-    if picked_before and picked_before in part_by_label:
-        item = part_by_label[picked_before]
-        if st.button(
-            f"➕ {_t(lang, 'add_to_invoice')}",
-            key=f"add_picked_top_{nonce}",
-            use_container_width=True,
-            type="primary",
-        ):
-            _cart_add(item)
-            # Bump the nonce so the dropdown resets to blank for the next part.
-            st.session_state["invoice_part_nonce"] = nonce + 1
-            st.session_state["shop_cart_flash"] = _t(lang, "added_toast")
-            st.rerun()
-
+    add_part_slot = st.empty()
     picked = st.selectbox(
         _t(lang, "add_part_label"),
         [""] + part_labels,
@@ -2230,6 +2272,20 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
         accept_new_options=False,
         filter_mode="contains",
     )
+    if picked and picked in part_by_label:
+        with add_part_slot.container():
+            item = part_by_label[picked]
+            if st.button(
+                f"➕ {_t(lang, 'add_to_invoice')}",
+                key=f"add_picked_top_{nonce}",
+                use_container_width=True,
+                type="primary",
+            ):
+                _cart_add(item)
+                # Bump the nonce so the dropdown resets to blank for the next part.
+                st.session_state["invoice_part_nonce"] = nonce + 1
+                st.session_state["shop_cart_flash"] = _t(lang, "added_toast")
+                st.rerun()
 
     st.markdown(f"<div class='shop-title'>{_t(lang, 'cart_title')}</div>", unsafe_allow_html=True)
     cart = _cart()
@@ -2405,7 +2461,6 @@ def _render_invoice_vehicle_step(lang: str) -> None:
         ("invoice_truck", "invoice_truck_w"),
         ("invoice_vin", "invoice_vin_w"),
         ("invoice_miles", "invoice_miles_w"),
-        ("invoice_notes", "invoice_notes_w"),
     )
     for stable, widget in _VEHICLE_FIELD_PAIRS:
         if widget not in st.session_state:
@@ -2464,7 +2519,6 @@ def _render_invoice_vehicle_step(lang: str) -> None:
                 bits.append(prior["date"])
             st.info(f"{_t(lang, 'prior_invoice')}: " + " · ".join(bits))
 
-    st.text_area(_t(lang, "notes"), key="invoice_notes_w", height=80)
     clear_col, next_col = st.columns([1, 2])
     with clear_col:
         st.button(
@@ -2549,19 +2603,7 @@ def _render_invoice_customer_step(lang: str, realm_id: str) -> None:
 
     if not customer_options:
         st.info(_t(lang, "customer_not_listed"))
-    picked_before = str(st.session_state.get("invoice_customer_pick") or "").strip()
-    if picked_before:
-        if st.button(
-            f"➕ {_t(lang, 'use_customer')}",
-            key="use_customer_top",
-            use_container_width=True,
-            type="primary",
-        ):
-            st.session_state["invoice_customer"] = picked_before
-            st.session_state["invoice_customer_is_new"] = picked_before not in customer_options
-            st.session_state["invoice_step"] = "parts"
-            st.rerun()
-
+    use_customer_slot = st.empty()
     picked = st.selectbox(
         _t(lang, "customer"),
         customer_options or [""],
@@ -2570,6 +2612,19 @@ def _render_invoice_customer_step(lang: str, realm_id: str) -> None:
         accept_new_options=True,
         filter_mode="contains",
     )
+    picked_name = str(picked or "").strip()
+    if picked_name:
+        with use_customer_slot.container():
+            if st.button(
+                f"➕ {_t(lang, 'use_customer')}",
+                key="use_customer_top",
+                use_container_width=True,
+                type="primary",
+            ):
+                st.session_state["invoice_customer"] = picked_name
+                st.session_state["invoice_customer_is_new"] = picked_name not in customer_options
+                st.session_state["invoice_step"] = "parts"
+                st.rerun()
 
     if st.button(f"⬅ {_t(lang, 'edit_header')}", key="customer_back_vehicle"):
         st.session_state["invoice_step"] = "vehicle"
