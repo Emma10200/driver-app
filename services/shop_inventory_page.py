@@ -13,6 +13,7 @@ Authentication is intentionally NOT implemented here yet (owner decision pending
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import streamlit as st
@@ -59,7 +60,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.33 (popover: new invoice + draft list)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.34 (draft badge, buttons above, sticky fix, draft# numbering)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -82,6 +83,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "full_resync_title": "Part missing? Full re-sync",
         "full_resync_help": "Re-pulls every active part from QuickBooks (not just recent changes). Use this if a part you expect is not showing up.",
         "full_resync_btn": "Re-pull all parts from QuickBooks",
+        "full_resync_short": "Re-pull",
+        "negatives_short": "Negatives",
+        "negatives_short_on": "Negatives ✓",
         "too_many_results": "Showing the maximum number of parts. Type to narrow the list.",
         "add_part_label": "Add a part",
         "add_part_help": "Search by part number, description or SKU, then pick to add.",
@@ -161,6 +165,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "negatives_only": "⚠️ Show negative stock",
         "negatives_on": "✖ Showing negative stock (worst $ first)",
         "neg_value": "Shortage",
+        "on_drafts": "On drafts",
         "no_negatives": "No negative-stock parts. 🎉",
         "cart_title": "Current Invoice",
         "cart_empty": "No parts added yet. Search and tap + to add parts.",
@@ -227,6 +232,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "full_resync_title": "Липсва част? Пълна синхронизация",
         "full_resync_help": "Изтегля отново всички активни части от QuickBooks (не само последните промени). Използвайте, ако липсва част.",
         "full_resync_btn": "Изтегли всички части от QuickBooks",
+        "full_resync_short": "Обнови",
+        "negatives_short": "Отриц.",
+        "negatives_short_on": "Отриц. ✓",
         "too_many_results": "Показан е максималният брой части. Пишете, за да стесните списъка.",
         "add_part_label": "Добавете част",
         "add_part_help": "Търсете по номер, описание или SKU, след което изберете.",
@@ -306,6 +314,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "negatives_only": "⚠️ Покажи отрицателна наличност",
         "negatives_on": "✖ Показана отрицателна наличност",
         "neg_value": "Недостиг",
+        "on_drafts": "В чернови",
         "no_negatives": "Няма части с отрицателна наличност. 🎉",
         "cart_title": "Текуща фактура",
         "cart_empty": "Още няма добавени части. Търсете и натиснете +, за да добавите.",
@@ -619,6 +628,7 @@ _MOBILE_CSS = """
   .badge-price { background: #eaf1fb; color: #1a55b0; border-color: #d3e2f6; }
   .badge-cost { background: #f0ecf9; color: #5b3da6; border-color: #e0d8f2; }
   .badge-sku { background: #f5f1e6; color: #7a5c12; border-color: #ece3cd; }
+  .badge-draft { background: #fbf0dc; color: #8a5a09; border-color: #f0dcb4; }
 
   /* Freshness caption + section captions: quiet and unobtrusive. */
   div[data-testid="stCaptionContainer"] { color: #8793a1 !important; }
@@ -764,6 +774,36 @@ def _all_active_parts(realm_id: str) -> list[dict[str, Any]]:
     return rows
 
 
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _draft_quantities(realm_id: str) -> dict[str, float]:
+    """Total quantity of each part committed across all OPEN drafts.
+
+    Lets the inventory card show "X on drafts" without touching the real
+    QuickBooks-backed on-hand number (drafts are not posted to QBO yet). Keyed by
+    ``qbo_item_id``. Cached briefly so it does not re-query on every keystroke.
+    """
+    totals: dict[str, float] = {}
+    if not realm_id:
+        return totals
+    try:
+        drafts = list_drafts(realm_id, limit=200)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not load drafts for quantities: %s", exc)
+        return totals
+    for draft in drafts:
+        for li in draft.get("line_items") or []:
+            item_id = str(li.get("qbo_item_id") or "")
+            if not item_id:
+                continue
+            try:
+                qty = float(li.get("qty") or 0)
+            except (TypeError, ValueError):
+                qty = 0.0
+            if qty:
+                totals[item_id] = totals.get(item_id, 0.0) + qty
+    return totals
+
+
 @st.cache_data(ttl=_REALM_CACHE_TTL, show_spinner=False)
 def _active_part_options(realm_id: str) -> tuple[list[str], dict[str, dict[str, Any]]]:
     """Return (labels, label->item) for the live-filter dropdown."""
@@ -814,7 +854,12 @@ def _fmt_qty(value: Any) -> str | None:
 
 
 def _card_html(
-    item: dict[str, Any], lang: str, *, show_shortage: bool = False, bare: bool = False
+    item: dict[str, Any],
+    lang: str,
+    *,
+    show_shortage: bool = False,
+    bare: bool = False,
+    draft_qty: float = 0.0,
 ) -> str:
     """Build one part card as a single flat HTML string.
 
@@ -869,6 +914,13 @@ def _card_html(
                 f"<span class='badge badge-stock-zero'>{_t(lang, 'neg_value')}: "
                 f"{_fmt_price(shortage)}</span>"
             )
+    # Only shown when this part is sitting on one or more open drafts (rare), so
+    # the shop user knows some are already spoken for. Hidden otherwise.
+    if draft_qty and draft_qty > 0:
+        badges.append(
+            f"<span class='badge badge-draft'>{_t(lang, 'on_drafts')}: "
+            f"{_fmt_qty(draft_qty)}</span>"
+        )
 
     # NOTE: keep this HTML flat (no leading indentation). Streamlit's Markdown
     # renderer treats 4+ leading spaces as a code block and would print the raw
@@ -1270,34 +1322,42 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
         logger.warning("Could not load parts: %s", exc)
         parts = []
 
-    sticky_search = st.container()
-    with sticky_search:
-        st.markdown("<span class='sticky-search-anchor'></span>", unsafe_allow_html=True)
-        term = st.text_input(
-            _t(lang, "search_label"),
-            key="shop_search_term",
-            placeholder=_t(lang, "search_placeholder"),
-            label_visibility="collapsed",
-        ).strip()
-
-    refresh_col, neg_col = st.columns([1, 1])
+    # Compact action buttons ABOVE the search bar (smaller, less awkward). The
+    # search bar itself stays pinned to the top as you scroll the list.
+    negatives_on = bool(st.session_state.get("shop_negatives_only"))
+    refresh_col, neg_col, resync_col = st.columns([1, 1.3, 1.1])
     with refresh_col:
-        if st.button(f"\U0001f504 {_t(lang, 'refresh')}", use_container_width=True):
+        if st.button(
+            f"\U0001f504 {_t(lang, 'refresh')}",
+            use_container_width=True,
+            key="shop_refresh_btn",
+        ):
             _run_refresh(realm_id, lang)
     with neg_col:
-        negatives_on = bool(st.session_state.get("shop_negatives_only"))
-        label = _t(lang, "negatives_on") if negatives_on else _t(lang, "negatives_only")
-        if st.button(label, use_container_width=True, key="shop_neg_toggle"):
+        neg_label = "⚠️ " + (_t(lang, "negatives_short_on") if negatives_on else _t(lang, "negatives_short"))
+        if st.button(neg_label, use_container_width=True, key="shop_neg_toggle"):
             st.session_state["shop_negatives_only"] = not negatives_on
             st.rerun()
+    with resync_col:
+        if st.button(
+            f"⟳ {_t(lang, 'full_resync_short')}",
+            use_container_width=True,
+            key="shop_full_resync",
+            help=_t(lang, "full_resync_help"),
+        ):
+            _run_refresh(realm_id, lang, force_full=True)
     negatives_on = bool(st.session_state.get("shop_negatives_only"))
 
-    # Full re-sync: re-pull every active QBO item (ignores the delta cursor).
-    # Use when a part seems missing - it guarantees the catalog is complete.
-    with st.expander(_t(lang, "full_resync_title")):
-        st.caption(_t(lang, "full_resync_help"))
-        if st.button(f"⟳ {_t(lang, 'full_resync_btn')}", use_container_width=True, key="shop_full_resync"):
-            _run_refresh(realm_id, lang, force_full=True)
+    # Sticky search bar: rendered directly in the main column (NOT inside its own
+    # sub-container) so its sticky scroll context is the whole page, which is what
+    # makes it actually pin to the top while the list scrolls underneath.
+    st.markdown("<span class='sticky-search-anchor'></span>", unsafe_allow_html=True)
+    term = st.text_input(
+        _t(lang, "search_label"),
+        key="shop_search_term",
+        placeholder=_t(lang, "search_placeholder"),
+        label_visibility="collapsed",
+    ).strip()
 
     last_run = _last_synced(realm_id)
     freshness = last_run.replace("T", " ")[:16] if last_run else _t(lang, "never")
@@ -1324,12 +1384,22 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
 
     # Every part is a bordered card with a small green + popover on its right.
     _show_cart_flash()
+    try:
+        draft_qtys = _draft_quantities(realm_id)
+    except Exception:  # noqa: BLE001 - badge is a nice-to-have, never block the list
+        draft_qtys = {}
     for item in visible_items:
         with st.container(border=True):
             card_col, add_col = st.columns([6, 1], vertical_alignment="center")
             with card_col:
                 st.markdown(
-                    _card_html(item, lang, show_shortage=negatives_on, bare=True),
+                    _card_html(
+                        item,
+                        lang,
+                        show_shortage=negatives_on,
+                        bare=True,
+                        draft_qty=draft_qtys.get(str(item.get("qbo_item_id") or ""), 0.0),
+                    ),
                     unsafe_allow_html=True,
                 )
             with add_col:
@@ -1517,7 +1587,25 @@ def _cached_recent_invoices(realm_id: str, limit: int) -> list[dict[str, Any]]:
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
 def _cached_next_invoice_number(realm_id: str) -> int | None:
     qbo_client, _, _ = build_services()
-    return next_invoice_number(qbo_client, realm_id)
+    next_no = next_invoice_number(qbo_client, realm_id)
+
+    # Also account for numbers already claimed by open drafts so two new invoices
+    # started before either is posted don't collide. If a draft sits at 6948, the
+    # next new invoice should be 6949 even though QBO has not seen 6948 yet.
+    try:
+        drafts = list_drafts(realm_id, limit=200)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not load drafts for next-number: %s", exc)
+        drafts = []
+    highest_draft = 0
+    for draft in drafts:
+        doc = str(draft.get("proposed_doc_number") or "").strip()
+        match = re.search(r"\d+", doc)
+        if match:
+            highest_draft = max(highest_draft, int(match.group(0)))
+
+    candidates = [n for n in (next_no, highest_draft + 1 if highest_draft else None) if n]
+    return max(candidates) if candidates else None
 
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
@@ -2319,6 +2407,10 @@ def _submit_shop_invoice(lang: str, realm_id: str, *, status: str, total: float)
         st.error(_t(lang, "finish_err"))
         return
     _discard_current_invoice(delete_remote=False)
+    # Draft set changed: refresh the draft-derived caches (next number, on-draft
+    # badge counts) so the next invoice and the inventory badges are accurate.
+    _cached_next_invoice_number.clear()
+    _draft_quantities.clear()
     st.session_state["shop_cart_flash"] = _t(lang, "finish_ok")
     st.rerun()
 
@@ -2335,6 +2427,13 @@ def _discard_current_invoice(*, delete_remote: bool) -> None:
     for key in _INVOICE_FIELD_KEYS:
         st.session_state.pop(key, None)
     st.session_state["shop_cart"] = []
+    # A draft may have been deleted: refresh draft-derived caches.
+    if delete_remote:
+        try:
+            _cached_next_invoice_number.clear()
+            _draft_quantities.clear()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _load_draft_into_session(draft: dict[str, Any], *, navigate: bool = True) -> None:
