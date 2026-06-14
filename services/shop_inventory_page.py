@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.48 (VIN narrows unit suggestions)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.49 (vehicle clear button)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -2409,6 +2409,23 @@ def _render_invoice_vehicle_step(lang: str) -> None:
         if widget not in st.session_state:
             st.session_state[widget] = str(st.session_state.get(stable) or "")
 
+    def _clear_vehicle_fields() -> None:
+        """Clear only the selectable vehicle fields without changing invoice #.
+
+        This runs as a button callback before Streamlit rebuilds the widgets,
+        which safely resets the selectbox/text-input values and avoids disturbing
+        the matching/suggestion logic.
+        """
+        for key in (
+            "invoice_truck",
+            "invoice_truck_w",
+            "invoice_vin",
+            "invoice_vin_w",
+            "invoice_miles",
+            "invoice_miles_w",
+        ):
+            st.session_state[key] = ""
+
     st.text_input(_t(lang, "invoice_no"), key="invoice_doc_number")
     unit_now = str(st.session_state.get("invoice_truck_w") or "")
     vin_now = str(st.session_state.get("invoice_vin_w") or "")
@@ -2446,13 +2463,22 @@ def _render_invoice_vehicle_step(lang: str) -> None:
             st.info(f"{_t(lang, 'prior_invoice')}: " + " · ".join(bits))
 
     st.text_area(_t(lang, "notes"), key="invoice_notes_w", height=80)
-    if st.button(f"➡ {_t(lang, 'next')}", use_container_width=True, type="primary"):
-        # Persist the widget values into the stable keys BEFORE the widgets are
-        # torn down on the next step (otherwise unit/VIN/miles/notes vanish).
-        for stable, widget in _VEHICLE_FIELD_PAIRS:
-            st.session_state[stable] = str(st.session_state.get(widget) or "").strip()
-        st.session_state["invoice_step"] = "customer"
-        st.rerun()
+    clear_col, next_col = st.columns([1, 2])
+    with clear_col:
+        st.button(
+            f"🧹 {_t(lang, 'clear_invoice')}",
+            key="invoice_vehicle_clear",
+            use_container_width=True,
+            on_click=_clear_vehicle_fields,
+        )
+    with next_col:
+        if st.button(f"➡ {_t(lang, 'next')}", use_container_width=True, type="primary"):
+            # Persist the widget values into the stable keys BEFORE the widgets are
+            # torn down on the next step (otherwise unit/VIN/miles/notes vanish).
+            for stable, widget in _VEHICLE_FIELD_PAIRS:
+                st.session_state[stable] = str(st.session_state.get(widget) or "").strip()
+            st.session_state["invoice_step"] = "customer"
+            st.rerun()
 
 
 def _vehicle_field_popover(lang: str, state_key: str, label_key: str, suggestions: list[str]) -> None:
