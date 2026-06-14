@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.25 (negative filter, VIN-only miles)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.26 (sticky search bar)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -368,6 +368,24 @@ _MOBILE_CSS = """
       color: #1f2933 !important;
   }
   div[data-testid="stTextInput"] input::placeholder { color: #9aa5b1 !important; }
+
+  /* Sticky search bar: the search box pins to the top and stays as a slim strip
+     while the part list scrolls underneath it, so the shop user can keep typing
+     without scrolling back up. Targets only the container holding the anchor. */
+  .sticky-search-anchor { display: block; height: 0; margin: 0; padding: 0; }
+  div[data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .sticky-search-anchor) {
+      position: sticky;
+      top: 0;
+      z-index: 1000;
+      background: #F7F8FA;
+      padding: 0.35rem 0 0.45rem;
+      box-shadow: 0 6px 8px -6px rgba(16, 24, 40, 0.18);
+  }
+  div[data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .sticky-search-anchor) input {
+      height: 2.6rem !important;
+      font-size: 1.05rem !important;
+      padding: 0.5rem 0.85rem !important;
+  }
 
   /* Buttons: flat, professional, full-width and easy to tap. */
   div[data-testid="stButton"] > button,
@@ -1105,12 +1123,15 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
         logger.warning("Could not load parts: %s", exc)
         parts = []
 
-    term = st.text_input(
-        _t(lang, "search_label"),
-        key="shop_search_term",
-        placeholder=_t(lang, "search_placeholder"),
-        label_visibility="collapsed",
-    ).strip()
+    sticky_search = st.container()
+    with sticky_search:
+        st.markdown("<span class='sticky-search-anchor'></span>", unsafe_allow_html=True)
+        term = st.text_input(
+            _t(lang, "search_label"),
+            key="shop_search_term",
+            placeholder=_t(lang, "search_placeholder"),
+            label_visibility="collapsed",
+        ).strip()
 
     refresh_col, neg_col = st.columns([1, 1])
     with refresh_col:
