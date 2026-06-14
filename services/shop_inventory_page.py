@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.46 (pin + to card top-right via absolute pos)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.47 (+ as full-width green bar under card)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -461,25 +461,6 @@ _MOBILE_CSS = """
       padding: 0.6rem 0.55rem 0.6rem 0.85rem !important;
       margin: 0.55rem 0 !important;
   }
-  /* Inventory PART card only (the one containing .part-card-bare): pin the green
-     + popover to the TOP-RIGHT corner with absolute positioning. This is immune
-     to Streamlit stacking st.columns vertically on phones (which kept dropping
-     the button to the bottom). Scoped via :has() so invoice line cards (qty/rate/
-     remove rows) are NOT affected. */
-  div[data-testid="stVerticalBlockBorderWrapper"]:has(.part-card-bare) {
-      position: relative !important;
-      padding-right: 4rem !important;
-  }
-  div[data-testid="stVerticalBlockBorderWrapper"]:has(.part-card-bare) div[data-testid="stHorizontalBlock"] {
-      display: block !important;
-  }
-  div[data-testid="stVerticalBlockBorderWrapper"]:has(.part-card-bare) div[data-testid="stColumn"]:last-child {
-      position: absolute !important;
-      top: 0.5rem !important;
-      right: 0.5rem !important;
-      width: auto !important;
-      min-width: 0 !important;
-  }
   .part-card-bare { padding: 0; margin: 0; background: transparent; }
 
   /* Invoice parts-step header card: prominent number + customer, then the
@@ -642,9 +623,7 @@ _MOBILE_CSS = """
       padding: 0.7rem 1rem !important;
       min-height: 3rem !important;
   }
-  /* Inventory "Add" popover trigger: a small fixed green square, never the
-     full-width bar Streamlit defaults buttons to (which on phones dropped it
-     under the card). Fixed width keeps it a tidy square in the card's corner. */
+  /* Inventory "Add" popover trigger: a full-width green bar beneath the card. */
   div[data-testid="stPopover"] button,
   [data-testid="stPopover"] button,
   div[data-testid="stPopover"] > div > button,
@@ -655,12 +634,9 @@ _MOBILE_CSS = """
       border-radius: 10px !important;
       font-size: 1.05rem !important;
       font-weight: 700 !important;
-      width: 3rem !important;
-      min-width: 3rem !important;
-      max-width: 3rem !important;
-      height: 3rem !important;
-      min-height: 3rem !important;
-      padding: 0 !important;
+      width: 100% !important;
+      min-height: 2.8rem !important;
+      padding: 0.35rem 0.5rem !important;
       box-shadow: 0 1px 2px rgba(16, 24, 40, 0.1) !important;
   }
   /* Home-only compact "open in app" square. Hidden in PWA/standalone contexts
@@ -1546,7 +1522,7 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
     shown = len(visible_items)
     st.caption(f"{_t(lang, 'showing')} {shown}{'+' if has_more else ''} {_t(lang, 'results')}")
 
-    # Every part is a bordered card with a small green + popover on its right.
+    # Every part is a bordered card with a full-width green + bar beneath it.
     _show_cart_flash()
     try:
         draft_qtys = _draft_quantities(realm_id)
@@ -1554,20 +1530,17 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
         draft_qtys = {}
     for item in visible_items:
         with st.container(border=True):
-            card_col, add_col = st.columns([6, 1], vertical_alignment="center")
-            with card_col:
-                st.markdown(
-                    _card_html(
-                        item,
-                        lang,
-                        show_shortage=negatives_on,
-                        bare=True,
-                        draft_qty=draft_qtys.get(str(item.get("qbo_item_id") or ""), 0.0),
-                    ),
-                    unsafe_allow_html=True,
-                )
-            with add_col:
-                _render_add_popover(item, lang, realm_id)
+            st.markdown(
+                _card_html(
+                    item,
+                    lang,
+                    show_shortage=negatives_on,
+                    bare=True,
+                    draft_qty=draft_qtys.get(str(item.get("qbo_item_id") or ""), 0.0),
+                ),
+                unsafe_allow_html=True,
+            )
+            _render_add_popover(item, lang, realm_id)
 
     if has_more:
         st.caption(_t(lang, "too_many_results"))
