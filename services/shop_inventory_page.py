@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.26 (sticky search bar)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.27 (sticky search + add on card)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -371,21 +371,40 @@ _MOBILE_CSS = """
 
   /* Sticky search bar: the search box pins to the top and stays as a slim strip
      while the part list scrolls underneath it, so the shop user can keep typing
-     without scrolling back up. Targets only the container holding the anchor. */
+     without scrolling back up. We mark the search box with a zero-height anchor
+     just before it, then make the text input's own element container sticky. */
   .sticky-search-anchor { display: block; height: 0; margin: 0; padding: 0; }
-  div[data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .sticky-search-anchor) {
+  div[data-testid="stElementContainer"]:has(.sticky-search-anchor) {
+      height: 0; min-height: 0; margin: 0; padding: 0;
+  }
+  div[data-testid="stElementContainer"]:has(.sticky-search-anchor) + div[data-testid="stElementContainer"] {
+      position: -webkit-sticky;
       position: sticky;
       top: 0;
       z-index: 1000;
       background: #F7F8FA;
-      padding: 0.35rem 0 0.45rem;
-      box-shadow: 0 6px 8px -6px rgba(16, 24, 40, 0.18);
+      padding: 0.5rem 0 0.55rem;
+      margin-bottom: 0.2rem;
+      box-shadow: 0 8px 10px -9px rgba(16, 24, 40, 0.3);
   }
-  div[data-testid="stVerticalBlock"]:has(> div[data-testid="stElementContainer"] .sticky-search-anchor) input {
+  div[data-testid="stElementContainer"]:has(.sticky-search-anchor) + div[data-testid="stElementContainer"] input {
       height: 2.6rem !important;
       font-size: 1.05rem !important;
       padding: 0.5rem 0.85rem !important;
   }
+
+  /* Inventory row: a native bordered container is the part "card", and the green
+     + popover sits on the right edge INSIDE that same card (where the old static
+     placeholder was). The inner card HTML renders bare so we don't box-in-a-box. */
+  div[data-testid="stVerticalBlockBorderWrapper"] {
+      border: 1px solid #e4e8ec !important;
+      border-radius: 14px !important;
+      background: #ffffff !important;
+      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05) !important;
+      padding: 0.6rem 0.55rem 0.6rem 0.85rem !important;
+      margin: 0.55rem 0 !important;
+  }
+  .part-card-bare { padding: 0; margin: 0; background: transparent; }
 
   /* Buttons: flat, professional, full-width and easy to tap. */
   div[data-testid="stButton"] > button,
@@ -703,7 +722,9 @@ def _fmt_qty(value: Any) -> str | None:
     return f"{int(number)}" if number == int(number) else f"{number:g}"
 
 
-def _card_html(item: dict[str, Any], lang: str, *, show_shortage: bool = False) -> str:
+def _card_html(
+    item: dict[str, Any], lang: str, *, show_shortage: bool = False, bare: bool = False
+) -> str:
     """Build one part card as a single flat HTML string.
 
     Returns HTML (rather than rendering) so the caller can join many cards into
@@ -762,7 +783,8 @@ def _card_html(item: dict[str, Any], lang: str, *, show_shortage: bool = False) 
     # renderer treats 4+ leading spaces as a code block and would print the raw
     # tags instead of rendering them.
     badges_html = f"<div class='part-badges'>{''.join(badges)}</div>"
-    return f"<div class='part-card'>{header_html}{meta_html}{badges_html}</div>"
+    wrapper = "part-card-bare" if bare else "part-card"
+    return f"<div class='{wrapper}'>{header_html}{meta_html}{badges_html}</div>"
 
 
 def _escape(value: str) -> str:
@@ -1174,14 +1196,18 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
     shown = len(visible_items)
     st.caption(f"{_t(lang, 'showing')} {shown}{'+' if has_more else ''} {_t(lang, 'results')}")
 
-    # Every part gets a small Add (+) button in its row, searched or not.
+    # Every part is a bordered card with a small green + popover on its right.
     _show_cart_flash()
     for item in visible_items:
-        card_col, add_col = st.columns([6, 1])
-        with card_col:
-            st.markdown(_card_html(item, lang, show_shortage=negatives_on), unsafe_allow_html=True)
-        with add_col:
-            _render_add_popover(item, lang, realm_id)
+        with st.container(border=True):
+            card_col, add_col = st.columns([6, 1], vertical_alignment="center")
+            with card_col:
+                st.markdown(
+                    _card_html(item, lang, show_shortage=negatives_on, bare=True),
+                    unsafe_allow_html=True,
+                )
+            with add_col:
+                _render_add_popover(item, lang, realm_id)
 
     if has_more:
         if st.button(
