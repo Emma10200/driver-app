@@ -58,7 +58,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.21 (live inventory search)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.22 (inventory type-to-filter, no dropdown)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -614,7 +614,7 @@ def _all_active_parts(realm_id: str) -> list[dict[str, Any]]:
     supabase = SupabaseRestClient()
     rows = supabase.select(
         "shop_inventory",
-        select="qbo_item_id,sku,name,sales_description,purchase_description,sales_price,qty_on_hand,reorder_point,purchase_cost",
+        select="qbo_item_id,sku,name,fully_qualified_name,sales_description,purchase_description,sales_price,qty_on_hand,reorder_point,purchase_cost",
         filters={"realm_id": f"eq.{realm_id}", "active": "eq.true"},
         order="sku.asc,name.asc",
         limit=5000,
@@ -1071,7 +1071,7 @@ def _render_view_header(lang: str, title_key: str) -> None:
 
 
 def _render_inventory_view(lang: str, realm_id: str) -> None:
-    """Inventory List view (Button 1): live search + paginated part cards."""
+    """Inventory List view (Button 1): type-to-filter parts, no dropdown."""
     _render_view_header(lang, "title")
 
     if not realm_id:
@@ -1080,75 +1080,62 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
 
     _show_refresh_flash()
 
-    # Live, type-to-filter search: the dropdown filters its options in the browser
-    # on every keystroke (no per-key database calls). Parts are loaded once and
-    # cached. Selecting a part shows it as a card with the green Add button.
+    # All active parts loaded once (cached); we filter this list in Python as the
+    # search term changes. No dropdown - just a text box with the list below.
     try:
-        labels, by_label = _active_part_options(realm_id)
+        parts = _all_active_parts(realm_id)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Could not load parts for live search: %s", exc)
-        labels, by_label = [], {}
+        logger.warning("Could not load parts: %s", exc)
+        parts = []
 
-    picked_label = st.selectbox(
+    term = st.text_input(
         _t(lang, "search_label"),
-        [""] + labels,
-        index=0,
-        key="shop_live_search",
+        key="shop_search_term",
         placeholder=_t(lang, "search_placeholder"),
         label_visibility="collapsed",
-        filter_mode="contains",
-    )
+    ).strip()
 
     if st.button(f"\U0001f504 {_t(lang, 'refresh')}", use_container_width=True):
         _all_active_parts.clear()
         _active_part_options.clear()
         _run_refresh(realm_id, lang)
 
-    # When a part is picked from the live dropdown, show just that part + add.
-    if picked_label and picked_label in by_label:
-        item = by_label[picked_label]
-        card_col, add_col = st.columns([5, 2])
-        with card_col:
-            st.markdown(_card_html(item, lang), unsafe_allow_html=True)
-        with add_col:
-            _render_add_popover(item, lang, realm_id)
-        return
-
-    # No selection: browse the catalog (first page of cards).
-    term = ""
-    if st.session_state.get("shop_last_term") != term:
-        st.session_state["shop_last_term"] = term
-        st.session_state["shop_visible_count"] = _PAGE_SIZE
-    visible_count = int(st.session_state.get("shop_visible_count", _PAGE_SIZE))
-    fetch_limit = min(visible_count + 1, _MAX_RESULTS + 1)
-    try:
-        items = _search_inventory(realm_id, term, fetch_limit)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Shop inventory search failed: %s", exc)
-        st.error(_t(lang, "load_error"))
-        return
-
     last_run = _last_synced(realm_id)
     freshness = last_run.replace("T", " ")[:16] if last_run else _t(lang, "never")
     st.caption(f"{_t(lang, 'updated')}: {freshness}")
 
+    items = _filter_parts(parts, term)
+
+    # Reset paging when the search term changes.
+    if st.session_state.get("shop_last_term") != term:
+        st.session_state["shop_last_term"] = term
+        st.session_state["shop_visible_count"] = _PAGE_SIZE
+    visible_count = int(st.session_state.get("shop_visible_count", _PAGE_SIZE))
+
     if not items:
-        st.info(_t(lang, "type_to_search"))
+        st.info(_t(lang, "no_results") if term else _t(lang, "type_to_search"))
         return
 
-    has_more = len(items) > visible_count
     visible_items = items[:visible_count]
-
+    has_more = len(items) > visible_count
     shown = len(visible_items)
-    if has_more:
-        st.caption(f"{_t(lang, 'showing')} {shown}+ {_t(lang, 'results')}")
-    else:
-        st.caption(f"{_t(lang, 'showing')} {shown} {_t(lang, 'results')}")
+    st.caption(f"{_t(lang, 'showing')} {shown}{'+' if has_more else ''} {_t(lang, 'results')}")
 
-    # Browsing the whole catalog: render fast batched HTML so the phone stays
-    # smooth. To add a part, the user searches it in the live dropdown above.
-    cards_html = "".join(_card_html(item, lang) for item in visible_items)
-    st.markdown(cards_html, unsafe_allow_html=True)
+    # When narrowed to a manageable list, render each card with the green Add
+    # button. When the list is large (broad/blank search), render fast batched
+    # HTML so the phone stays smooth.
+    _INTERACTIVE_MAX = 25
+    if term and shown <= _INTERACTIVE_MAX:
+        _show_cart_flash()
+        for item in visible_items:
+            card_col, add_col = st.columns([5, 2])
+            with card_col:
+                st.markdown(_card_html(item, lang), unsafe_allow_html=True)
+            with add_col:
+                _render_add_popover(item, lang, realm_id)
+    else:
+        cards_html = "".join(_card_html(item, lang) for item in visible_items)
+        st.markdown(cards_html, unsafe_allow_html=True)
 
     if has_more:
         if st.button(
@@ -1160,6 +1147,27 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
                 visible_count + _PAGE_SIZE, _MAX_RESULTS
             )
             st.rerun()
+
+
+def _filter_parts(parts: list[dict[str, Any]], term: str) -> list[dict[str, Any]]:
+    """Contains-filter parts by SKU, item name, and sales/purchase description.
+
+    Done in Python over the cached part list so typing filters instantly without
+    a database query per keystroke. Blank term returns the whole catalog.
+    """
+    needle = term.strip().lower()
+    if not needle:
+        return parts
+    tokens = [t for t in needle.split() if t]
+    out: list[dict[str, Any]] = []
+    for item in parts:
+        haystack = " ".join(
+            str(item.get(field) or "")
+            for field in ("sku", "name", "sales_description", "purchase_description")
+        ).lower()
+        if all(tok in haystack for tok in tokens):
+            out.append(item)
+    return out
 
 
 def _render_add_popover(item: dict[str, Any], lang: str, realm_id: str) -> None:
