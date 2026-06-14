@@ -60,7 +60,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.38 (invoice # as title, drop header clutter)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.39 (invoice header card + pencil edit)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -176,6 +176,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "remove": "Remove",
         "customer": "Customer / Company",
         "truck_unit": "Truck / Unit #",
+        "unit_short": "Unit",
         "notes": "Notes",
         "invoice_total_label": "Invoice total",
         "finish_invoice": "Finish invoice",
@@ -327,6 +328,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "remove": "Премахни",
         "customer": "Клиент / Фирма",
         "truck_unit": "Камион / Номер",
+        "unit_short": "Единица",
         "notes": "Бележки",
         "invoice_total_label": "Обща сума",
         "finish_invoice": "Завърши фактурата",
@@ -455,6 +457,64 @@ _MOBILE_CSS = """
       margin: 0.55rem 0 !important;
   }
   .part-card-bare { padding: 0; margin: 0; background: transparent; }
+
+  /* Invoice parts-step header card: prominent number + customer, then the
+     unit/VIN/miles as clearly bordered chips (no longer a faint gray caption). */
+  .inv-head-card {
+      border: 1px solid #e4e8ec;
+      border-radius: 14px;
+      background: #ffffff;
+      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
+      padding: 0.7rem 0.9rem;
+      margin: 0.1rem 0 0.4rem;
+  }
+  .inv-head-top {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 0.2rem 0.7rem;
+  }
+  .inv-head-no {
+      font-size: 1.7rem;
+      font-weight: 800;
+      letter-spacing: -0.01em;
+      color: #1f2933;
+      line-height: 1.1;
+  }
+  .inv-head-cust {
+      font-size: 1.15rem;
+      font-weight: 650;
+      color: #3a4652;
+      overflow-wrap: anywhere;
+  }
+  .inv-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      margin-top: 0.55rem;
+  }
+  .inv-chip {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 0.35rem;
+      background: #f3f6fa;
+      border: 1px solid #dde5ee;
+      border-radius: 9px;
+      padding: 0.28rem 0.55rem;
+  }
+  .inv-chip-k {
+      font-size: 0.78rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      color: #5b6a7d;
+  }
+  .inv-chip-v {
+      font-size: 1.05rem;
+      font-weight: 750;
+      color: #1f2933;
+      overflow-wrap: anywhere;
+  }
 
   /* Add-popover "Add to draft" section label. */
   .popover-section {
@@ -1359,11 +1419,14 @@ def _render_home_view(lang: str, realm_id: str) -> None:
             else:
                 _go(view)
 
-def _render_view_header(lang: str, title_key: str, *, title_override: str = "") -> None:
+def _render_view_header(
+    lang: str, title_key: str, *, title_override: str = "", show_title: bool = True
+) -> None:
     """Shared header for sub-views: back-to-menu + title + language toggle.
 
     ``title_override`` lets a caller show literal text (e.g. an invoice number)
-    instead of a translated key.
+    instead of a translated key. ``show_title=False`` renders only the back +
+    language controls (caller draws its own heading).
     """
     top_l, top_r = st.columns([3, 1])
     with top_l:
@@ -1371,8 +1434,9 @@ def _render_view_header(lang: str, title_key: str, *, title_override: str = "") 
             _go(_VIEW_HOME)
     with top_r:
         _render_lang_toggle(lang)
-    title = title_override or _t(lang, title_key)
-    st.markdown(f"<div class='shop-title'>{_escape(title)}</div>", unsafe_allow_html=True)
+    if show_title:
+        title = title_override or _t(lang, title_key)
+        st.markdown(f"<div class='shop-title'>{_escape(title)}</div>", unsafe_allow_html=True)
 
 
 def _render_inventory_view(lang: str, realm_id: str) -> None:
@@ -2149,12 +2213,9 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
         _render_invoice_customer_step(lang, realm_id)
         return
 
-    # Parts step: the invoice number IS the title (no redundant "New Invoice"
-    # heading or "header locked" banner - just the number and its details).
-    doc = str(st.session_state.get("invoice_doc_number") or "").strip()
-    _render_view_header(
-        lang, "card_new_invoice", title_override=f"#{doc}" if doc else _t(lang, "card_new_invoice")
-    )
+    # Parts step: a single prominent header card (invoice # + customer + the
+    # unit/VIN/miles box) with a small pencil edit, drawn by the locked header.
+    _render_view_header(lang, "card_new_invoice", show_title=False)
     _render_invoice_locked_header(lang)
 
     # --- Add parts: a pre-rendered dropdown (like the customer picker). Every
@@ -2254,7 +2315,6 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
 
     # Perpetual autosave: writes to Supabase only when the draft actually changed.
     _autosave_draft(realm_id, total)
-    st.caption(_t(lang, "draft_autosaved"))
 
     st.caption(_t(lang, "finish_help"))
     finish_col, clear_col = st.columns([3, 1])
@@ -2464,20 +2524,53 @@ def _render_invoice_customer_step(lang: str, realm_id: str) -> None:
 
 
 def _render_invoice_locked_header(lang: str) -> None:
-    customer = str(st.session_state.get("invoice_customer") or "")
-    unit = str(st.session_state.get("invoice_truck") or "")
-    vin = str(st.session_state.get("invoice_vin") or "")
-    miles = str(st.session_state.get("invoice_miles") or "")
-    # No banner / no "New Invoice" clutter - the invoice number is the page title.
-    # Just the essential details on one tidy line beneath it.
-    details = [customer or "—"]
-    if unit:
-        details.append(f"{_t(lang, 'truck_unit')}: {unit}")
-    if vin:
-        details.append(f"{_t(lang, 'vin')}: {vin}")
-    if miles:
-        details.append(f"{_t(lang, 'miles')}: {miles}")
-    st.caption(" · ".join(details))
+    customer = str(st.session_state.get("invoice_customer") or "").strip()
+    doc = str(st.session_state.get("invoice_doc_number") or "").strip()
+    unit = str(st.session_state.get("invoice_truck") or "").strip()
+    vin = str(st.session_state.get("invoice_vin") or "").strip()
+    miles = str(st.session_state.get("invoice_miles") or "").strip()
+
+    # Prominent header card: invoice number big on the left, customer filling the
+    # space to its right; below, the unit/VIN/miles in clear bordered chips. A
+    # small pencil to the top-right is the (rarely used) edit affordance.
+    head_col, edit_col = st.columns([6, 1], vertical_alignment="top")
+    with head_col:
+        chips = []
+        if unit:
+            chips.append(
+                f"<span class='inv-chip'><span class='inv-chip-k'>{_t(lang, 'unit_short')}</span>"
+                f"<span class='inv-chip-v'>{_escape(unit)}</span></span>"
+            )
+        if vin:
+            chips.append(
+                f"<span class='inv-chip'><span class='inv-chip-k'>{_t(lang, 'vin')}</span>"
+                f"<span class='inv-chip-v'>{_escape(vin)}</span></span>"
+            )
+        if miles:
+            chips.append(
+                f"<span class='inv-chip'><span class='inv-chip-k'>{_t(lang, 'miles')}</span>"
+                f"<span class='inv-chip-v'>{_escape(miles)}</span></span>"
+            )
+        chips_html = (
+            f"<div class='inv-chips'>{''.join(chips)}</div>" if chips else ""
+        )
+        cust_html = (
+            f"<span class='inv-head-cust'>{_escape(customer)}</span>" if customer else ""
+        )
+        st.markdown(
+            f"<div class='inv-head-card'>"
+            f"<div class='inv-head-top'>"
+            f"<span class='inv-head-no'>#{_escape(doc) or '—'}</span>"
+            f"{cust_html}"
+            f"</div>"
+            f"{chips_html}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with edit_col:
+        if st.button("✏️", key="edit_header_pencil", help=_t(lang, "edit_header")):
+            st.session_state["invoice_step"] = "vehicle"
+            st.rerun()
 
     # Helpful context: last invoice + miles for this VIN (VIN-only to avoid the
     # unit-number overlap problem).
@@ -2497,10 +2590,6 @@ def _render_invoice_locked_header(lang: str) -> None:
         if prior.get("miles"):
             bits.append(f"{_t(lang, 'miles')}: {prior['miles']}")
         st.info(f"{_t(lang, 'prior_invoice')}: " + " · ".join(bits))
-
-    if st.button(f"✏️ {_t(lang, 'edit_header')}", use_container_width=True):
-        st.session_state["invoice_step"] = "vehicle"
-        st.rerun()
 
 
 def _submit_shop_invoice(lang: str, realm_id: str, *, status: str, total: float) -> None:
