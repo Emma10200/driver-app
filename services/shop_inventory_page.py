@@ -58,7 +58,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.22 (inventory type-to-filter, no dropdown)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.23 (real add button, no placeholder)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -367,16 +367,20 @@ _MOBILE_CSS = """
       padding: 0.7rem 1rem !important;
       min-height: 3rem !important;
   }
-  /* Inventory "Add" popover trigger: big, green and obviously tappable. */
+  /* Inventory "Add" popover trigger: big, green and obviously tappable.
+     Broad selectors so it styles correctly across Streamlit versions. */
+  div[data-testid="stPopover"] button,
+  [data-testid="stPopover"] button,
   div[data-testid="stPopover"] > div > button,
   div[data-testid="stPopover"] button[aria-haspopup="dialog"] {
       background: #2f9e54 !important;
       color: #ffffff !important;
       border: 1px solid #248045 !important;
       border-radius: 12px !important;
-      font-size: 1.2rem !important;
+      font-size: 1.25rem !important;
       font-weight: 800 !important;
-      min-height: 3.4rem !important;
+      min-height: 3.6rem !important;
+      width: 100% !important;
       box-shadow: 0 2px 4px rgba(16, 24, 40, 0.12) !important;
   }
   /* Home-only compact "open in app" square. Hidden in PWA/standalone contexts
@@ -687,19 +691,15 @@ def _card_html(item: dict[str, Any], lang: str) -> str:
     price = _fmt_price(item.get("sales_price"))
     cost = _fmt_price(item.get("purchase_cost"))
 
-    # Tier 1 (most prominent): part number (QBO item name) + SKU shelf reference,
-    # with a placeholder "+" affordance for the future "add to invoice" flow.
+    # Tier 1 (most prominent): part number (QBO item name) + SKU shelf reference.
     sku_html = (
         f"<span class='part-sku'>{_t(lang, 'sku')} {_escape(sku)}</span>" if sku else ""
-    )
-    add_html = (
-        f"<span class='part-add' title='{_escape(_t(lang, 'add_hint'))}'>+</span>"
     )
     header_html = (
         f"<div class='part-header'>"
         f"<span class='part-head-main'>"
         f"<span class='part-name'>{_escape(name)}</span>{sku_html}"
-        f"</span>{add_html}"
+        f"</span>"
         f"</div>"
     )
 
@@ -1128,11 +1128,8 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
     if term and shown <= _INTERACTIVE_MAX:
         _show_cart_flash()
         for item in visible_items:
-            card_col, add_col = st.columns([5, 2])
-            with card_col:
-                st.markdown(_card_html(item, lang), unsafe_allow_html=True)
-            with add_col:
-                _render_add_popover(item, lang, realm_id)
+            st.markdown(_card_html(item, lang), unsafe_allow_html=True)
+            _render_add_popover(item, lang, realm_id)
     else:
         cards_html = "".join(_card_html(item, lang) for item in visible_items)
         st.markdown(cards_html, unsafe_allow_html=True)
