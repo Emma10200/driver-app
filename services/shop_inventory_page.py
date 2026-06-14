@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.32 (paginate reads, stock+SKU sort)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.33 (popover: new invoice + draft list)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -155,6 +155,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "create_new_invoice": "Start new invoice",
         "add_to_current": "Add to current invoice",
         "add_to_draft": "Add to draft",
+        "more_drafts": "+{n} more drafts — open Invoice History to pick one.",
         "added_toast": "Added to invoice",
         "low_stock_warn": "⚠️ No stock on hand — adding this may go negative.",
         "negatives_only": "⚠️ Show negative stock",
@@ -299,6 +300,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "create_new_invoice": "Започни нова фактура",
         "add_to_current": "Добави към текущата фактура",
         "add_to_draft": "Добави към чернова",
+        "more_drafts": "+{n} още чернови — отворете История на фактури.",
         "added_toast": "Добавено към фактурата",
         "low_stock_warn": "⚠️ Няма наличност — добавянето може да стане отрицателно.",
         "negatives_only": "⚠️ Покажи отрицателна наличност",
@@ -423,6 +425,16 @@ _MOBILE_CSS = """
       margin: 0.55rem 0 !important;
   }
   .part-card-bare { padding: 0; margin: 0; background: transparent; }
+
+  /* Add-popover "Add to draft" section label. */
+  .popover-section {
+      font-size: 0.82rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      color: #5b6a7d;
+      margin: 0.55rem 0 0.15rem;
+  }
 
   /* QuickBooks-style invoice line items. */
   .cli-head {
@@ -1442,40 +1454,39 @@ def _render_add_popover(item: dict[str, Any], lang: str, realm_id: str) -> None:
         if on_hand is not None and on_hand <= 0:
             st.warning(f"{_t(lang, 'low_stock_warn')} ({_t(lang, 'in_stock')}: {_fmt_qty(qty_raw)})")
 
-        # Existing drafts first, so a started invoice is the easiest target.
-        try:
-            drafts = list_drafts(realm_id, limit=15)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Could not load drafts for add popover: %s", exc)
-            drafts = []
-        for draft in drafts:
-            draft_id = str(draft.get("id") or "")
-            doc = str(draft.get("proposed_doc_number") or "—")
-            customer = str(draft.get("customer_name") or "").strip()
-            label = f"📝 {_t(lang, 'add_to_draft')} #{doc}"
-            if customer:
-                label += f" · {customer}"
-            if st.button(label, key=f"add_draft_{draft_id}_{item_id}", use_container_width=True):
-                _add_item_to_draft(realm_id, draft_id, item)
-
+        # Primary action: start a brand-new invoice with this part on it.
         if st.button(
             f"🧾 {_t(lang, 'create_new_invoice')}",
             key=f"new_inv_{item_id}",
             use_container_width=True,
+            type="primary",
         ):
             for key in _INVOICE_FIELD_KEYS:
                 st.session_state.pop(key, None)
             st.session_state["shop_cart"] = []
             _cart_add(item)
             _go(_VIEW_NEW_INVOICE)
-        if st.button(
-            f"➕ {_t(lang, 'add_to_current')}",
-            key=f"add_cur_{item_id}",
-            use_container_width=True,
-        ):
-            _cart_add(item)
-            st.session_state["shop_cart_flash"] = _t(lang, "added_toast")
-            st.rerun()
+
+        # Otherwise add it to one of the existing drafts. Show up to 5 (newest
+        # first); if there are more, the count is noted so the list stays short.
+        try:
+            drafts = list_drafts(realm_id, limit=25)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not load drafts for add popover: %s", exc)
+            drafts = []
+        if drafts:
+            st.markdown(f"<div class='popover-section'>{_t(lang, 'add_to_draft')}</div>", unsafe_allow_html=True)
+            for draft in drafts[:5]:
+                draft_id = str(draft.get("id") or "")
+                doc = str(draft.get("proposed_doc_number") or "—")
+                customer = str(draft.get("customer_name") or "").strip()
+                label = f"📝 #{doc}"
+                if customer:
+                    label += f" · {customer}"
+                if st.button(label, key=f"add_draft_{draft_id}_{item_id}", use_container_width=True):
+                    _add_item_to_draft(realm_id, draft_id, item)
+            if len(drafts) > 5:
+                st.caption(_t(lang, "more_drafts").format(n=len(drafts) - 5))
 
 
 def _add_item_to_draft(realm_id: str, draft_id: str, item: dict[str, Any]) -> None:
