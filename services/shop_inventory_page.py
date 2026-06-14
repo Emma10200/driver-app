@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.28 (persist unit/VIN/miles/notes)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.29 (unified part search)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -1260,6 +1260,14 @@ def _negative_parts(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _filter_parts(parts: list[dict[str, Any]], term: str) -> list[dict[str, Any]]:
     """Contains-filter parts by SKU, item name, and sales/purchase description.
 
+    Mirrors how QuickBooks' item search behaves: a token matches if it appears
+    (as a substring) in the SKU, item name, fully-qualified name, sales
+    description, or purchase description. Every whitespace-separated token must
+    match somewhere (AND), so "brake pad" narrows to items mentioning both.
+
+    Light normalization collapses punctuation/spacing so a search for "00" also
+    matches "0-0" and "valeo" matches "VALEO," - direct, not heavily fuzzy.
+
     Done in Python over the cached part list so typing filters instantly without
     a database query per keystroke. Blank term returns the whole catalog.
     """
@@ -1267,15 +1275,28 @@ def _filter_parts(parts: list[dict[str, Any]], term: str) -> list[dict[str, Any]
     if not needle:
         return parts
     tokens = [t for t in needle.split() if t]
+    norm_tokens = [_collapse_alnum(t) for t in tokens]
+    fields = ("sku", "name", "fully_qualified_name", "sales_description", "purchase_description")
     out: list[dict[str, Any]] = []
     for item in parts:
-        haystack = " ".join(
-            str(item.get(field) or "")
-            for field in ("sku", "name", "sales_description", "purchase_description")
-        ).lower()
-        if all(tok in haystack for tok in tokens):
+        haystack = " ".join(str(item.get(field) or "") for field in fields).lower()
+        haystack_norm = _collapse_alnum(haystack)
+        if all(
+            (tok in haystack) or (ntok and ntok in haystack_norm)
+            for tok, ntok in zip(tokens, norm_tokens)
+        ):
             out.append(item)
     return out
+
+
+def _collapse_alnum(value: str) -> str:
+    """Lowercase and strip everything except letters/digits.
+
+    Lets "00" match "0-0" and "11r225" match "11R22.5" without being so fuzzy
+    that unrelated parts match.
+    """
+    return "".join(ch for ch in str(value).lower() if ch.isalnum())
+
 
 
 def _render_add_popover(item: dict[str, Any], lang: str, realm_id: str) -> None:
@@ -1799,7 +1820,9 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
 
     _render_invoice_locked_header(lang)
 
-    # --- Add parts: compact interactive search (kept small so it stays fast). ---
+    # --- Add parts: same search behaviour as the Inventory List (search name,
+    # SKU, and both descriptions over the cached catalog, with light "00"/"0-0"
+    # normalization). Kept as a flat list so it stays fast on a phone. ---
     add_term = st.text_input(
         _t(lang, "cart_search"),
         key="invoice_add_search",
@@ -1807,18 +1830,28 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
     ).strip()
     if add_term:
         try:
-            matches = _search_inventory(realm_id, add_term, 25)
+            parts = _all_active_parts(realm_id)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Invoice add-search failed: %s", exc)
-            matches = []
+            parts = []
+        matches = _filter_parts(parts, add_term)[:50]
+        if not matches:
+            st.caption(_t(lang, "no_results"))
         for item in matches:
             label_col, add_col = st.columns([4, 1])
             with label_col:
                 sku = str(item.get("sku") or "").strip()
                 name = str(item.get("name") or "").strip()
+                desc = str(
+                    item.get("sales_description") or item.get("purchase_description") or ""
+                ).strip()
                 price = _fmt_price(item.get("sales_price"))
-                bits = " · ".join(b for b in (f"{_t(lang, 'sku')} {sku}" if sku else "", name, price) if b)
-                st.markdown(bits or name or "—")
+                head = " · ".join(
+                    b for b in (f"{_t(lang, 'sku')} {sku}" if sku else "", name, price) if b
+                )
+                st.markdown(head or name or "—")
+                if desc:
+                    st.caption(_escape(desc))
             with add_col:
                 if st.button("➕", key=f"add_{item.get('qbo_item_id')}", use_container_width=True):
                     _cart_add(item)
