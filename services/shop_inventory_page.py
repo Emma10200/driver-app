@@ -72,7 +72,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.11 (short dates + sticky nav)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.12 (part history filters)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -1877,6 +1877,10 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
         st.caption("No cached purchase rows found for this part yet. Run Purchase History refresh after applying the purchase-history migration.")
     if not adjustments:
         st.caption("No cached inventory adjustments found for this part yet. Run the 0011 adjustment SQL migration, then Sync All.")
+    events = _filter_part_history_events(events, part_id)
+    if not events:
+        st.info("No part history matches the selected filters.")
+        return
     current_part_id = str(part.get("qbo_item_id") or "").strip()
     for idx, ev in enumerate(events[:250]):
         st.markdown(_part_event_html(ev), unsafe_allow_html=True)
@@ -1889,6 +1893,34 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
                 use_container_width=True,
             ):
                 _open_invoice_detail(invoice_id, return_part_id=current_part_id)
+
+
+def _filter_part_history_events(events: list[dict[str, Any]], part_id: str) -> list[dict[str, Any]]:
+    """Filter part history by independently selectable event-type toggles.
+
+    No selected toggles means no filter (show all). Selecting one, two, or all
+    three limits the list to exactly those history types.
+    """
+    safe_part_id = _collapse_alnum(part_id) or "part"
+    st.caption("Filter history")
+    sold_col, bought_col, adjusted_col = st.columns(3)
+    with sold_col:
+        show_sold = st.toggle("Sold", key=f"part_hist_filter_sold_{safe_part_id}")
+    with bought_col:
+        show_bought = st.toggle("Bought", key=f"part_hist_filter_bought_{safe_part_id}")
+    with adjusted_col:
+        show_adjusted = st.toggle("Adjusted", key=f"part_hist_filter_adjusted_{safe_part_id}")
+
+    selected: set[str] = set()
+    if show_sold:
+        selected.add("sold")
+    if show_bought:
+        selected.add("bought")
+    if show_adjusted:
+        selected.add("adjusted")
+    if not selected:
+        return events
+    return [ev for ev in events if str(ev.get("kind") or "") in selected]
 
 
 def _find_active_part(realm_id: str, part_id: str) -> dict[str, Any] | None:
