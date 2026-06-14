@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.55 (draft delete resets next #)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.56 (obvious Add Parts panel)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -88,6 +88,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "too_many_results": "Showing the maximum number of parts. Type to narrow the list.",
         "add_part_label": "Add a part",
         "add_part_help": "Search by part number, description or SKU, then pick to add.",
+        "add_parts_panel_title": "➕ Add parts to this invoice",
+        "add_parts_panel_help": "Search/pick a part below, then tap Add to invoice.",
         "li_line": "Line",
         "li_unit": "Rate",
         "li_ext": "Amount",
@@ -246,6 +248,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "too_many_results": "Показан е максималният брой части. Пишете, за да стесните списъка.",
         "add_part_label": "Добавете част",
         "add_part_help": "Търсете по номер, описание или SKU, след което изберете.",
+        "add_parts_panel_title": "➕ Добавете части към фактурата",
+        "add_parts_panel_help": "Търсете/изберете част долу, после натиснете Добави.",
         "li_line": "Ред",
         "li_unit": "Цена",
         "li_ext": "Сума",
@@ -525,6 +529,16 @@ _MOBILE_CSS = """
       font-weight: 750;
       color: #1f2933;
       overflow-wrap: anywhere;
+  }
+
+  /* Invoice Add Parts panel: make the part-entry area visually obvious without
+     making the phone screen feel heavy. */
+  .add-parts-title {
+      font-size: 1.22rem;
+      font-weight: 800;
+      color: #1f2933;
+      line-height: 1.25;
+      margin-bottom: 0.15rem;
   }
 
   /* Add-popover "Add to draft" section label. */
@@ -2227,30 +2241,33 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
 
     nonce = int(st.session_state.get("invoice_part_nonce", 0))
     pick_key = f"invoice_part_pick_{nonce}"
-    add_part_slot = st.empty()
-    picked = st.selectbox(
-        _t(lang, "add_part_label"),
-        [""] + part_labels,
-        key=pick_key,
-        index=0,
-        placeholder=_t(lang, "add_part_help"),
-        accept_new_options=False,
-        filter_mode="contains",
-    )
-    if picked and picked in part_by_label:
-        with add_part_slot.container():
-            item = part_by_label[picked]
-            if st.button(
-                f"➕ {_t(lang, 'add_to_invoice')}",
-                key=f"add_picked_top_{nonce}",
-                use_container_width=True,
-                type="primary",
-            ):
-                _cart_add(item)
-                # Bump the nonce so the dropdown resets to blank for the next part.
-                st.session_state["invoice_part_nonce"] = nonce + 1
-                st.session_state["shop_cart_flash"] = _t(lang, "added_toast")
-                st.rerun()
+    with st.container(border=True):
+        st.markdown(f"<div class='add-parts-title'>{_t(lang, 'add_parts_panel_title')}</div>", unsafe_allow_html=True)
+        st.caption(_t(lang, "add_parts_panel_help"))
+        add_part_slot = st.empty()
+        picked = st.selectbox(
+            _t(lang, "add_part_label"),
+            [""] + part_labels,
+            key=pick_key,
+            index=0,
+            placeholder=_t(lang, "add_part_help"),
+            accept_new_options=False,
+            filter_mode="contains",
+        )
+        if picked and picked in part_by_label:
+            with add_part_slot.container():
+                item = part_by_label[picked]
+                if st.button(
+                    f"➕ {_t(lang, 'add_to_invoice')}",
+                    key=f"add_picked_top_{nonce}",
+                    use_container_width=True,
+                    type="primary",
+                ):
+                    _cart_add(item)
+                    # Bump the nonce so the dropdown resets to blank for the next part.
+                    st.session_state["invoice_part_nonce"] = nonce + 1
+                    st.session_state["shop_cart_flash"] = _t(lang, "added_toast")
+                    st.rerun()
 
     st.markdown(f"<div class='shop-title'>{_t(lang, 'cart_title')}</div>", unsafe_allow_html=True)
     cart = _cart()
