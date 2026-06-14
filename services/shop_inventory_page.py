@@ -58,7 +58,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.20 (VIN normalization)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.21 (live inventory search)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -602,6 +602,44 @@ def _search_inventory(realm_id: str, term: str, limit: int) -> list[dict[str, An
     return payload if isinstance(payload, list) else []
 
 
+@st.cache_data(ttl=_REALM_CACHE_TTL, show_spinner=False)
+def _all_active_parts(realm_id: str) -> list[dict[str, Any]]:
+    """Load every active part once (one query, cached) for live type-to-filter.
+
+    The inventory live-search dropdown filters this in the browser per keystroke,
+    so there are no per-keystroke database queries.
+    """
+    if not realm_id:
+        return []
+    supabase = SupabaseRestClient()
+    rows = supabase.select(
+        "shop_inventory",
+        select="qbo_item_id,sku,name,sales_description,purchase_description,sales_price,qty_on_hand,reorder_point,purchase_cost",
+        filters={"realm_id": f"eq.{realm_id}", "active": "eq.true"},
+        order="sku.asc,name.asc",
+        limit=5000,
+    )
+    return rows
+
+
+@st.cache_data(ttl=_REALM_CACHE_TTL, show_spinner=False)
+def _active_part_options(realm_id: str) -> tuple[list[str], dict[str, dict[str, Any]]]:
+    """Return (labels, label->item) for the live-filter dropdown."""
+    labels: list[str] = []
+    by_label: dict[str, dict[str, Any]] = {}
+    for item in _all_active_parts(realm_id):
+        sku = str(item.get("sku") or "").strip()
+        name = str(item.get("name") or "").strip()
+        desc = str(item.get("sales_description") or item.get("purchase_description") or "").strip()
+        label = " · ".join(b for b in (f"SKU {sku}" if sku else "", name, desc) if b) or name or sku
+        # Keep labels unique so selection maps to exactly one part.
+        if label in by_label:
+            label = f"{label}  ·  [{item.get('qbo_item_id')}]"
+        labels.append(label)
+        by_label[label] = item
+    return labels, by_label
+
+
 @st.cache_data(ttl=_SEARCH_CACHE_TTL, show_spinner=False)
 def _last_synced(realm_id: str) -> str:
     supabase = SupabaseRestClient()
@@ -1040,28 +1078,48 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
         st.info(_t(lang, "not_connected"))
         return
 
-    # Live search: the keyed text input reruns as the value changes, so the list
-    # filters without pressing a separate Search button.
-    term = st.text_input(
+    _show_refresh_flash()
+
+    # Live, type-to-filter search: the dropdown filters its options in the browser
+    # on every keystroke (no per-key database calls). Parts are loaded once and
+    # cached. Selecting a part shows it as a card with the green Add button.
+    try:
+        labels, by_label = _active_part_options(realm_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not load parts for live search: %s", exc)
+        labels, by_label = [], {}
+
+    picked_label = st.selectbox(
         _t(lang, "search_label"),
-        key="shop_search_term",
+        [""] + labels,
+        index=0,
+        key="shop_live_search",
         placeholder=_t(lang, "search_placeholder"),
         label_visibility="collapsed",
-    ).strip()
+        filter_mode="contains",
+    )
 
-    _show_refresh_flash()
     if st.button(f"\U0001f504 {_t(lang, 'refresh')}", use_container_width=True):
+        _all_active_parts.clear()
+        _active_part_options.clear()
         _run_refresh(realm_id, lang)
 
-    # Reset how many cards are shown whenever the search term changes, so a new
-    # search always starts at the top with the first page.
+    # When a part is picked from the live dropdown, show just that part + add.
+    if picked_label and picked_label in by_label:
+        item = by_label[picked_label]
+        card_col, add_col = st.columns([5, 2])
+        with card_col:
+            st.markdown(_card_html(item, lang), unsafe_allow_html=True)
+        with add_col:
+            _render_add_popover(item, lang, realm_id)
+        return
+
+    # No selection: browse the catalog (first page of cards).
+    term = ""
     if st.session_state.get("shop_last_term") != term:
         st.session_state["shop_last_term"] = term
         st.session_state["shop_visible_count"] = _PAGE_SIZE
     visible_count = int(st.session_state.get("shop_visible_count", _PAGE_SIZE))
-
-    # Fetch one extra row beyond what we show so we know whether a "Show more"
-    # button is warranted without a separate count query.
     fetch_limit = min(visible_count + 1, _MAX_RESULTS + 1)
     try:
         items = _search_inventory(realm_id, term, fetch_limit)
@@ -1074,11 +1132,8 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
     freshness = last_run.replace("T", " ")[:16] if last_run else _t(lang, "never")
     st.caption(f"{_t(lang, 'updated')}: {freshness}")
 
-    if not term and not items:
-        st.info(_t(lang, "type_to_search"))
-        return
     if not items:
-        st.warning(_t(lang, "no_results"))
+        st.info(_t(lang, "type_to_search"))
         return
 
     has_more = len(items) > visible_count
@@ -1090,22 +1145,10 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
     else:
         st.caption(f"{_t(lang, 'showing')} {shown} {_t(lang, 'results')}")
 
-    # When the list is narrowed by a search to a manageable size, render each
-    # card with a real interactive "+" offering Start new / Add to current
-    # invoice. When browsing the whole catalog, render fast batched HTML so the
-    # phone stays smooth (per-row widgets are far heavier than HTML).
-    _INTERACTIVE_MAX = 25
-    if term and shown <= _INTERACTIVE_MAX:
-        _show_cart_flash()
-        for item in visible_items:
-            card_col, add_col = st.columns([5, 2])
-            with card_col:
-                st.markdown(_card_html(item, lang), unsafe_allow_html=True)
-            with add_col:
-                _render_add_popover(item, lang, realm_id)
-    else:
-        cards_html = "".join(_card_html(item, lang) for item in visible_items)
-        st.markdown(cards_html, unsafe_allow_html=True)
+    # Browsing the whole catalog: render fast batched HTML so the phone stays
+    # smooth. To add a part, the user searches it in the live dropdown above.
+    cards_html = "".join(_card_html(item, lang) for item in visible_items)
+    st.markdown(cards_html, unsafe_allow_html=True)
 
     if has_more:
         if st.button(
