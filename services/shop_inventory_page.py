@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.53 (pencil above invoice header)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.54 (customer suggestion blocks)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -2555,9 +2555,25 @@ def _render_invoice_customer_step(lang: str, realm_id: str) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("Vehicle customer suggestions failed: %s", exc)
 
+    if suggestions:
+        st.markdown(f"#### {_t(lang, 'customer_suggestions')}")
+        for idx, name in enumerate(suggestions):
+            clean_name = str(name or "").strip()
+            if not clean_name:
+                continue
+            if st.button(
+                f"👤 {clean_name}",
+                key=f"customer_suggestion_{idx}_{_collapse_alnum(clean_name)}",
+                use_container_width=True,
+            ):
+                st.session_state["invoice_customer"] = clean_name
+                st.session_state["invoice_customer_is_new"] = False
+                st.session_state["invoice_step"] = "parts"
+                st.rerun()
+
     customer_options: list[str] = []
     try:
-        for name in (*suggestions, *_cached_customer_names(realm_id)):
+        for name in _cached_customer_names(realm_id):
             if name and name not in customer_options:
                 customer_options.append(name)
     except Exception as exc:  # noqa: BLE001
@@ -2567,7 +2583,8 @@ def _render_invoice_customer_step(lang: str, realm_id: str) -> None:
         st.info(_t(lang, "customer_not_listed"))
     picked = st.selectbox(
         _t(lang, "customer"),
-        customer_options or [""],
+        [""] + customer_options,
+        index=0,
         key="invoice_customer_pick",
         placeholder=_t(lang, "customer_search"),
         accept_new_options=True,
