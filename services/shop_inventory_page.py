@@ -33,9 +33,14 @@ from qbo.shop_invoices import (
     next_invoice_number,
 )
 from qbo.shop_invoice_history_sync import sync_shop_invoice_history
+from qbo.shop_inventory_adjustment_sync import sync_shop_inventory_adjustments
 from qbo.shop_purchase_history_sync import sync_shop_purchase_history
 from services.qbo_supabase import SupabaseRestClient
 from services.shop_customer_cache import customer_names, last_customer_sync
+from services.shop_inventory_adjustment_cache import (
+    last_inventory_adjustment_sync,
+    list_cached_inventory_adjustments,
+)
 from services.shop_invoice_history_cache import (
     get_cached_invoice,
     last_invoice_history_sync,
@@ -67,7 +72,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.07 (purchase full re-pull + account lines)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.08 (part sold history + smooth detail)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -1085,12 +1090,10 @@ def _card_html(
         f"<a class='part-web-search' href='{_escape(search_url)}' target='_blank' "
         f"rel='noopener noreferrer' title='Search web for this part' aria-label='Search web for this part'>🔎</a>"
     )
-    part_id = str(item.get("qbo_item_id") or "").strip()
-    detail_href = f"?shop=1&v={_VIEW_PART_DETAIL}&part_id={quote_plus(part_id)}" if part_id else "#"
     header_html = (
         f"<div class='part-header'>"
         f"<span class='part-head-main'>"
-        f"<a class='part-name part-detail-link' href='{_escape(detail_href)}'>{_escape(name)}</a>{sku_html}"
+        f"<span class='part-name'>{_escape(name)}</span>{sku_html}"
         f"</span>"
         f"{search_html}"
         f"</div>"
@@ -1309,7 +1312,7 @@ def _run_sync_all(realm_id: str, lang: str) -> None:
 
     Each sync uses its own Supabase high-water cursor (QBO LastUpdatedTime), so
     after the initial full pulls this is gentle: it only asks QuickBooks for
-    changed Inventory Items, Invoices, Purchases, and Customers.
+    changed Inventory Items, Invoices, Purchases, Inventory Adjustments, and Customers.
     """
     if not realm_id:
         st.warning(_t(lang, "not_connected"))
@@ -1318,6 +1321,7 @@ def _run_sync_all(realm_id: str, lang: str) -> None:
         inventory = sync_shop_inventory(realm_id)
         invoices = sync_shop_invoice_history(realm_id)
         purchases = sync_shop_purchase_history(realm_id)
+        adjustments = sync_shop_inventory_adjustments(realm_id)
         customers = sync_shop_customers(realm_id)
 
     _search_inventory.clear()
@@ -1329,6 +1333,8 @@ def _run_sync_all(realm_id: str, lang: str) -> None:
     _cached_invoice_history_synced_at.clear()
     _cached_recent_purchases.clear()
     _cached_purchase_history_synced_at.clear()
+    _cached_recent_adjustments.clear()
+    _cached_inventory_adjustment_synced_at.clear()
     _cached_customer_names.clear()
     _cached_customer_search.clear()
     _cached_customer_synced_at.clear()
@@ -1345,9 +1351,14 @@ def _run_sync_all(realm_id: str, lang: str) -> None:
         int(getattr(inventory, "items_upserted", 0) or 0)
         + int(getattr(invoices, "invoices_upserted", 0) or 0)
         + int(getattr(purchases, "purchases_upserted", 0) or 0)
+        + int(getattr(adjustments, "adjustments_upserted", 0) or 0)
         + int(getattr(customers, "customers_upserted", 0) or 0)
     )
     st.success(f"{_t(lang, 'sync_all_done')} (+{changed})")
+    if getattr(adjustments, "status", "") == "skipped":
+        st.warning(getattr(adjustments, "message", "Run migration 0011 to enable inventory adjustments."))
+    elif getattr(adjustments, "status", "") not in ("", "success"):
+        st.warning(f"Inventory adjustment sync issue: {getattr(adjustments, 'message', '')}")
 
 
 def _shop_app_url() -> str:
@@ -1400,6 +1411,30 @@ def _go(view: str) -> None:
     else:
         st.query_params["v"] = view
     st.rerun()
+
+
+def _open_part_detail(part_id: str) -> None:
+    """Open part detail through Streamlit state instead of a raw HTML link."""
+    part_id = str(part_id or "").strip()
+    if not part_id:
+        return
+    st.session_state["shop_allow_url_view"] = True
+    st.query_params["v"] = _VIEW_PART_DETAIL
+    st.query_params["part_id"] = part_id
+    st.rerun()
+
+
+def _open_invoice_detail(invoice_id: str, *, return_part_id: str = "") -> None:
+    """Open invoice detail and optionally remember the part to return to."""
+    invoice_id = str(invoice_id or "").strip()
+    if not invoice_id:
+        return
+    st.session_state["shop_invoice_id"] = invoice_id
+    if return_part_id:
+        st.session_state["shop_invoice_return_part_id"] = str(return_part_id or "").strip()
+    else:
+        st.session_state.pop("shop_invoice_return_part_id", None)
+    _go(_VIEW_INVOICE_DETAIL)
 
 
 def _open_app_square_html(lang: str) -> str:
@@ -1715,6 +1750,14 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
                 ),
                 unsafe_allow_html=True,
             )
+            part_id = str(item.get("qbo_item_id") or "").strip()
+            if part_id and st.button(
+                "📜 History",
+                key=f"part_history_{part_id}",
+                use_container_width=True,
+                help="Open this part's bought and sold history.",
+            ):
+                _open_part_detail(part_id)
             _render_add_popover(item, lang, realm_id)
 
     if has_more:
@@ -1744,15 +1787,28 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
     with st.spinner("Loading part history…"):
         sales = _part_sales_events(realm_id, part)
         purchases = _part_purchase_events(realm_id, part)
-    events = sorted([*sales, *purchases], key=lambda ev: (ev.get("date", ""), ev.get("doc", "")), reverse=True)
+        adjustments = _part_adjustment_events(realm_id, part)
+    events = sorted([*sales, *purchases, *adjustments], key=lambda ev: (ev.get("date", ""), ev.get("doc", "")), reverse=True)
 
     if not events:
         st.info("No sales or purchase history found for this synced part yet.")
         return
     if not purchases:
         st.caption("No cached purchase rows found for this part yet. Run Purchase History refresh after applying the purchase-history migration.")
-    for ev in events[:250]:
+    if not adjustments:
+        st.caption("No cached inventory adjustments found for this part yet. Run the 0011 adjustment SQL migration, then Sync All.")
+    current_part_id = str(part.get("qbo_item_id") or "").strip()
+    for idx, ev in enumerate(events[:250]):
         st.markdown(_part_event_html(ev), unsafe_allow_html=True)
+        invoice_id = str(ev.get("invoice_id") or "").strip()
+        if ev.get("kind") == "sold" and invoice_id:
+            doc = str(ev.get("doc") or invoice_id).strip()
+            if st.button(
+                f"🔍 Open invoice {doc}",
+                key=f"part_sale_invoice_{invoice_id}_{idx}",
+                use_container_width=True,
+            ):
+                _open_invoice_detail(invoice_id, return_part_id=current_part_id)
 
 
 def _find_active_part(realm_id: str, part_id: str) -> dict[str, Any] | None:
@@ -1771,7 +1827,7 @@ def _part_match_names(part: dict[str, Any]) -> set[str]:
 
 
 def _part_sales_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, Any]]:
-    names = _part_match_names(part)
+    part_id = str(part.get("qbo_item_id") or "")
     events: list[dict[str, Any]] = []
     for inv in list_cached_invoices(realm_id, limit=2000):
         lines = inv.get("line_items") or []
@@ -1779,13 +1835,13 @@ def _part_sales_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, An
         if not lines:
             lines = [line for line in (raw.get("Line") or []) if str(line.get("DetailType") or "") == "SalesItemLineDetail"]
         for line in lines:
-            item_name = _line_item_name(line)
-            if item_name.lower() not in names:
+            if not _sales_line_matches_part(line, part, part_id):
                 continue
             qty, rate, amount = _line_item_qty_rate_amount(line)
             events.append(
                 {
                     "kind": "sold",
+                    "invoice_id": str(inv.get("qbo_invoice_id") or inv.get("Id") or ""),
                     "date": str(inv.get("txn_date") or inv.get("TxnDate") or ""),
                     "doc": str(inv.get("doc_number") or inv.get("DocNumber") or ""),
                     "name": _invoice_customer_name(inv),
@@ -1796,6 +1852,16 @@ def _part_sales_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, An
                 }
             )
     return events
+
+
+def _sales_line_matches_part(line: dict[str, Any], part: dict[str, Any], part_id: str) -> bool:
+    item_name, item_id = _sales_line_item_ref(line)
+    if part_id and item_id == part_id:
+        return True
+    names = _part_match_names(part)
+    if item_name.lower() in names:
+        return True
+    return _line_text_matches_part(line, part)
 
 
 def _part_purchase_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1829,6 +1895,53 @@ def _part_purchase_events(realm_id: str, part: dict[str, Any]) -> list[dict[str,
     return events
 
 
+def _part_adjustment_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, Any]]:
+    part_id = str(part.get("qbo_item_id") or "")
+    events: list[dict[str, Any]] = []
+    try:
+        docs = _cached_recent_adjustments(realm_id, 2000)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Inventory adjustment cache unavailable: %s", exc)
+        return []
+    for doc in docs:
+        account = str(doc.get("adjust_account_name") or "Inventory adjustment")
+        date = str(doc.get("txn_date") or doc.get("TxnDate") or doc.get("AdjustmentDate") or "")
+        doc_no = str(doc.get("doc_number") or doc.get("DocNumber") or doc.get("ReferenceNumber") or doc.get("qbo_adjustment_id") or doc.get("Id") or "")
+        memo = str(doc.get("reason") or doc.get("private_note") or doc.get("PrivateNote") or "")
+        lines = doc.get("line_items") or []
+        if not lines:
+            raw = doc.get("raw") if isinstance(doc.get("raw"), dict) else doc
+            lines = raw.get("Line") or []
+        for line in lines:
+            if not _adjustment_line_matches_part(line, part, part_id):
+                continue
+            qty = _adjustment_line_qty_diff(line)
+            line_memo = str(line.get("description") or line.get("Description") or memo or "")
+            events.append(
+                {
+                    "kind": "adjusted",
+                    "date": date,
+                    "doc": doc_no,
+                    "name": account,
+                    "qty": qty,
+                    "rate": None,
+                    "amount": None,
+                    "memo": line_memo,
+                }
+            )
+    return events
+
+
+def _adjustment_line_matches_part(line: dict[str, Any], part: dict[str, Any], part_id: str) -> bool:
+    item_name, item_id = _adjustment_line_item_ref(line)
+    if part_id and item_id == part_id:
+        return True
+    names = _part_match_names(part)
+    if item_name.lower() in names:
+        return True
+    return _line_text_matches_part(line, part)
+
+
 def _purchase_line_matches_part(line: dict[str, Any], part: dict[str, Any], part_id: str) -> bool:
     item_name, item_id = _purchase_line_item_ref(line)
     if part_id and item_id == part_id:
@@ -1836,6 +1949,10 @@ def _purchase_line_matches_part(line: dict[str, Any], part: dict[str, Any], part
     names = _part_match_names(part)
     if item_name.lower() in names:
         return True
+    return _line_text_matches_part(line, part)
+
+
+def _line_text_matches_part(line: dict[str, Any], part: dict[str, Any]) -> bool:
     blob = _line_item_search_text(line)
     haystack = blob.lower()
     haystack_norm = _collapse_alnum(blob)
@@ -1852,6 +1969,33 @@ def _purchase_line_matches_part(line: dict[str, Any], part: dict[str, Any], part
         if needle_norm and len(needle_norm) >= 4 and needle_norm in haystack_norm:
             return True
     return False
+
+
+def _sales_line_item_ref(line: dict[str, Any]) -> tuple[str, str]:
+    if line.get("item_name") or line.get("item_id"):
+        return str(line.get("item_name") or "").strip(), str(line.get("item_id") or "").strip()
+    detail = line.get("SalesItemLineDetail") or {}
+    item_ref = detail.get("ItemRef") or {}
+    if isinstance(item_ref, dict):
+        return str(item_ref.get("name") or "").strip(), str(item_ref.get("value") or "").strip()
+    return "", ""
+
+
+def _adjustment_line_item_ref(line: dict[str, Any]) -> tuple[str, str]:
+    if line.get("item_name") or line.get("item_id"):
+        return str(line.get("item_name") or "").strip(), str(line.get("item_id") or "").strip()
+    detail = line.get("ItemAdjustmentLineDetail") or {}
+    item_ref = detail.get("ItemRef") or {}
+    if isinstance(item_ref, dict):
+        return str(item_ref.get("name") or "").strip(), str(item_ref.get("value") or "").strip()
+    return "", ""
+
+
+def _adjustment_line_qty_diff(line: dict[str, Any]) -> Any:
+    if "qty_diff" in line:
+        return line.get("qty_diff")
+    detail = line.get("ItemAdjustmentLineDetail") or {}
+    return detail.get("QtyDiff") if isinstance(detail, dict) else None
 
 
 def _line_item_name(line: Any) -> str:
@@ -1901,13 +2045,15 @@ def _purchase_vendor_name(doc: dict[str, Any]) -> str:
 def _part_event_html(ev: dict[str, Any]) -> str:
     kind = str(ev.get("kind") or "")
     is_sale = kind == "sold"
-    badge = "Sold" if is_sale else "Bought"
-    badge_cls = "badge-price" if is_sale else "badge-stock"
+    is_adjustment = kind == "adjusted"
+    badge = "Sold" if is_sale else "Adjusted" if is_adjustment else "Bought"
+    badge_cls = "badge-price" if is_sale else "badge-draft" if is_adjustment else "badge-stock"
     who = str(ev.get("name") or "—")
     qty = _fmt_qty(ev.get("qty")) or "—"
     amount = _fmt_price(ev.get("amount"))
     rate = _fmt_price(ev.get("rate"))
-    bits = [f"Qty: {qty}"]
+    qty_label = "Qty Δ" if is_adjustment else "Qty"
+    bits = [f"{qty_label}: {qty}"]
     if rate:
         bits.append(f"Rate: {rate}")
     if amount:
@@ -2108,6 +2254,11 @@ def _cached_recent_purchases(realm_id: str, limit: int) -> list[dict[str, Any]]:
 
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_recent_adjustments(realm_id: str, limit: int) -> list[dict[str, Any]]:
+    return list_cached_inventory_adjustments(realm_id, limit=limit)
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
 def _cached_next_invoice_number(realm_id: str) -> int | None:
     qbo_client, _, _ = build_services()
     next_no = next_invoice_number(qbo_client, realm_id)
@@ -2159,6 +2310,11 @@ def _cached_invoice_history_synced_at(realm_id: str) -> str:
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
 def _cached_purchase_history_synced_at(realm_id: str) -> str:
     return last_purchase_history_sync(realm_id)
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_inventory_adjustment_synced_at(realm_id: str) -> str:
+    return last_inventory_adjustment_sync(realm_id)
 
 
 @st.cache_data(ttl=_REALM_CACHE_TTL, show_spinner=False)
@@ -2385,8 +2541,7 @@ def _render_history_view(lang: str, realm_id: str) -> None:
                 key=f"inv_detail_{inv_id}",
                 use_container_width=True,
         ):
-            st.session_state["shop_invoice_id"] = inv_id
-            _go(_VIEW_INVOICE_DETAIL)
+            _open_invoice_detail(inv_id)
 
 
 def _render_purchase_history_view(lang: str, realm_id: str) -> None:
@@ -2616,7 +2771,7 @@ def _line_item_search_text(line: Any) -> str:
     if not isinstance(line, dict):
         return str(line or "")
     parts: list[str] = []
-    for key in ("item_id", "item_name", "name", "account_name", "description", "Description"):
+    for key in ("item_id", "item_name", "name", "account_name", "description", "Description", "qty_diff"):
         value = line.get(key)
         if value:
             parts.append(str(value))
@@ -2626,6 +2781,13 @@ def _line_item_search_text(line: Any) -> str:
         if isinstance(item_ref, dict):
             parts.append(str(item_ref.get("name") or ""))
             parts.append(str(item_ref.get("value") or ""))
+    detail = line.get("ItemAdjustmentLineDetail")
+    if isinstance(detail, dict):
+        item_ref = detail.get("ItemRef")
+        if isinstance(item_ref, dict):
+            parts.append(str(item_ref.get("name") or ""))
+            parts.append(str(item_ref.get("value") or ""))
+        parts.append(str(detail.get("QtyDiff") or ""))
     item_ref = line.get("ItemRef")
     if isinstance(item_ref, dict):
         parts.append(str(item_ref.get("name") or ""))
@@ -2700,14 +2862,22 @@ def _render_invoice_detail_view(lang: str, realm_id: str) -> None:
     _render_view_header(lang, "history_title")
 
     inv_id = (_query_param_value("invoice_id") or str(st.session_state.get("shop_invoice_id") or "")).strip()
+    return_part_id = str(st.session_state.get("shop_invoice_return_part_id") or "").strip()
+    back_label = "Part detail" if return_part_id else _t(lang, "card_history")
     if not realm_id or not inv_id:
         st.info(_t(lang, "detail_error"))
-        if st.button(f"⬅ {_t(lang, 'card_history')}", key="detail_back_hist"):
-            _go(_VIEW_HISTORY)
+        if st.button(f"⬅ {back_label}", key="detail_back_hist"):
+            if return_part_id:
+                _open_part_detail(return_part_id)
+            else:
+                _go(_VIEW_HISTORY)
         return
 
-    if st.button(f"⬅ {_t(lang, 'card_history')}", key="detail_back_hist_top"):
-        _go(_VIEW_HISTORY)
+    if st.button(f"⬅ {back_label}", key="detail_back_hist_top"):
+        if return_part_id:
+            _open_part_detail(return_part_id)
+        else:
+            _go(_VIEW_HISTORY)
 
     try:
         with st.spinner(_t(lang, "history_loading")):
