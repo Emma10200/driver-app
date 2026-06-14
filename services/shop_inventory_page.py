@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.27 (sticky search + add on card)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.28 (persist unit/VIN/miles/notes)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -1901,6 +1901,11 @@ _INVOICE_FIELD_KEYS = (
     "invoice_vin",
     "invoice_miles",
     "invoice_notes",
+    # Vehicle-step widget mirrors (see _render_invoice_vehicle_step).
+    "invoice_truck_w",
+    "invoice_vin_w",
+    "invoice_miles_w",
+    "invoice_notes_w",
     "invoice_customer",
     "invoice_customer_is_new",
     "invoice_customer_pick",
@@ -1920,9 +1925,23 @@ def _start_new_invoice() -> None:
 
 
 def _render_invoice_vehicle_step(lang: str) -> None:
+    # The vehicle widgets live ONLY on this step. Streamlit drops a widget's
+    # session_state value once the widget stops rendering, so we keep the real
+    # values in persistent "stable" keys and bind the widgets to separate "_w"
+    # keys, seeded from the stable keys and copied back on Next.
+    _VEHICLE_FIELD_PAIRS = (
+        ("invoice_truck", "invoice_truck_w"),
+        ("invoice_vin", "invoice_vin_w"),
+        ("invoice_miles", "invoice_miles_w"),
+        ("invoice_notes", "invoice_notes_w"),
+    )
+    for stable, widget in _VEHICLE_FIELD_PAIRS:
+        if widget not in st.session_state:
+            st.session_state[widget] = str(st.session_state.get(stable) or "")
+
     st.text_input(_t(lang, "invoice_no"), key="invoice_doc_number")
-    unit_now = str(st.session_state.get("invoice_truck") or "")
-    vin_now = str(st.session_state.get("invoice_vin") or "")
+    unit_now = str(st.session_state.get("invoice_truck_w") or "")
+    vin_now = str(st.session_state.get("invoice_vin_w") or "")
     try:
         realm_id = _cached_shop_realm_id()
         suggestions = _cached_vehicle_field_suggestions(realm_id, unit_now, vin_now)
@@ -1932,12 +1951,12 @@ def _render_invoice_vehicle_step(lang: str) -> None:
 
     unit_col, vin_col, miles_col = st.columns(3)
     with unit_col:
-        _vehicle_field_popover(lang, "invoice_truck", "truck_unit", suggestions.get("units", []))
+        _vehicle_field_popover(lang, "invoice_truck_w", "truck_unit", suggestions.get("units", []))
     with vin_col:
-        _vehicle_field_popover(lang, "invoice_vin", "vin", suggestions.get("vins", []))
+        _vehicle_field_popover(lang, "invoice_vin_w", "vin", suggestions.get("vins", []))
     with miles_col:
         # Miles is a free-typed value (NOT a dropdown).
-        st.text_input(_t(lang, "miles"), key="invoice_miles")
+        st.text_input(_t(lang, "miles"), key="invoice_miles_w")
 
     # Show the previous miles only once a VIN is entered (a unit alone is not
     # specific enough - lots of units overlap). Match strictly on the VIN.
@@ -1956,8 +1975,12 @@ def _render_invoice_vehicle_step(lang: str) -> None:
                 bits.append(prior["date"])
             st.info(f"{_t(lang, 'prior_invoice')}: " + " · ".join(bits))
 
-    st.text_area(_t(lang, "notes"), key="invoice_notes", height=80)
+    st.text_area(_t(lang, "notes"), key="invoice_notes_w", height=80)
     if st.button(f"➡ {_t(lang, 'next')}", use_container_width=True, type="primary"):
+        # Persist the widget values into the stable keys BEFORE the widgets are
+        # torn down on the next step (otherwise unit/VIN/miles/notes vanish).
+        for stable, widget in _VEHICLE_FIELD_PAIRS:
+            st.session_state[stable] = str(st.session_state.get(widget) or "").strip()
         st.session_state["invoice_step"] = "customer"
         st.rerun()
 
