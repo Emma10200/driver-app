@@ -36,6 +36,7 @@ class SupabaseRestClient:
         filters: dict[str, Any] | None = None,
         order: str = "",
         limit: int | None = None,
+        offset: int | None = None,
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"select": select}
         for key, value in (filters or {}).items():
@@ -44,9 +45,46 @@ class SupabaseRestClient:
             params["order"] = order
         if limit is not None:
             params["limit"] = int(limit)
+        if offset is not None:
+            params["offset"] = int(offset)
         response = self._request("GET", f"/{table}?{urlencode(params)}")
         payload = response.json()
         return payload if isinstance(payload, list) else []
+
+    def select_all(
+        self,
+        table: str,
+        *,
+        select: str = "*",
+        filters: dict[str, Any] | None = None,
+        order: str = "",
+        page_size: int = 1000,
+        hard_cap: int = 100000,
+    ) -> list[dict[str, Any]]:
+        """Fetch EVERY matching row, paging past PostgREST's server max-rows cap.
+
+        Supabase/PostgREST enforces a server-side ``max-rows`` limit (commonly
+        1000). A single ``select(limit=5000)`` is silently truncated to that cap,
+        so large tables (e.g. a 4000-part catalog) come back incomplete. This
+        loops with ``offset`` until a short page (or the hard cap) is reached.
+        """
+        out: list[dict[str, Any]] = []
+        offset = 0
+        page_size = max(1, int(page_size))
+        while offset < hard_cap:
+            page = self.select(
+                table,
+                select=select,
+                filters=filters,
+                order=order,
+                limit=page_size,
+                offset=offset,
+            )
+            out.extend(page)
+            if len(page) < page_size:
+                break
+            offset += page_size
+        return out
 
     def insert(self, table: str, rows: dict[str, Any] | list[dict[str, Any]]) -> list[dict[str, Any]]:
         response = self._request(

@@ -54,12 +54,12 @@ logger = logging.getLogger(__name__)
 
 _PAGE_SIZE = 250  # how many cards on first load and per "Show more"
 _INVENTORY_PAGE = 60  # inventory shows fewer per page since each row has an Add button
-_MAX_RESULTS = 2500  # hard ceiling so a runaway list can't lock up the phone
+_MAX_RESULTS = 6000  # hard ceiling so a runaway list can't lock up the phone
 _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.31 (full re-sync button, cache clears)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.32 (paginate reads, stock+SKU sort)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -743,12 +743,11 @@ def _all_active_parts(realm_id: str) -> list[dict[str, Any]]:
     if not realm_id:
         return []
     supabase = SupabaseRestClient()
-    rows = supabase.select(
+    rows = supabase.select_all(
         "shop_inventory",
         select="qbo_item_id,sku,name,fully_qualified_name,sales_description,purchase_description,sales_price,qty_on_hand,reorder_point,purchase_cost",
         filters={"realm_id": f"eq.{realm_id}", "active": "eq.true"},
         order="sku.asc,name.asc",
-        limit=5000,
     )
     return rows
 
@@ -1302,6 +1301,7 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
         if not items:
             st.info(_t(lang, "no_results") if term else _t(lang, "type_to_search"))
             return
+        items = _sort_inventory(items)
 
     # Render the FULL result set (search already covers every cached part, not
     # just a page). Capped only as a safety valve against a pathological catalog.
@@ -1402,6 +1402,30 @@ def _collapse_alnum(value: str) -> str:
     that unrelated parts match.
     """
     return "".join(ch for ch in str(value).lower() if ch.isalnum())
+
+
+def _sort_inventory(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sort the inventory list: in stock first, then by SKU, then by item name.
+
+    1) Stock status (primary): items in stock (qty > 0, or quantity not tracked)
+       come before out-of-stock items.
+    2) SKU (secondary): ascending; items with no SKU sort after those that have
+       one so the shelf-numbered parts lead.
+    3) Item name (tertiary): alphabetical tiebreak.
+    """
+
+    def key(item: dict[str, Any]):
+        qty_raw = item.get("qty_on_hand")
+        try:
+            qty = float(qty_raw) if qty_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            qty = None
+        out_of_stock = 1 if (qty is not None and qty <= 0) else 0
+        sku = str(item.get("sku") or "").strip().lower()
+        name = str(item.get("fully_qualified_name") or item.get("name") or "").strip().lower()
+        return (out_of_stock, sku == "", sku, name)
+
+    return sorted(parts, key=key)
 
 
 

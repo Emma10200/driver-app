@@ -39,12 +39,11 @@ def customer_names(realm_id: str, term: str = "", *, limit: int = 25) -> list[st
 
     if not str(term or "").strip():
         supabase = SupabaseRestClient()
-        rows = supabase.select(
+        rows = supabase.select_all(
             _TABLE,
             select="display_name,fully_qualified_name,company_name",
             filters={"realm_id": f"eq.{realm_id}", "active": "eq.true"},
             order="display_name.asc",
-            limit=max(int(limit or 5000), 5000),
         )
     else:
         rows = search_customers(realm_id, term, limit=limit)
