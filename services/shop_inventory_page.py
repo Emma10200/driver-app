@@ -58,8 +58,10 @@ _MAX_RESULTS = 6000  # hard ceiling so a runaway list can't lock up the phone
 _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
+_LABOR_ITEM_NAME = "labor gts"
+_LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.01 (history filters + oil toggle)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.02 (copy invoice + labor details)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -135,6 +137,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "history_search_placeholder": "Search unit, VIN, or customer...",
         "oil_changes_only": "Oil changes only",
         "history_no_filter_results": "No invoices match those filters.",
+        "copy_to_draft": "Copy invoice to draft",
+        "copy_to_draft_ok": "Copied to a new draft. Review and finish when ready.",
         "history_refresh": "Refresh invoices",
         "history_refreshing": "Checking QuickBooks for invoice changes…",
         "history_refresh_done": "Invoice history updated",
@@ -176,6 +180,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "confirm_remove_q": "Remove this part from the invoice?",
         "confirm_remove_yes": "Remove",
         "confirm_remove_no": "Keep",
+        "labor_details_title": "Labor details (optional)",
+        "labor_work": "Work done",
+        "labor_mechanic": "Mechanic",
+        "labor_hours": "Hours",
+        "add_labor_detail": "Add labor detail",
         "no_negatives": "No negative-stock parts. 🎉",
         "cart_title": "Current Invoice",
         "cart_empty": "No parts added yet. Search and tap + to add parts.",
@@ -299,6 +308,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "history_search_placeholder": "Търси номер, VIN или клиент...",
         "oil_changes_only": "Само смяна на масло",
         "history_no_filter_results": "Няма фактури с тези филтри.",
+        "copy_to_draft": "Копирай във чернова",
+        "copy_to_draft_ok": "Копирано в нова чернова. Прегледайте и завършете.",
         "history_refresh": "Обнови фактурите",
         "history_refreshing": "Проверка за промени във фактурите…",
         "history_refresh_done": "Историята е обновена",
@@ -340,6 +351,11 @@ _STRINGS: dict[str, dict[str, str]] = {
         "confirm_remove_q": "Да премахна ли тази част от фактурата?",
         "confirm_remove_yes": "Премахни",
         "confirm_remove_no": "Запази",
+        "labor_details_title": "Детайли за труда (по избор)",
+        "labor_work": "Извършена работа",
+        "labor_mechanic": "Механик",
+        "labor_hours": "Часове",
+        "add_labor_detail": "Добави труд",
         "no_negatives": "Няма части с отрицателна наличност. 🎉",
         "cart_title": "Текуща фактура",
         "cart_empty": "Още няма добавени части. Търсете и натиснете +, за да добавите.",
@@ -1117,6 +1133,73 @@ def _cart_line_html(
         f"{desc_html}"
         f"{on_hand_html}"
     )
+
+
+def _is_labor_line(line: dict[str, Any]) -> bool:
+    """True for the Labor GTS line item only."""
+    haystack = " ".join(
+        str(line.get(key) or "") for key in ("name", "description", "item_name")
+    ).lower()
+    return _LABOR_ITEM_NAME in haystack
+
+
+def _render_labor_details_editor(lang: str, line: dict[str, Any], idx: int, item_id: str) -> None:
+    """Optional mechanic/work breakdown for Labor GTS invoice lines."""
+    details = line.get("labor_details")
+    if not isinstance(details, list):
+        details = []
+        line["labor_details"] = details
+
+    with st.expander(_t(lang, "labor_details_title"), expanded=bool(details)):
+        remove_index: int | None = None
+        for detail_idx, detail in enumerate(details):
+            if not isinstance(detail, dict):
+                detail = {}
+                details[detail_idx] = detail
+            mech = str(detail.get("mechanic") or _LABOR_MECHANICS[0])
+            work = str(detail.get("work") or "")
+            hours = float(detail.get("hours") or 0)
+            cols = st.columns([1.1, 1.5, 0.85, 0.45], vertical_alignment="bottom")
+            with cols[0]:
+                selected_mech = st.selectbox(
+                    _t(lang, "labor_mechanic"),
+                    list(_LABOR_MECHANICS),
+                    index=list(_LABOR_MECHANICS).index(mech) if mech in _LABOR_MECHANICS else 0,
+                    key=f"labor_mech_{idx}_{detail_idx}_{item_id}",
+                )
+            with cols[1]:
+                selected_work = st.text_input(
+                    _t(lang, "labor_work"),
+                    value=work,
+                    key=f"labor_work_{idx}_{detail_idx}_{item_id}",
+                    placeholder="Shock absorbers",
+                )
+            with cols[2]:
+                selected_hours = st.number_input(
+                    _t(lang, "labor_hours"),
+                    min_value=0.0,
+                    step=0.25,
+                    value=max(0.0, hours),
+                    key=f"labor_hours_{idx}_{detail_idx}_{item_id}",
+                )
+            with cols[3]:
+                if st.button("🗑", key=f"labor_rm_{idx}_{detail_idx}_{item_id}", help=_t(lang, "remove")):
+                    remove_index = detail_idx
+            detail["mechanic"] = selected_mech
+            detail["work"] = selected_work.strip()
+            detail["hours"] = float(selected_hours or 0)
+
+        if remove_index is not None:
+            details.pop(remove_index)
+            st.rerun()
+
+        if st.button(
+            f"➕ {_t(lang, 'add_labor_detail')}",
+            key=f"labor_add_{idx}_{item_id}",
+            use_container_width=True,
+        ):
+            details.append({"mechanic": _LABOR_MECHANICS[0], "work": "", "hours": 0.0})
+            st.rerun()
 
 
 def _escape(value: str) -> str:
@@ -2230,11 +2313,16 @@ def _render_invoice_detail_view(lang: str, realm_id: str) -> None:
 
     # Header card (reuse the list card layout) + line items below.
     st.markdown(_invoice_html(inv, lang), unsafe_allow_html=True)
+    if st.button(f"📋 {_t(lang, 'copy_to_draft')}", key=f"copy_inv_{inv_id}", use_container_width=True, type="primary"):
+        _copy_invoice_to_new_draft_session(inv, realm_id, lang)
+        st.session_state["shop_cart_flash"] = _t(lang, "copy_to_draft_ok")
+        _go(_VIEW_NEW_INVOICE)
 
     lines = inv.get("line_items") or []
     if not lines:
+        raw = inv.get("raw") if isinstance(inv.get("raw"), dict) else inv
         lines = [
-            line for line in (inv.get("Line") or [])
+            line for line in (raw.get("Line") or [])
             if str(line.get("DetailType") or "") == "SalesItemLineDetail"
         ]
     if not lines:
@@ -2243,6 +2331,95 @@ def _render_invoice_detail_view(lang: str, realm_id: str) -> None:
 
     st.markdown(f"<div class='shop-title'>{_t(lang, 'line_items')}</div>", unsafe_allow_html=True)
     st.markdown("".join(_line_item_html(line, lang) for line in lines), unsafe_allow_html=True)
+
+
+def _copy_invoice_to_new_draft_session(inv: dict[str, Any], realm_id: str, lang: str) -> None:
+    """Copy a historical QBO invoice into a fresh editable shop draft session."""
+    for key in _INVOICE_FIELD_KEYS:
+        st.session_state.pop(key, None)
+    _clear_draft_derived_caches()
+    try:
+        next_no = _cached_next_invoice_number(realm_id)
+    except Exception:  # noqa: BLE001
+        next_no = None
+
+    vehicle = _invoice_vehicle_values(inv)
+    st.session_state["invoice_doc_number"] = str(next_no or "")
+    st.session_state["invoice_customer"] = _invoice_customer_name(inv)
+    st.session_state["invoice_customer_is_new"] = False
+    st.session_state["invoice_truck"] = vehicle.get("unit", "")
+    st.session_state["invoice_vin"] = vehicle.get("vin", "")
+    # Do NOT copy old miles; the new visit should enter current miles if needed.
+    st.session_state["invoice_miles"] = ""
+    st.session_state["invoice_notes"] = ""
+    st.session_state["invoice_step"] = "parts"
+
+    parts_by_name = _active_parts_by_invoice_name(realm_id)
+    lines = inv.get("line_items") or []
+    if not lines:
+        lines = [
+            line for line in (inv.get("Line") or [])
+            if str(line.get("DetailType") or "") == "SalesItemLineDetail"
+        ]
+    st.session_state["shop_cart"] = [
+        _history_line_to_cart_line(line, parts_by_name) for line in lines
+    ]
+
+
+def _invoice_customer_name(inv: dict[str, Any]) -> str:
+    customer = str(inv.get("customer_name") or "").strip()
+    if customer:
+        return customer
+    raw = inv.get("raw") if isinstance(inv.get("raw"), dict) else inv
+    ref = raw.get("CustomerRef") if isinstance(raw, dict) else None
+    return str(ref.get("name") or "").strip() if isinstance(ref, dict) else ""
+
+
+def _active_parts_by_invoice_name(realm_id: str) -> dict[str, dict[str, Any]]:
+    """Map item names/FQNs to active part rows for copying historical invoices."""
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        parts = _all_active_parts(realm_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not load parts for invoice copy: %s", exc)
+        return out
+    for part in parts:
+        for key in (part.get("name"), part.get("fully_qualified_name")):
+            norm = str(key or "").strip().lower()
+            if norm and norm not in out:
+                out[norm] = part
+    return out
+
+
+def _history_line_to_cart_line(line: dict[str, Any], parts_by_name: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Convert cached/raw invoice line into the shop draft cart shape."""
+    if "item_name" in line or "unit_price" in line:
+        item_name = str(line.get("item_name") or line.get("name") or "").strip()
+        description = str(line.get("description") or "").strip()
+        qty_raw = line.get("qty")
+        unit_price = float(line.get("unit_price") or 0)
+    else:
+        detail = line.get("SalesItemLineDetail") or {}
+        item_ref = detail.get("ItemRef") or {}
+        item_name = str(item_ref.get("name") or "").strip() if isinstance(item_ref, dict) else ""
+        description = str(line.get("Description") or "").strip()
+        qty_raw = detail.get("Qty")
+        unit_price = float(detail.get("UnitPrice") or 0)
+    try:
+        qty = max(1, int(float(qty_raw or 1)))
+    except (TypeError, ValueError):
+        qty = 1
+    part = parts_by_name.get(item_name.lower(), {})
+    return {
+        "qbo_item_id": str(part.get("qbo_item_id") or ""),
+        "sku": str(part.get("sku") or ""),
+        "name": str(part.get("name") or item_name),
+        "description": str(description or part.get("sales_description") or part.get("purchase_description") or ""),
+        "unit_price": unit_price if unit_price else float(part.get("sales_price") or 0),
+        "on_hand": part.get("qty_on_hand"),
+        "qty": qty,
+        "labor_details": [],
+    }
 
 
 def _line_item_html(line: dict[str, Any], lang: str) -> str:
@@ -2467,6 +2644,8 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
                     ):
                         st.session_state[confirm_key] = True
                         st.rerun()
+                if _is_labor_line(line):
+                    _render_labor_details_editor(lang, line, idx, item_id)
 
     st.markdown(f"### {_t(lang, 'invoice_total_label')}: {_fmt_price(total)}")
 
@@ -2877,6 +3056,7 @@ def _load_draft_into_session(draft: dict[str, Any], *, navigate: bool = True) ->
                 "sku": str(li.get("sku") or ""),
                 "name": str(li.get("name") or ""),
                 "description": str(li.get("description") or ""),
+                "labor_details": li.get("labor_details") if isinstance(li.get("labor_details"), list) else [],
                 "unit_price": float(li.get("unit_price") or 0),
                 "qty": int(li.get("qty") or 1),
             }
@@ -2903,6 +3083,7 @@ def _invoice_line_items() -> list[dict[str, Any]]:
             "sku": str(line.get("sku") or ""),
             "name": str(line.get("name") or ""),
             "description": str(line.get("description") or ""),
+            "labor_details": line.get("labor_details") if isinstance(line.get("labor_details"), list) else [],
             "qty": int(line.get("qty") or 0),
             "unit_price": float(line.get("unit_price") or 0),
             "line_total": round(float(line.get("unit_price") or 0) * int(line.get("qty") or 0), 2),
@@ -2918,7 +3099,7 @@ def _invoice_state_signature(line_items: list[dict[str, Any]]) -> str:
         for key in ("invoice_doc_number", "invoice_customer", "invoice_truck", "invoice_vin", "invoice_miles", "invoice_notes")
     )
     body = ";".join(
-        f"{li['qbo_item_id']}x{li['qty']}@{li['unit_price']}" for li in line_items
+        f"{li['qbo_item_id']}x{li['qty']}@{li['unit_price']}#{li.get('labor_details') or []}" for li in line_items
     )
     return f"{header}#{body}"
 
@@ -3007,6 +3188,7 @@ def _cart_add(item: dict[str, Any]) -> None:
             ),
             "unit_price": float(item.get("sales_price") or 0),
             "on_hand": item.get("qty_on_hand"),
+            "labor_details": [],
             "qty": 1,
         }
     )
