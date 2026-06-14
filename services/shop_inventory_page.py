@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.30 (render all parts, QBO-style lines)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.31 (full re-sync button, cache clears)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -79,6 +79,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "results": "parts",
         "of": "of",
         "show_more": "Show more parts",
+        "full_resync_title": "Part missing? Full re-sync",
+        "full_resync_help": "Re-pulls every active part from QuickBooks (not just recent changes). Use this if a part you expect is not showing up.",
+        "full_resync_btn": "Re-pull all parts from QuickBooks",
         "too_many_results": "Showing the maximum number of parts. Type to narrow the list.",
         "add_part_label": "Add a part",
         "add_part_help": "Search by part number, description or SKU, then pick to add.",
@@ -220,6 +223,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "results": "части",
         "of": "от",
         "show_more": "Покажи още части",
+        "full_resync_title": "Липсва част? Пълна синхронизация",
+        "full_resync_help": "Изтегля отново всички активни части от QuickBooks (не само последните промени). Използвайте, ако липсва част.",
+        "full_resync_btn": "Изтегли всички части от QuickBooks",
         "too_many_results": "Показан е максималният брой части. Пишете, за да стесните списъка.",
         "add_part_label": "Добавете част",
         "add_part_help": "Търсете по номер, описание или SKU, след което изберете.",
@@ -899,18 +905,22 @@ def _escape(value: str) -> str:
     )
 
 
-def _run_refresh(realm_id: str, lang: str) -> None:
-    """Run the same delta sync the scheduler would, then refresh the view.
+def _run_refresh(realm_id: str, lang: str, *, force_full: bool = False) -> None:
+    """Run an inventory sync, then refresh the view.
 
-    Pulls only QBO items changed since the last sync (full pull on first run),
-    upserts them into Supabase, clears the cached reads so the list shows fresh
-    data, and flashes a short status. Failures are surfaced without crashing.
+    Normal refresh pulls only QBO items changed since the last sync (delta).
+    ``force_full=True`` ignores the saved cursor and re-pulls every active item
+    from QuickBooks - use it to recover parts a delta run might have missed.
+    Upserts into Supabase, clears the cached reads so the list shows fresh data,
+    and flashes a short status. Failures are surfaced without crashing.
     """
     with st.spinner(_t(lang, "refreshing")):
-        result = sync_shop_inventory(realm_id)
+        result = sync_shop_inventory(realm_id, force_full=force_full)
 
     # Invalidate cached reads so the list + freshness stamp reflect the sync.
     _search_inventory.clear()
+    _all_active_parts.clear()
+    _active_part_options.clear()
     _last_synced.clear()
 
     if result.status == "success":
@@ -954,6 +964,8 @@ def _run_sync_all(realm_id: str, lang: str) -> None:
         customers = sync_shop_customers(realm_id)
 
     _search_inventory.clear()
+    _all_active_parts.clear()
+    _active_part_options.clear()
     _last_synced.clear()
     _cached_recent_invoices.clear()
     _cached_invoice_detail.clear()
@@ -1260,8 +1272,6 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
     refresh_col, neg_col = st.columns([1, 1])
     with refresh_col:
         if st.button(f"\U0001f504 {_t(lang, 'refresh')}", use_container_width=True):
-            _all_active_parts.clear()
-            _active_part_options.clear()
             _run_refresh(realm_id, lang)
     with neg_col:
         negatives_on = bool(st.session_state.get("shop_negatives_only"))
@@ -1270,6 +1280,13 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
             st.session_state["shop_negatives_only"] = not negatives_on
             st.rerun()
     negatives_on = bool(st.session_state.get("shop_negatives_only"))
+
+    # Full re-sync: re-pull every active QBO item (ignores the delta cursor).
+    # Use when a part seems missing - it guarantees the catalog is complete.
+    with st.expander(_t(lang, "full_resync_title")):
+        st.caption(_t(lang, "full_resync_help"))
+        if st.button(f"⟳ {_t(lang, 'full_resync_btn')}", use_container_width=True, key="shop_full_resync"):
+            _run_refresh(realm_id, lang, force_full=True)
 
     last_run = _last_synced(realm_id)
     freshness = last_run.replace("T", " ")[:16] if last_run else _t(lang, "never")
