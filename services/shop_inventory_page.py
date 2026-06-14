@@ -72,7 +72,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.10 (exact sold item history)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.11 (short dates + sticky nav)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -515,6 +515,23 @@ _MOBILE_CSS = """
       height: 2.6rem !important;
       font-size: 1.05rem !important;
       padding: 0.5rem 0.85rem !important;
+  }
+
+  /* Sticky sub-page navigation: keep Back + Menu visible while scrolling long
+     inventory/history/detail pages. The hidden anchor marks the horizontal
+     button row immediately after it. */
+  .sticky-shop-nav-anchor { display: block; height: 0; margin: 0; padding: 0; }
+  div[data-testid="stElementContainer"]:has(.sticky-shop-nav-anchor) {
+      height: 0; min-height: 0; margin: 0; padding: 0;
+  }
+  div[data-testid="stElementContainer"]:has(.sticky-shop-nav-anchor) + div[data-testid="stHorizontalBlock"] {
+      position: -webkit-sticky;
+      position: sticky;
+      top: 0;
+      z-index: 1600;
+      background: #F7F8FA;
+      padding: 0.45rem 0 0.5rem;
+      box-shadow: 0 8px 10px -9px rgba(16, 24, 40, 0.35);
   }
 
   /* Inventory row: a native bordered container is the part "card", and the green
@@ -1391,7 +1408,7 @@ _VALID_VIEWS = {
 }
 
 
-def _go(view: str) -> None:
+def _go(view: str, *, record: bool = True) -> None:
     """Navigate by writing the view into the URL (single source of truth).
 
     Using a query param (``v``) instead of session_state makes navigation
@@ -1399,6 +1416,9 @@ def _go(view: str) -> None:
     previous session left a different view selected. Sub-views are shareable /
     refresh-safe because the URL carries the state.
     """
+    if record:
+        _push_nav_history(view)
+
     # Mark that this view change came from an in-app button. If the app is opened
     # cold from a stale saved URL like ?shop=1&v=inventory, _current_view() will
     # ignore that stale view and force the Home menu instead.
@@ -1413,11 +1433,66 @@ def _go(view: str) -> None:
     st.rerun()
 
 
+def _nav_snapshot() -> dict[str, str]:
+    """Current view/query snapshot for the in-app Back button."""
+    snap = {"view": _current_view()}
+    part_id = _query_param_value("part_id").strip()
+    if part_id:
+        snap["part_id"] = part_id
+    invoice_id = (_query_param_value("invoice_id") or str(st.session_state.get("shop_invoice_id") or "")).strip()
+    if invoice_id:
+        snap["invoice_id"] = invoice_id
+    return snap
+
+
+def _push_nav_history(next_view: str) -> None:
+    current = _nav_snapshot()
+    if current.get("view") == next_view and next_view != _VIEW_PART_DETAIL:
+        return
+    stack = list(st.session_state.get("shop_nav_stack") or [])
+    if not stack or stack[-1] != current:
+        stack.append(current)
+    st.session_state["shop_nav_stack"] = stack[-25:]
+
+
+def _restore_nav_snapshot(snap: dict[str, str]) -> None:
+    view = str(snap.get("view") or _VIEW_HOME)
+    st.session_state["shop_allow_url_view"] = view != _VIEW_HOME
+    for key in ("part_id", "invoice_id"):
+        try:
+            del st.query_params[key]
+        except Exception:  # noqa: BLE001 - best-effort cleanup only
+            pass
+    if view == _VIEW_HOME:
+        try:
+            del st.query_params["v"]
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        st.query_params["v"] = view
+    if snap.get("part_id"):
+        st.query_params["part_id"] = snap["part_id"]
+    if snap.get("invoice_id"):
+        st.session_state["shop_invoice_id"] = snap["invoice_id"]
+    st.rerun()
+
+
+def _go_back(default_view: str = _VIEW_HOME) -> None:
+    stack = list(st.session_state.get("shop_nav_stack") or [])
+    if stack:
+        snap = stack.pop()
+        st.session_state["shop_nav_stack"] = stack
+        _restore_nav_snapshot(snap)
+        return
+    _go(default_view, record=False)
+
+
 def _open_part_detail(part_id: str) -> None:
     """Open part detail through Streamlit state instead of a raw HTML link."""
     part_id = str(part_id or "").strip()
     if not part_id:
         return
+    _push_nav_history(_VIEW_PART_DETAIL)
     st.session_state["shop_allow_url_view"] = True
     st.query_params["v"] = _VIEW_PART_DETAIL
     st.query_params["part_id"] = part_id
@@ -1644,11 +1719,16 @@ def _render_view_header(
     instead of a translated key. ``show_title=False`` renders only the back +
     language controls (caller draws its own heading).
     """
-    top_l, top_r = st.columns([3, 1])
-    with top_l:
-        if st.button(f"⬅ {_t(lang, 'back_to_menu')}", key=f"back_{title_key}"):
-            _go(_VIEW_HOME)
-    with top_r:
+    st.markdown("<span class='sticky-shop-nav-anchor'></span>", unsafe_allow_html=True)
+    back_col, menu_col, lang_col = st.columns([1.15, 1.1, 0.8])
+    with back_col:
+        if st.button("⬅ Back", key=f"back_one_{title_key}", use_container_width=True):
+            _go_back(_VIEW_HOME)
+    with menu_col:
+        if st.button("🏠 Menu", key=f"menu_{title_key}", use_container_width=True):
+            st.session_state["shop_nav_stack"] = []
+            _go(_VIEW_HOME, record=False)
+    with lang_col:
         _render_lang_toggle(lang)
     if show_title:
         title = title_override or _t(lang, title_key)
@@ -1711,7 +1791,7 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
     ).strip()
 
     last_run = _last_synced(realm_id)
-    freshness = last_run.replace("T", " ")[:16] if last_run else _t(lang, "never")
+    freshness = _fmt_user_datetime(last_run) if last_run else _t(lang, "never")
     st.caption(f"{_t(lang, 'updated')}: {freshness}")
     if negatives_on:
         items = _negative_parts(parts)
@@ -2110,6 +2190,11 @@ def _part_event_html(ev: dict[str, Any]) -> str:
 
 def _short_history_date(value: Any) -> str:
     """Return compact M/D/YY for QBO date strings, else a readable fallback."""
+    return _fmt_user_date(value)
+
+
+def _fmt_user_date(value: Any) -> str:
+    """Return compact M/D/YY for shop-facing dates."""
     raw = str(value or "").strip()
     if not raw:
         return "—"
@@ -2125,6 +2210,22 @@ def _short_history_date(value: Any) -> str:
         month, day, year = match.groups()
         return f"{int(month)}/{int(day)}/{year[-2:]}"
     return date_part[:10] if len(date_part) > 10 else date_part
+
+
+def _fmt_user_datetime(value: Any) -> str:
+    """Return compact M/D/YY plus short time when a time is present."""
+    raw = str(value or "").strip()
+    if not raw:
+        return "—"
+    date = _fmt_user_date(raw)
+    match = re.search(r"(?:T|\s)(\d{1,2}):(\d{2})", raw)
+    if not match:
+        return date
+    hour = int(match.group(1))
+    minute = match.group(2)
+    suffix = "a" if hour < 12 else "p"
+    hour12 = hour % 12 or 12
+    return f"{date} {hour12}:{minute}{suffix}"
 
 
 def _part_shortage_value(item: dict[str, Any]) -> float:
@@ -2533,7 +2634,7 @@ def _render_history_view(lang: str, realm_id: str) -> None:
 
     synced_at = _cached_invoice_history_synced_at(realm_id)
     if synced_at:
-        st.caption(f"{_t(lang, 'updated')}: {synced_at.replace('T', ' ')[:16]}")
+        st.caption(f"{_t(lang, 'updated')}: {_fmt_user_datetime(synced_at)}")
     if st.button(f"🔄 {_t(lang, 'history_refresh')}", use_container_width=True):
         with st.spinner(_t(lang, "history_refreshing")):
             result = sync_shop_invoice_history(realm_id)
@@ -2609,7 +2710,7 @@ def _render_purchase_history_view(lang: str, realm_id: str) -> None:
 
     synced_at = _cached_purchase_history_synced_at(realm_id)
     if synced_at:
-        st.caption(f"{_t(lang, 'updated')}: {synced_at.replace('T', ' ')[:16]}")
+        st.caption(f"{_t(lang, 'updated')}: {_fmt_user_datetime(synced_at)}")
     refresh_col, full_col = st.columns(2)
     with refresh_col:
         if st.button(f"🔄 {_t(lang, 'purchase_history_refresh')}", use_container_width=True):
@@ -2680,7 +2781,7 @@ def _purchase_search_blob(row: dict[str, Any]) -> str:
 
 
 def _purchase_html(row: dict[str, Any]) -> str:
-    date = str(row.get("txn_date") or "")
+    date = _fmt_user_date(row.get("txn_date") or "")
     vendor = str(row.get("vendor_name") or "Vendor")
     doc = str(row.get("doc_number") or row.get("qbo_txn_id") or "")
     txn_type = str(row.get("qbo_txn_type") or "Purchase")
@@ -2851,7 +2952,7 @@ def _line_item_search_text(line: Any) -> str:
 
 def _invoice_html(inv: dict[str, Any], lang: str) -> str:
     doc = str(inv.get("doc_number") or inv.get("DocNumber") or "—").strip()
-    txn_date = str(inv.get("txn_date") or inv.get("TxnDate") or "").strip()
+    txn_date = _fmt_user_date(inv.get("txn_date") or inv.get("TxnDate") or "")
     customer = str(inv.get("customer_name") or "").strip()
     if not customer:
         ref = inv.get("CustomerRef")
@@ -3410,7 +3511,7 @@ def _render_invoice_vehicle_step(lang: str) -> None:
             if prior.get("doc"):
                 bits.append(f"#{prior['doc']}")
             if prior.get("date"):
-                bits.append(prior["date"])
+                bits.append(_fmt_user_date(prior["date"]))
             st.info(f"{_t(lang, 'prior_invoice')}: " + " · ".join(bits))
 
     clear_col, next_col = st.columns([1, 2])
@@ -3479,7 +3580,7 @@ def _render_invoice_customer_step(lang: str, realm_id: str) -> None:
 
     customer_synced_at = _cached_customer_synced_at(realm_id)
     if customer_synced_at:
-        st.caption(f"{_t(lang, 'updated')}: {customer_synced_at.replace('T', ' ')[:16]}")
+        st.caption(f"{_t(lang, 'updated')}: {_fmt_user_datetime(customer_synced_at)}")
     if st.button(f"🔄 {_t(lang, 'refresh_customers')}", use_container_width=True):
         with st.spinner(_t(lang, "customers_refreshing")):
             result = sync_shop_customers(realm_id)
@@ -3611,7 +3712,7 @@ def _render_invoice_locked_header(lang: str) -> None:
         if prior.get("doc"):
             bits.append(f"#{prior['doc']}")
         if prior.get("date"):
-            bits.append(prior["date"])
+            bits.append(_fmt_user_date(prior["date"]))
         if prior.get("miles"):
             bits.append(f"{_t(lang, 'miles')}: {prior['miles']}")
         st.info(f"{_t(lang, 'prior_invoice')}: " + " · ".join(bits))
