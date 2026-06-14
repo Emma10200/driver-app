@@ -17,7 +17,6 @@ import re
 from typing import Any
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 from qbo.shop_inventory_sync import (
     build_services,
@@ -60,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.40 (fix last_run NameError)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.41 (migrate components.html -> st.iframe)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -1276,7 +1275,7 @@ def _wire_shop_back_button(view: str) -> None:
     """
     if view == _VIEW_HOME:
         return
-    components.html(
+    st.iframe(
         f"""
         <script>
         (function() {{
@@ -1499,7 +1498,7 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
     # view until the first keystroke. Gently scroll the focused input back into
     # view so the user always sees what they're typing in. Zero-height iframe so
     # it takes no layout space. Runs in the parent document via window.parent.
-    components.html(
+    st.iframe(
         """
         <script>
         const doc = window.parent.document;
