@@ -72,7 +72,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.09 (clean part history headers)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.10 (exact sold item history)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -1826,6 +1826,21 @@ def _part_match_names(part: dict[str, Any]) -> set[str]:
     }
 
 
+def _part_match_name_keys(part: dict[str, Any]) -> set[str]:
+    """Exact Product/Service name keys for invoice line matching.
+
+    Sold history must match the invoice line's QBO Product/Service item, not the
+    line description. We normalize case and harmless spacing/punctuation only;
+    we do not do contains/fuzzy matching here because that creates false
+    invoice hits where the clicked part is not actually on the invoice.
+    """
+    return {
+        _exact_item_name_key(value)
+        for value in (part.get("name"), part.get("fully_qualified_name"))
+        if _exact_item_name_key(value)
+    }
+
+
 def _part_sales_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, Any]]:
     part_id = str(part.get("qbo_item_id") or "")
     events: list[dict[str, Any]] = []
@@ -1860,10 +1875,14 @@ def _sales_line_matches_part(line: dict[str, Any], part: dict[str, Any], part_id
     item_name, item_id = _sales_line_item_ref(line)
     if part_id and item_id == part_id:
         return True
-    names = _part_match_names(part)
-    if item_name.lower() in names:
+    # Invoice history must be exact: QBO Product/Service item name on the invoice
+    # line must equal the clicked inventory Product/Service name. Do NOT fall
+    # back to description/SKU contains matching for sales, or part history will
+    # show invoices where the part is mentioned but not actually sold as that
+    # Product/Service line item.
+    if _exact_item_name_key(item_name) in _part_match_name_keys(part):
         return True
-    return _line_text_matches_part(line, part)
+    return False
 
 
 def _part_purchase_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1971,6 +1990,16 @@ def _line_text_matches_part(line: dict[str, Any], part: dict[str, Any]) -> bool:
         if needle_norm and len(needle_norm) >= 4 and needle_norm in haystack_norm:
             return True
     return False
+
+
+def _exact_item_name_key(value: Any) -> str:
+    """Case-insensitive exact-ish key for QBO Product/Service names.
+
+    This is intentionally stricter than search matching: it ignores casing and
+    punctuation/spacing differences, but it never treats one item name as a
+    substring of another.
+    """
+    return _collapse_alnum(str(value or ""))
 
 
 def _sales_line_item_ref(line: dict[str, Any]) -> tuple[str, str]:
