@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.51 (picker add row top, no notes)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.52 (exact Unit/VIN input, customer skip)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -197,6 +197,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "prior_invoice": "Last invoice for this unit",
         "no_drafts": "No saved drafts.",
         "next": "Next",
+        "suggestions": "Suggestions",
+        "confirm_customer": "Confirm customer",
+        "skip_customer": "Skip customer",
         "edit_header": "Edit unit/VIN/customer",
         "choose_customer": "Choose customer",
         "customer_suggestions": "Suggested customers",
@@ -352,6 +355,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "prior_invoice": "Последна фактура за този номер",
         "no_drafts": "Няма запазени чернови.",
         "next": "Напред",
+        "suggestions": "Предложения",
+        "confirm_customer": "Потвърди клиента",
+        "skip_customer": "Пропусни клиента",
         "edit_header": "Редактирай номер/VIN/клиент",
         "choose_customer": "Избери клиент",
         "customer_suggestions": "Предложени клиенти",
@@ -1313,63 +1319,6 @@ def _wire_shop_back_button(view: str) -> None:
     )
 
 
-def _wire_selectbox_add_option_to_top() -> None:
-    """Promote Streamlit's built-in "Add ..." selectbox row to the top.
-
-    ``st.selectbox(..., accept_new_options=True)`` renders the "Add typed value"
-    row inside the frontend dropdown menu; Python can't control its order. This
-    best-effort DOM helper watches open listboxes and moves that Add row to the
-    top, with a plus marker, without changing any underlying widget state or
-    matching behavior.
-    """
-    st.iframe(
-        """
-        <script>
-        (function() {
-            const pw = window.parent;
-            const pd = pw.document;
-            if (!pd || !pd.body) return;
-            if (!pd.getElementById('shop-add-option-style')) {
-                const style = pd.createElement('style');
-                style.id = 'shop-add-option-style';
-                style.textContent = `
-                    .shop-add-option-top { font-weight: 750 !important; }
-                    .shop-add-option-top::before { content: "➕ "; }
-                `;
-                pd.head.appendChild(style);
-            }
-            function promoteAddOptions() {
-                const menus = pd.querySelectorAll('[role="listbox"], ul[role="listbox"]');
-                menus.forEach((menu) => {
-                    const options = Array.from(menu.querySelectorAll('[role="option"], li'));
-                    const addOption = options.find((opt) => {
-                        const text = (opt.innerText || opt.textContent || '').trim();
-                           const lower = text.toLowerCase();
-                           return lower.startsWith('add ') || lower === 'add' ||
-                               lower.startsWith('+ add ') || lower.startsWith('➕ add ');
-                    });
-                    if (!addOption) return;
-                    addOption.classList.add('shop-add-option-top');
-                    if (options[0] !== addOption) {
-                        menu.insertBefore(addOption, options[0] || null);
-                    }
-                });
-            }
-            promoteAddOptions();
-            if (pd.body.dataset.shopAddTopBound !== '1') {
-                pd.body.dataset.shopAddTopBound = '1';
-                const obs = new MutationObserver(promoteAddOptions);
-                obs.observe(pd.body, { childList: true, subtree: true });
-            }
-        })();
-        </script>
-        """,
-        height=1,
-    )
-
-
-
-
 def _render_lang_toggle(lang: str) -> None:
     """Small BG/EN toggle, shared across views."""
     bulgarian = st.toggle("БГ", value=(lang == "bg"), help=_t(lang, "lang_toggle"), key="shop_lang_toggle")
@@ -1421,7 +1370,6 @@ def render_shop_inventory_page() -> None:
     view = _current_view()
 
     _wire_shop_back_button(view)
-    _wire_selectbox_add_option_to_top()
     _render_sidebar_nav(lang, view)
 
     # Resolve the realm once; every data view needs it. The home menu still
@@ -2495,9 +2443,9 @@ def _render_invoice_vehicle_step(lang: str) -> None:
 
     unit_col, vin_col, miles_col = st.columns(3)
     with unit_col:
-        _vehicle_field_popover(lang, "invoice_truck_w", "truck_unit", suggestions.get("units", []))
+        _vehicle_text_picker(lang, "invoice_truck_w", "truck_unit", suggestions.get("units", []))
     with vin_col:
-        _vehicle_field_popover(lang, "invoice_vin_w", "vin", suggestions.get("vins", []))
+        _vehicle_text_picker(lang, "invoice_vin_w", "vin", suggestions.get("vins", []))
     with miles_col:
         # Miles is a free-typed value (NOT a dropdown).
         st.text_input(_t(lang, "miles"), key="invoice_miles_w")
@@ -2537,30 +2485,44 @@ def _render_invoice_vehicle_step(lang: str) -> None:
             st.rerun()
 
 
-def _vehicle_field_popover(lang: str, state_key: str, label_key: str, suggestions: list[str]) -> None:
-    """Searchable dropdown for a vehicle field (Unit / VIN / Miles).
+def _set_widget_value(state_key: str, value: str) -> None:
+    st.session_state[state_key] = str(value or "")
 
-    Uses the canonical session key directly so there is no auto-fill: the first
-    option is blank, the user can type to filter the cached suggestions, and any
-    new value they type is accepted. Behaves like the QuickBooks-style customer
-    picker.
+
+def _vehicle_text_picker(lang: str, state_key: str, label_key: str, suggestions: list[str]) -> None:
+    """Exact typed Unit/VIN input with optional historical suggestions.
+
+    This deliberately uses ``st.text_input`` (not accept-new selectbox) so typing
+    a brand-new unit like ``500`` and pressing Enter/clicking away keeps exactly
+    ``500``. It never auto-selects the first fuzzy match like ``500575``. The
+    suggestions popover is just a convenience: tapping a suggestion fills the
+    text input via a safe callback.
     """
     current = str(st.session_state.get(state_key) or "").strip()
-    options: list[str] = [""]
-    if current and current not in options:
-        options.append(current)
-    for value in suggestions:
-        value = str(value or "").strip()
-        if value and value not in options:
-            options.append(value)
-    st.selectbox(
-        _t(lang, label_key),
-        options,
-        key=state_key,
-        placeholder=_t(lang, label_key),
-        accept_new_options=True,
-        filter_mode="contains",
-    )
+    st.text_input(_t(lang, label_key), key=state_key, placeholder=_t(lang, label_key))
+    current = str(st.session_state.get(state_key) or "").strip()
+    ranked: list[str] = []
+    current_norm = _norm_vehicle_key(current)
+    for raw in suggestions:
+        value = str(raw or "").strip()
+        if not value or value in ranked:
+            continue
+        value_norm = _norm_vehicle_key(value)
+        if not current_norm or current_norm in value_norm or value_norm in current_norm:
+            ranked.append(value)
+        if len(ranked) >= 8:
+            break
+    if not ranked:
+        return
+    with st.popover(f"🔎 {_t(lang, 'suggestions')}", use_container_width=True):
+        for idx, value in enumerate(ranked):
+            st.button(
+                value,
+                key=f"veh_suggest_{state_key}_{idx}_{_collapse_alnum(value)}",
+                use_container_width=True,
+                on_click=_set_widget_value,
+                args=(state_key, value),
+            )
 
 
 def _render_invoice_customer_step(lang: str, realm_id: str) -> None:
@@ -2603,7 +2565,6 @@ def _render_invoice_customer_step(lang: str, realm_id: str) -> None:
 
     if not customer_options:
         st.info(_t(lang, "customer_not_listed"))
-    use_customer_slot = st.empty()
     picked = st.selectbox(
         _t(lang, "customer"),
         customer_options or [""],
@@ -2613,22 +2574,18 @@ def _render_invoice_customer_step(lang: str, realm_id: str) -> None:
         filter_mode="contains",
     )
     picked_name = str(picked or "").strip()
-    if picked_name:
-        with use_customer_slot.container():
-            if st.button(
-                f"➕ {_t(lang, 'use_customer')}",
-                key="use_customer_top",
-                use_container_width=True,
-                type="primary",
-            ):
-                st.session_state["invoice_customer"] = picked_name
-                st.session_state["invoice_customer_is_new"] = picked_name not in customer_options
-                st.session_state["invoice_step"] = "parts"
-                st.rerun()
-
-    if st.button(f"⬅ {_t(lang, 'edit_header')}", key="customer_back_vehicle"):
-        st.session_state["invoice_step"] = "vehicle"
-        st.rerun()
+    back_col, confirm_col = st.columns([1, 1.35])
+    with back_col:
+        if st.button(f"⬅ {_t(lang, 'edit_header')}", key="customer_back_vehicle", use_container_width=True):
+            st.session_state["invoice_step"] = "vehicle"
+            st.rerun()
+    with confirm_col:
+        confirm_label = _t(lang, "confirm_customer") if picked_name else _t(lang, "skip_customer")
+        if st.button(f"✅ {confirm_label}", key="confirm_customer_bottom", use_container_width=True, type="primary"):
+            st.session_state["invoice_customer"] = picked_name
+            st.session_state["invoice_customer_is_new"] = bool(picked_name and picked_name not in customer_options)
+            st.session_state["invoice_step"] = "parts"
+            st.rerun()
 
 
 def _render_invoice_locked_header(lang: str) -> None:
