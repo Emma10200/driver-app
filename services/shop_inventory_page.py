@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.52 (exact Unit/VIN input, customer skip)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.53 (pencil above invoice header)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -2595,47 +2595,44 @@ def _render_invoice_locked_header(lang: str) -> None:
     vin = str(st.session_state.get("invoice_vin") or "").strip()
     miles = str(st.session_state.get("invoice_miles") or "").strip()
 
-    # Prominent header card: invoice number big on the left, customer filling the
-    # space to its right; below, the unit/VIN/miles in clear bordered chips. A
-    # small pencil to the top-right is the (rarely used) edit affordance.
-    head_col, edit_col = st.columns([6, 1], vertical_alignment="top")
-    with head_col:
-        chips = []
-        if unit:
-            chips.append(
-                f"<span class='inv-chip'><span class='inv-chip-k'>{_t(lang, 'unit_short')}</span>"
-                f"<span class='inv-chip-v'>{_escape(unit)}</span></span>"
-            )
-        if vin:
-            chips.append(
-                f"<span class='inv-chip'><span class='inv-chip-k'>{_t(lang, 'vin')}</span>"
-                f"<span class='inv-chip-v'>{_escape(vin)}</span></span>"
-            )
-        if miles:
-            chips.append(
-                f"<span class='inv-chip'><span class='inv-chip-k'>{_t(lang, 'miles')}</span>"
-                f"<span class='inv-chip-v'>{_escape(miles)}</span></span>"
-            )
-        chips_html = (
-            f"<div class='inv-chips'>{''.join(chips)}</div>" if chips else ""
-        )
-        cust_html = (
-            f"<span class='inv-head-cust'>{_escape(customer)}</span>" if customer else ""
-        )
-        st.markdown(
-            f"<div class='inv-head-card'>"
-            f"<div class='inv-head-top'>"
-            f"<span class='inv-head-no'>#{_escape(doc) or '—'}</span>"
-            f"{cust_html}"
-            f"</div>"
-            f"{chips_html}"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
+    # Edit is intentionally a small affordance ABOVE the whole header card, not
+    # underneath the invoice number/details where it visually competes with them.
+    _, edit_col = st.columns([6, 1], vertical_alignment="top")
     with edit_col:
         if st.button("✏️", key="edit_header_pencil", help=_t(lang, "edit_header")):
             st.session_state["invoice_step"] = "vehicle"
             st.rerun()
+
+    # Prominent header card: invoice number big on the left, customer filling the
+    # space to its right; below, the unit/VIN/miles in clear bordered chips.
+    chips = []
+    if unit:
+        chips.append(
+            f"<span class='inv-chip'><span class='inv-chip-k'>{_t(lang, 'unit_short')}</span>"
+            f"<span class='inv-chip-v'>{_escape(unit)}</span></span>"
+        )
+    if vin:
+        chips.append(
+            f"<span class='inv-chip'><span class='inv-chip-k'>{_t(lang, 'vin')}</span>"
+            f"<span class='inv-chip-v'>{_escape(vin)}</span></span>"
+        )
+    if miles:
+        chips.append(
+            f"<span class='inv-chip'><span class='inv-chip-k'>{_t(lang, 'miles')}</span>"
+            f"<span class='inv-chip-v'>{_escape(miles)}</span></span>"
+        )
+    chips_html = f"<div class='inv-chips'>{''.join(chips)}</div>" if chips else ""
+    cust_html = f"<span class='inv-head-cust'>{_escape(customer)}</span>" if customer else ""
+    st.markdown(
+        f"<div class='inv-head-card'>"
+        f"<div class='inv-head-top'>"
+        f"<span class='inv-head-no'>#{_escape(doc) or '—'}</span>"
+        f"{cust_html}"
+        f"</div>"
+        f"{chips_html}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
     # Helpful context: last invoice + miles for this VIN (VIN-only to avoid the
     # unit-number overlap problem).
