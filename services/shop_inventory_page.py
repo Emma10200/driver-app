@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.54 (customer suggestion blocks)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.55 (draft delete resets next #)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -1672,6 +1672,7 @@ def _render_add_popover(item: dict[str, Any], lang: str, realm_id: str) -> None:
             use_container_width=True,
             type="primary",
         ):
+            _clear_draft_derived_caches()
             for key in _INVOICE_FIELD_KEYS:
                 st.session_state.pop(key, None)
             st.session_state["shop_cart"] = []
@@ -1747,6 +1748,21 @@ def _cached_next_invoice_number(realm_id: str) -> int | None:
 
     candidates = [n for n in (next_no, highest_draft + 1 if highest_draft else None) if n]
     return max(candidates) if candidates else None
+
+
+def _clear_draft_derived_caches() -> None:
+    """Clear caches that depend on the open-draft set.
+
+    Draft rows affect the proposed next invoice number and the inventory
+    "On drafts" badges. Any create/update/delete/finalize of a draft should call
+    this so a deleted #6948 immediately allows #6948 to be reused if QBO hasn't
+    posted it yet.
+    """
+    try:
+        _cached_next_invoice_number.clear()
+        _draft_quantities.clear()
+    except Exception:  # noqa: BLE001 - cache clear should never crash the UI
+        pass
 
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
@@ -2009,6 +2025,7 @@ def _render_drafts_section(lang: str, realm_id: str) -> None:
         with del_col:
             if st.button(f"🗑 {_t(lang, 'delete_draft')}", key=f"draft_del_{draft_id}", use_container_width=True):
                 delete_draft(draft_id)
+                _clear_draft_derived_caches()
                 st.rerun()
 
 
@@ -2393,6 +2410,7 @@ _INVOICE_FIELD_KEYS = (
 
 def _start_new_invoice() -> None:
     """Clear any in-progress invoice so New Invoice always opens blank."""
+    _clear_draft_derived_caches()
     for key in _INVOICE_FIELD_KEYS:
         st.session_state.pop(key, None)
     st.session_state["shop_cart"] = []
@@ -2700,8 +2718,7 @@ def _submit_shop_invoice(lang: str, realm_id: str, *, status: str, total: float)
     _discard_current_invoice(delete_remote=False)
     # Draft set changed: refresh the draft-derived caches (next number, on-draft
     # badge counts) so the next invoice and the inventory badges are accurate.
-    _cached_next_invoice_number.clear()
-    _draft_quantities.clear()
+    _clear_draft_derived_caches()
     st.session_state["shop_cart_flash"] = _t(lang, "finish_ok")
     st.rerun()
 
@@ -2720,11 +2737,7 @@ def _discard_current_invoice(*, delete_remote: bool) -> None:
     st.session_state["shop_cart"] = []
     # A draft may have been deleted: refresh draft-derived caches.
     if delete_remote:
-        try:
-            _cached_next_invoice_number.clear()
-            _draft_quantities.clear()
-        except Exception:  # noqa: BLE001
-            pass
+        _clear_draft_derived_caches()
 
 
 def _load_draft_into_session(draft: dict[str, Any], *, navigate: bool = True) -> None:
@@ -2826,6 +2839,7 @@ def _autosave_draft(realm_id: str, total: float) -> None:
     if saved.get("id"):
         st.session_state["invoice_draft_id"] = str(saved.get("id"))
     st.session_state["invoice_draft_sig"] = signature
+    _clear_draft_derived_caches()
 
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
