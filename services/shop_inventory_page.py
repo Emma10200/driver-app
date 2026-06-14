@@ -61,7 +61,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.02 (copy invoice + labor details)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.03 (history unpaid toggle)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -136,6 +136,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "history_error": "Could not load invoices right now. Please try again shortly.",
         "history_search_placeholder": "Search unit, VIN, or customer...",
         "oil_changes_only": "Oil changes only",
+        "unpaid_only": "Unpaid only",
         "history_no_filter_results": "No invoices match those filters.",
         "copy_to_draft": "Copy invoice to draft",
         "copy_to_draft_ok": "Copied to a new draft. Review and finish when ready.",
@@ -307,6 +308,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "history_error": "Фактурите не могат да се заредят сега. Опитайте отново.",
         "history_search_placeholder": "Търси номер, VIN или клиент...",
         "oil_changes_only": "Само смяна на масло",
+        "unpaid_only": "Само неплатени",
         "history_no_filter_results": "Няма фактури с тези филтри.",
         "copy_to_draft": "Копирай във чернова",
         "copy_to_draft_ok": "Копирано в нова чернова. Прегледайте и завършете.",
@@ -2070,10 +2072,17 @@ def _render_history_view(lang: str, realm_id: str) -> None:
         placeholder=_t(lang, "history_search_placeholder"),
         label_visibility="collapsed",
     ).strip()
-    oil_only = st.toggle(
-        f"🛢️ {_t(lang, 'oil_changes_only')}",
-        key="invoice_history_oil_only",
-    )
+    oil_col, unpaid_col = st.columns(2)
+    with oil_col:
+        oil_only = st.toggle(
+            f"🛢️ {_t(lang, 'oil_changes_only')}",
+            key="invoice_history_oil_only",
+        )
+    with unpaid_col:
+        unpaid_only = st.toggle(
+            f"💵 {_t(lang, 'unpaid_only')}",
+            key="invoice_history_unpaid_only",
+        )
     try:
         with st.spinner(_t(lang, "history_loading")):
             invoices = _cached_recent_invoices(realm_id, 500)
@@ -2082,10 +2091,11 @@ def _render_history_view(lang: str, realm_id: str) -> None:
         st.error(_t(lang, "history_error"))
         return
 
-    invoices = _filter_history_invoices(invoices, hist_search, oil_only)
+    invoices = _filter_history_invoices(invoices, hist_search, oil_only, unpaid_only)
 
     if not invoices:
-        st.info(_t(lang, "history_no_filter_results") if (hist_search or oil_only) else _t(lang, "history_empty"))
+        has_filter = bool(hist_search or oil_only or unpaid_only)
+        st.info(_t(lang, "history_no_filter_results") if has_filter else _t(lang, "history_empty"))
         return
 
     for inv in invoices:
@@ -2147,9 +2157,9 @@ def _render_drafts_section(lang: str, realm_id: str) -> None:
 
 
 def _filter_history_invoices(
-    invoices: list[dict[str, Any]], search_term: str, oil_only: bool
+    invoices: list[dict[str, Any]], search_term: str, oil_only: bool, unpaid_only: bool
 ) -> list[dict[str, Any]]:
-    """Filter cached invoice rows by Unit/VIN/Customer and Oil Change lines."""
+    """Filter cached invoice rows by Unit/VIN/Customer, Oil Change, and unpaid."""
     tokens = [tok for tok in str(search_term or "").strip().lower().split() if tok]
     out: list[dict[str, Any]] = []
     for inv in invoices:
@@ -2159,8 +2169,19 @@ def _filter_history_invoices(
                 continue
         if oil_only and not _invoice_has_oil_change(inv):
             continue
+        if unpaid_only and not _invoice_is_unpaid(inv):
+            continue
         out.append(inv)
     return out
+
+
+def _invoice_is_unpaid(inv: dict[str, Any]) -> bool:
+    """True when cached QBO balance is greater than zero."""
+    value = inv.get("balance", inv.get("Balance"))
+    try:
+        return float(value or 0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _invoice_history_search_blob(inv: dict[str, Any]) -> str:
