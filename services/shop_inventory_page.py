@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.41 (migrate components.html -> st.iframe)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.42 (mobile: keep + button top-right of card)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -454,6 +454,22 @@ _MOBILE_CSS = """
       box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05) !important;
       padding: 0.6rem 0.55rem 0.6rem 0.85rem !important;
       margin: 0.55rem 0 !important;
+  }
+  /* Keep the part card's [card | + ] columns side-by-side on phones. Streamlit
+     stacks st.columns vertically on narrow screens by default, which dropped the
+     green + button full-width BELOW the card. Force the row inside a part card to
+     stay horizontal and let the text column shrink so the + stays top-right. */
+  div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stHorizontalBlock"] {
+      flex-wrap: nowrap !important;
+      align-items: center !important;
+  }
+  div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
+      min-width: 0 !important;
+  }
+  /* The + popover column hugs its content on the right (don't let it grow). */
+  div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:last-child {
+      flex: 0 0 auto !important;
+      width: auto !important;
   }
   .part-card-bare { padding: 0; margin: 0; background: transparent; }
 
