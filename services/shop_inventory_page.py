@@ -60,7 +60,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.35 (keyboard scroll-into-view)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.37 (on-hand on invoice lines, wrap part numbers)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -166,6 +166,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "negatives_on": "✖ Showing negative stock (worst $ first)",
         "neg_value": "Shortage",
         "on_drafts": "On drafts",
+        "on_hand_label": "📦 In stock now",
+        "qty_to_add": "Qty to invoice",
         "no_negatives": "No negative-stock parts. 🎉",
         "cart_title": "Current Invoice",
         "cart_empty": "No parts added yet. Search and tap + to add parts.",
@@ -315,6 +317,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "negatives_on": "✖ Показана отрицателна наличност",
         "neg_value": "Недостиг",
         "on_drafts": "В чернови",
+        "on_hand_label": "📦 Налично сега",
+        "qty_to_add": "Кол. за фактура",
         "no_negatives": "Няма части с отрицателна наличност. 🎉",
         "cart_title": "Текуща фактура",
         "cart_empty": "Още няма добавени части. Търсете и натиснете +, за да добавите.",
@@ -398,6 +402,23 @@ _MOBILE_CSS = """
   }
   div[data-testid="stTextInput"] input::placeholder { color: #9aa5b1 !important; }
 
+  /* Part-picker dropdown (Add part to invoice): let long part numbers wrap onto
+     multiple lines instead of being clipped with an ellipsis, and break on the
+     slashes that separate the many part-number aliases. Targets the BaseWeb
+     listbox options so it only affects open dropdown menus. */
+  ul[role="listbox"] li,
+  div[data-baseweb="popover"] li[role="option"],
+  div[data-baseweb="menu"] li {
+      white-space: normal !important;
+      height: auto !important;
+      min-height: 2.6rem !important;
+      line-height: 1.35 !important;
+      overflow-wrap: anywhere !important;
+      word-break: break-word !important;
+      padding-top: 0.5rem !important;
+      padding-bottom: 0.5rem !important;
+  }
+
   /* Sticky search bar: the search box pins to the top and stays as a slim strip
      while the part list scrolls underneath it, so the shop user can keep typing
      without scrolling back up. We mark the search box with a zero-height anchor
@@ -477,6 +498,8 @@ _MOBILE_CSS = """
       flex-wrap: wrap;
       align-items: baseline;
       gap: 0.45rem;
+      overflow-wrap: anywhere;
+      word-break: break-word;
   }
   .cli-sku {
       font-size: 0.95rem;
@@ -493,6 +516,25 @@ _MOBILE_CSS = """
       color: #54606e;
       margin-top: 0.15rem;
       line-height: 1.35;
+  }
+  /* "In stock now" chip: visually distinct from the Qty-to-invoice stepper so
+     the user never confuses current stock with what they're adding. */
+  .cli-onhand {
+      display: inline-block;
+      margin-top: 0.45rem;
+      font-size: 0.98rem;
+      font-weight: 600;
+      color: #1b7a43;
+      background: #e8f5ed;
+      border: 1px solid #cdead8;
+      border-radius: 8px;
+      padding: 0.3rem 0.6rem;
+  }
+  .cli-onhand b { font-weight: 800; }
+  .cli-onhand-low {
+      color: #b42318;
+      background: #fdecea;
+      border-color: #f7d4cf;
   }
   .li-rate-label {
       font-size: 0.82rem;
@@ -566,6 +608,8 @@ _MOBILE_CSS = """
       font-weight: 650;
       line-height: 1.3;
       color: #1f2933;
+      overflow-wrap: anywhere;
+      word-break: break-word;
   }
   /* Tier 1: part number + SKU share a prominent header row. */
   .part-header {
@@ -813,7 +857,12 @@ def _active_part_options(realm_id: str) -> tuple[list[str], dict[str, dict[str, 
         sku = str(item.get("sku") or "").strip()
         name = str(item.get("name") or "").strip()
         desc = str(item.get("sales_description") or item.get("purchase_description") or "").strip()
-        label = " · ".join(b for b in (f"SKU {sku}" if sku else "", name, desc) if b) or name or sku
+        # Part number / item name leads (most important); SKU and description
+        # follow so they are still searchable but less prominent. The selectbox
+        # filters on this label text, so every searchable field stays in it.
+        label = " · ".join(
+            b for b in (name, desc, f"SKU {sku}" if sku else "") if b
+        ) or name or sku
         # Keep labels unique so selection maps to exactly one part.
         if label in by_label:
             label = f"{label}  ·  [{item.get('qbo_item_id')}]"
@@ -936,6 +985,7 @@ def _cart_line_html(
     line: dict[str, Any],
     unit_price: float,
     line_total: float,
+    on_hand: Any = None,
 ) -> str:
     """One invoice line rendered QuickBooks-style: # · Item · Description · Amount.
 
@@ -948,6 +998,22 @@ def _cart_line_html(
     desc = str(line.get("description") or "").strip()
     sku_html = f"<span class='cli-sku'>{_t(lang, 'sku')} {_escape(sku)}</span>" if sku else ""
     desc_html = f"<div class='cli-desc'>{_escape(desc)}</div>" if desc else ""
+
+    # Current stock on hand, shown as its own clearly-labelled chip so it is never
+    # confused with the quantity being added to the invoice. Red when none/short.
+    on_hand_html = ""
+    if on_hand is not None:
+        oh_qty = _fmt_qty(on_hand)
+        if oh_qty is not None:
+            try:
+                low = float(on_hand) <= 0
+            except (TypeError, ValueError):
+                low = False
+            cls = "cli-onhand cli-onhand-low" if low else "cli-onhand"
+            on_hand_html = (
+                f"<div class='{cls}'>{_t(lang, 'on_hand_label')}: <b>{oh_qty}</b></div>"
+            )
+
     return (
         f"<div class='cli-head'>"
         f"<span class='cli-line'>{_t(lang, 'li_line')} {line_no}</span>"
@@ -955,6 +1021,7 @@ def _cart_line_html(
         f"</div>"
         f"<div class='cli-name'>{_escape(name)}{sku_html}</div>"
         f"{desc_html}"
+        f"{on_hand_html}"
     )
 
 
@@ -2121,21 +2188,32 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
     else:
         # --- QuickBooks-style line items: # · Item / Description · Qty · Rate ·
         # Amount, each on its own clean card so it is readable on a phone. ---
+        # On-hand lookup so each line can clearly show current stock (even for
+        # lines restored from a saved draft, which don't carry on_hand).
+        on_hand_by_id: dict[str, Any] = {}
+        try:
+            for p in _all_active_parts(realm_id):
+                on_hand_by_id[str(p.get("qbo_item_id") or "")] = p.get("qty_on_hand")
+        except Exception:  # noqa: BLE001
+            on_hand_by_id = {}
         total = 0.0
         for idx, line in enumerate(cart):
             unit_price = float(line.get("unit_price") or 0)
             qty = int(line.get("qty") or 0)
             line_total = unit_price * qty
             total += line_total
+            on_hand = line.get("on_hand")
+            if on_hand is None:
+                on_hand = on_hand_by_id.get(str(line.get("qbo_item_id") or ""))
             with st.container(border=True):
                 st.markdown(
-                    _cart_line_html(lang, idx + 1, line, unit_price, line_total),
+                    _cart_line_html(lang, idx + 1, line, unit_price, line_total, on_hand),
                     unsafe_allow_html=True,
                 )
                 qty_col, rate_col, rm_col = st.columns([2, 2, 1], vertical_alignment="bottom")
                 with qty_col:
                     new_qty = st.number_input(
-                        _t(lang, "li_qty"),
+                        _t(lang, "qty_to_add"),
                         min_value=1,
                         step=1,
                         value=max(1, qty),
@@ -2615,6 +2693,7 @@ def _cart_add(item: dict[str, Any]) -> None:
                 item.get("sales_description") or item.get("purchase_description") or ""
             ),
             "unit_price": float(item.get("sales_price") or 0),
+            "on_hand": item.get("qty_on_hand"),
             "qty": 1,
         }
     )
