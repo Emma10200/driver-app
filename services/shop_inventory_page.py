@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.42 (mobile: keep + button top-right of card)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.43 (fix st.iframe height>0)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -1318,7 +1318,7 @@ def _wire_shop_back_button(view: str) -> None:
         }})();
         </script>
         """,
-        height=0,
+        height=1,
     )
 
 
@@ -1537,7 +1537,7 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
         obs.observe(doc.body, {childList: true, subtree: true});
         </script>
         """,
-        height=0,
+        height=1,
     )
 
     last_run = _last_synced(realm_id)

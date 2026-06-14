@@ -534,7 +534,7 @@ def render_missing_fields_banner() -> None:
         });
         </script>
         """,
-        height=0,
+        height=1,
     )
 
 
@@ -617,7 +617,7 @@ def _wire_back_button_shim(current_page: int) -> None:
         }})();
         </script>
         """,
-        height=0,
+        height=1,
     )
 
 
@@ -689,7 +689,7 @@ def _sync_browser_autofill_via_js() -> None:
         }
         </script>
         """,
-        height=0,
+        height=1,
     )
 
 
@@ -1011,6 +1011,6 @@ def scroll_to_top_on_page_change(page: int) -> None:
         });
         </script>
         """,
-        height=0,
+        height=1,
     )
     st.session_state.last_rendered_page = page
