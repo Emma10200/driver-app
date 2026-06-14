@@ -53,12 +53,13 @@ from submission_storage import get_runtime_secret
 logger = logging.getLogger(__name__)
 
 _PAGE_SIZE = 250  # how many cards on first load and per "Show more"
+_INVENTORY_PAGE = 60  # inventory shows fewer per page since each row has an Add button
 _MAX_RESULTS = 2500  # hard ceiling so a runaway list can't lock up the phone
 _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.23 (real add button, no placeholder)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.24 (small add on every part)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -146,6 +147,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "add_to_current": "Add to current invoice",
         "add_to_draft": "Add to draft",
         "added_toast": "Added to invoice",
+        "low_stock_warn": "⚠️ No stock on hand — adding this may go negative.",
         "cart_title": "Current Invoice",
         "cart_empty": "No parts added yet. Search and tap + to add parts.",
         "cart_search": "Search parts to add",
@@ -276,6 +278,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "add_to_current": "Добави към текущата фактура",
         "add_to_draft": "Добави към чернова",
         "added_toast": "Добавено към фактурата",
+        "low_stock_warn": "⚠️ Няма наличност — добавянето може да стане отрицателно.",
         "cart_title": "Текуща фактура",
         "cart_empty": "Още няма добавени части. Търсете и натиснете +, за да добавите.",
         "cart_search": "Търсете части за добавяне",
@@ -367,8 +370,7 @@ _MOBILE_CSS = """
       padding: 0.7rem 1rem !important;
       min-height: 3rem !important;
   }
-  /* Inventory "Add" popover trigger: big, green and obviously tappable.
-     Broad selectors so it styles correctly across Streamlit versions. */
+  /* Inventory "Add" popover trigger: small, compact green square per part row. */
   div[data-testid="stPopover"] button,
   [data-testid="stPopover"] button,
   div[data-testid="stPopover"] > div > button,
@@ -376,12 +378,12 @@ _MOBILE_CSS = """
       background: #2f9e54 !important;
       color: #ffffff !important;
       border: 1px solid #248045 !important;
-      border-radius: 12px !important;
-      font-size: 1.25rem !important;
-      font-weight: 800 !important;
-      min-height: 3.6rem !important;
-      width: 100% !important;
-      box-shadow: 0 2px 4px rgba(16, 24, 40, 0.12) !important;
+      border-radius: 10px !important;
+      font-size: 1.05rem !important;
+      font-weight: 700 !important;
+      min-height: 2.6rem !important;
+      padding: 0.25rem 0.4rem !important;
+      box-shadow: 0 1px 2px rgba(16, 24, 40, 0.1) !important;
   }
   /* Home-only compact "open in app" square. Hidden in PWA/standalone contexts
      where the page is already inside an app-like wrapper. */
@@ -1109,8 +1111,8 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
     # Reset paging when the search term changes.
     if st.session_state.get("shop_last_term") != term:
         st.session_state["shop_last_term"] = term
-        st.session_state["shop_visible_count"] = _PAGE_SIZE
-    visible_count = int(st.session_state.get("shop_visible_count", _PAGE_SIZE))
+        st.session_state["shop_visible_count"] = _INVENTORY_PAGE
+    visible_count = int(st.session_state.get("shop_visible_count", _INVENTORY_PAGE))
 
     if not items:
         st.info(_t(lang, "no_results") if term else _t(lang, "type_to_search"))
@@ -1121,18 +1123,14 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
     shown = len(visible_items)
     st.caption(f"{_t(lang, 'showing')} {shown}{'+' if has_more else ''} {_t(lang, 'results')}")
 
-    # When narrowed to a manageable list, render each card with the green Add
-    # button. When the list is large (broad/blank search), render fast batched
-    # HTML so the phone stays smooth.
-    _INTERACTIVE_MAX = 25
-    if term and shown <= _INTERACTIVE_MAX:
-        _show_cart_flash()
-        for item in visible_items:
+    # Every part gets a small Add (+) button in its row, searched or not.
+    _show_cart_flash()
+    for item in visible_items:
+        card_col, add_col = st.columns([6, 1])
+        with card_col:
             st.markdown(_card_html(item, lang), unsafe_allow_html=True)
+        with add_col:
             _render_add_popover(item, lang, realm_id)
-    else:
-        cards_html = "".join(_card_html(item, lang) for item in visible_items)
-        st.markdown(cards_html, unsafe_allow_html=True)
 
     if has_more:
         if st.button(
@@ -1141,7 +1139,7 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
             key="shop_show_more",
         ):
             st.session_state["shop_visible_count"] = min(
-                visible_count + _PAGE_SIZE, _MAX_RESULTS
+                visible_count + _INVENTORY_PAGE, _MAX_RESULTS
             )
             st.rerun()
 
@@ -1170,7 +1168,16 @@ def _filter_parts(parts: list[dict[str, Any]], term: str) -> list[dict[str, Any]
 def _render_add_popover(item: dict[str, Any], lang: str, realm_id: str) -> None:
     """The inventory "+" affordance: add the part to a draft or a new invoice."""
     item_id = str(item.get("qbo_item_id") or "")
-    with st.popover(f"➕ {_t(lang, 'add')}", use_container_width=True):
+    with st.popover("➕", use_container_width=True):
+        # Low-stock warning: still allow adding, just flag that it may go negative.
+        qty_raw = item.get("qty_on_hand")
+        try:
+            on_hand = float(qty_raw) if qty_raw is not None else None
+        except (TypeError, ValueError):
+            on_hand = None
+        if on_hand is not None and on_hand <= 0:
+            st.warning(f"{_t(lang, 'low_stock_warn')} ({_t(lang, 'in_stock')}: {_fmt_qty(qty_raw)})")
+
         # Existing drafts first, so a started invoice is the easiest target.
         try:
             drafts = list_drafts(realm_id, limit=15)
