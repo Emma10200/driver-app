@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.49 (vehicle clear button)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.50 (add/use buttons above pickers)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -2206,6 +2206,21 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
 
     nonce = int(st.session_state.get("invoice_part_nonce", 0))
     pick_key = f"invoice_part_pick_{nonce}"
+    picked_before = str(st.session_state.get(pick_key) or "")
+    if picked_before and picked_before in part_by_label:
+        item = part_by_label[picked_before]
+        if st.button(
+            f"➕ {_t(lang, 'add_to_invoice')}",
+            key=f"add_picked_top_{nonce}",
+            use_container_width=True,
+            type="primary",
+        ):
+            _cart_add(item)
+            # Bump the nonce so the dropdown resets to blank for the next part.
+            st.session_state["invoice_part_nonce"] = nonce + 1
+            st.session_state["shop_cart_flash"] = _t(lang, "added_toast")
+            st.rerun()
+
     picked = st.selectbox(
         _t(lang, "add_part_label"),
         [""] + part_labels,
@@ -2215,19 +2230,6 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
         accept_new_options=False,
         filter_mode="contains",
     )
-    if picked and picked in part_by_label:
-        item = part_by_label[picked]
-        if st.button(
-            f"➕ {_t(lang, 'add_to_invoice')}",
-            key=f"add_picked_{nonce}",
-            use_container_width=True,
-            type="primary",
-        ):
-            _cart_add(item)
-            # Bump the nonce so the dropdown resets to blank for the next part.
-            st.session_state["invoice_part_nonce"] = nonce + 1
-            st.session_state["shop_cart_flash"] = _t(lang, "added_toast")
-            st.rerun()
 
     st.markdown(f"<div class='shop-title'>{_t(lang, 'cart_title')}</div>", unsafe_allow_html=True)
     cart = _cart()
@@ -2547,6 +2549,19 @@ def _render_invoice_customer_step(lang: str, realm_id: str) -> None:
 
     if not customer_options:
         st.info(_t(lang, "customer_not_listed"))
+    picked_before = str(st.session_state.get("invoice_customer_pick") or "").strip()
+    if picked_before:
+        if st.button(
+            f"➕ {_t(lang, 'use_customer')}",
+            key="use_customer_top",
+            use_container_width=True,
+            type="primary",
+        ):
+            st.session_state["invoice_customer"] = picked_before
+            st.session_state["invoice_customer_is_new"] = picked_before not in customer_options
+            st.session_state["invoice_step"] = "parts"
+            st.rerun()
+
     picked = st.selectbox(
         _t(lang, "customer"),
         customer_options or [""],
@@ -2555,12 +2570,6 @@ def _render_invoice_customer_step(lang: str, realm_id: str) -> None:
         accept_new_options=True,
         filter_mode="contains",
     )
-    if picked and st.button(f"✅ {_t(lang, 'use_customer')}", use_container_width=True):
-        picked_name = str(picked).strip()
-        st.session_state["invoice_customer"] = picked_name
-        st.session_state["invoice_customer_is_new"] = picked_name not in customer_options
-        st.session_state["invoice_step"] = "parts"
-        st.rerun()
 
     if st.button(f"⬅ {_t(lang, 'edit_header')}", key="customer_back_vehicle"):
         st.session_state["invoice_step"] = "vehicle"
