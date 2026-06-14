@@ -62,7 +62,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.04 (part web search icon)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.05 (part detail sales/purchase history)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -724,6 +724,8 @@ _MOBILE_CSS = """
       overflow-wrap: anywhere;
       word-break: break-word;
   }
+    .part-detail-link { color: #1f2933 !important; text-decoration: none !important; }
+    .part-detail-link:active, .part-detail-link:hover { text-decoration: underline !important; }
   /* Tier 1: part number + SKU share a prominent header row. */
   .part-header {
       display: flex;
@@ -1058,10 +1060,12 @@ def _card_html(
         f"<a class='part-web-search' href='{_escape(search_url)}' target='_blank' "
         f"rel='noopener noreferrer' title='Search web for this part' aria-label='Search web for this part'>🔎</a>"
     )
+    part_id = str(item.get("qbo_item_id") or "").strip()
+    detail_href = f"?shop=1&v={_VIEW_PART_DETAIL}&part_id={quote_plus(part_id)}" if part_id else "#"
     header_html = (
         f"<div class='part-header'>"
         f"<span class='part-head-main'>"
-        f"<span class='part-name'>{_escape(name)}</span>{sku_html}"
+        f"<a class='part-name part-detail-link' href='{_escape(detail_href)}'>{_escape(name)}</a>{sku_html}"
         f"</span>"
         f"{search_html}"
         f"</div>"
@@ -1332,6 +1336,7 @@ _VIEW_INVENTORY = "inventory"
 _VIEW_NEW_INVOICE = "new_invoice"
 _VIEW_HISTORY = "history"
 _VIEW_INVOICE_DETAIL = "invoice"
+_VIEW_PART_DETAIL = "part"
 _VIEW_SCAN = "scan"
 _VALID_VIEWS = {
     _VIEW_HOME,
@@ -1339,6 +1344,7 @@ _VALID_VIEWS = {
     _VIEW_NEW_INVOICE,
     _VIEW_HISTORY,
     _VIEW_INVOICE_DETAIL,
+    _VIEW_PART_DETAIL,
     _VIEW_SCAN,
 }
 
@@ -1386,6 +1392,9 @@ def _current_view() -> str:
         raw = raw[0] if raw else _VIEW_HOME
     if raw not in _VALID_VIEWS or raw == _VIEW_HOME:
         return _VIEW_HOME
+    if raw == _VIEW_PART_DETAIL and _query_param_value("part_id"):
+        st.session_state["shop_allow_url_view"] = True
+        return raw
     if not st.session_state.get("shop_allow_url_view"):
         try:
             del st.query_params["v"]
@@ -1513,6 +1522,8 @@ def render_shop_inventory_page() -> None:
         _render_history_view(lang, realm_id)
     elif view == _VIEW_INVOICE_DETAIL:
         _render_invoice_detail_view(lang, realm_id)
+    elif view == _VIEW_PART_DETAIL:
+        _render_part_detail_view(lang, realm_id)
     elif view == _VIEW_NEW_INVOICE:
         _render_new_invoice_view(lang, realm_id)
     elif view == _VIEW_SCAN:
@@ -1673,6 +1684,204 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
 
     if has_more:
         st.caption(_t(lang, "too_many_results"))
+
+
+def _render_part_detail_view(lang: str, realm_id: str) -> None:
+    """Part detail: stock card + chronological sold/purchased transaction history."""
+    _render_view_header(lang, "title", title_override="Part detail")
+    if st.button(f"⬅ {_t(lang, 'card_inventory')}", key="part_detail_back_inventory", use_container_width=True):
+        _go(_VIEW_INVENTORY)
+    if not realm_id:
+        st.info(_t(lang, "not_connected"))
+        return
+    part_id = _query_param_value("part_id").strip()
+    if not part_id:
+        st.info("No part selected.")
+        return
+    part = _find_active_part(realm_id, part_id)
+    if not part:
+        st.error("Could not find that part in the synced inventory cache.")
+        return
+
+    st.markdown(_card_html(part, lang), unsafe_allow_html=True)
+    st.markdown("<div class='shop-title'>Part history</div>", unsafe_allow_html=True)
+
+    with st.spinner("Loading part history…"):
+        sales = _part_sales_events(realm_id, part)
+        purchases = _part_purchase_events(realm_id, part)
+    events = sorted([*sales, *purchases], key=lambda ev: (ev.get("date", ""), ev.get("doc", "")), reverse=True)
+
+    if not events:
+        st.info("No sales or purchase history found for this synced part yet.")
+        return
+    if not purchases:
+        st.caption("Purchase history is best-effort from recent QBO bills/expenses. If older purchases are missing, we can add a dedicated Supabase purchase-history sync next.")
+    for ev in events[:250]:
+        st.markdown(_part_event_html(ev), unsafe_allow_html=True)
+
+
+def _find_active_part(realm_id: str, part_id: str) -> dict[str, Any] | None:
+    for part in _all_active_parts(realm_id):
+        if str(part.get("qbo_item_id") or "") == str(part_id or ""):
+            return part
+    return None
+
+
+def _part_match_names(part: dict[str, Any]) -> set[str]:
+    return {
+        str(value or "").strip().lower()
+        for value in (part.get("name"), part.get("fully_qualified_name"))
+        if str(value or "").strip()
+    }
+
+
+def _part_sales_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, Any]]:
+    names = _part_match_names(part)
+    events: list[dict[str, Any]] = []
+    for inv in list_cached_invoices(realm_id, limit=2000):
+        lines = inv.get("line_items") or []
+        raw = inv.get("raw") if isinstance(inv.get("raw"), dict) else inv
+        if not lines:
+            lines = [line for line in (raw.get("Line") or []) if str(line.get("DetailType") or "") == "SalesItemLineDetail"]
+        for line in lines:
+            item_name = _line_item_name(line)
+            if item_name.lower() not in names:
+                continue
+            qty, rate, amount = _line_item_qty_rate_amount(line)
+            events.append(
+                {
+                    "kind": "sold",
+                    "date": str(inv.get("txn_date") or inv.get("TxnDate") or ""),
+                    "doc": str(inv.get("doc_number") or inv.get("DocNumber") or ""),
+                    "name": _invoice_customer_name(inv),
+                    "qty": qty,
+                    "rate": rate,
+                    "amount": amount,
+                    "memo": str(line.get("description") or line.get("Description") or ""),
+                }
+            )
+    return events
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _recent_qbo_purchase_docs(realm_id: str) -> list[dict[str, Any]]:
+    """Best-effort recent QBO purchase-side docs for part history."""
+    qbo_client, _, _ = build_services()
+    docs: list[dict[str, Any]] = []
+    for entity in ("Purchase", "Bill"):
+        start = 1
+        while start <= 501:  # enough for a useful mobile detail view; avoids huge live queries
+            sql = f"SELECT * FROM {entity} STARTPOSITION {start} MAXRESULTS 100"
+            try:
+                response = qbo_client.query(sql, realm_id=realm_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("QBO %s history query failed: %s", entity, exc)
+                break
+            rows = (response.get("QueryResponse") or {}).get(entity) or []
+            if not rows:
+                break
+            for row in rows:
+                row["_qbo_entity"] = entity
+            docs.extend(rows)
+            if len(rows) < 100:
+                break
+            start += 100
+    return docs
+
+
+def _part_purchase_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, Any]]:
+    names = _part_match_names(part)
+    part_id = str(part.get("qbo_item_id") or "")
+    events: list[dict[str, Any]] = []
+    for doc in _recent_qbo_purchase_docs(realm_id):
+        entity = str(doc.get("_qbo_entity") or "Purchase")
+        vendor = _purchase_vendor_name(doc)
+        date = str(doc.get("TxnDate") or "")
+        doc_no = str(doc.get("DocNumber") or doc.get("Id") or "")
+        for line in doc.get("Line") or []:
+            item_name, item_id = _purchase_line_item_ref(line)
+            if item_id != part_id and item_name.lower() not in names:
+                continue
+            qty, rate, amount = _purchase_line_qty_rate_amount(line)
+            events.append(
+                {
+                    "kind": "bought",
+                    "date": date,
+                    "doc": doc_no,
+                    "name": vendor,
+                    "qty": qty,
+                    "rate": rate,
+                    "amount": amount,
+                    "memo": str(line.get("Description") or entity),
+                }
+            )
+    return events
+
+
+def _line_item_name(line: Any) -> str:
+    if not isinstance(line, dict):
+        return ""
+    if line.get("item_name") or line.get("name"):
+        return str(line.get("item_name") or line.get("name") or "").strip()
+    detail = line.get("SalesItemLineDetail") or {}
+    item_ref = detail.get("ItemRef") or {}
+    return str(item_ref.get("name") or "").strip() if isinstance(item_ref, dict) else ""
+
+
+def _line_item_qty_rate_amount(line: dict[str, Any]) -> tuple[Any, Any, Any]:
+    if "item_name" in line or "unit_price" in line:
+        return line.get("qty"), line.get("unit_price"), line.get("amount")
+    detail = line.get("SalesItemLineDetail") or {}
+    return detail.get("Qty"), detail.get("UnitPrice"), line.get("Amount")
+
+
+def _purchase_line_item_ref(line: dict[str, Any]) -> tuple[str, str]:
+    detail = line.get("ItemBasedExpenseLineDetail") or line.get("SalesItemLineDetail") or {}
+    item_ref = detail.get("ItemRef") or {}
+    if isinstance(item_ref, dict):
+        return str(item_ref.get("name") or "").strip(), str(item_ref.get("value") or "").strip()
+    return "", ""
+
+
+def _purchase_line_qty_rate_amount(line: dict[str, Any]) -> tuple[Any, Any, Any]:
+    detail = line.get("ItemBasedExpenseLineDetail") or line.get("SalesItemLineDetail") or {}
+    return detail.get("Qty"), detail.get("UnitPrice"), line.get("Amount")
+
+
+def _purchase_vendor_name(doc: dict[str, Any]) -> str:
+    for key in ("EntityRef", "VendorRef"):
+        ref = doc.get(key)
+        if isinstance(ref, dict) and ref.get("name"):
+            return str(ref.get("name") or "")
+    return "Vendor"
+
+
+def _part_event_html(ev: dict[str, Any]) -> str:
+    kind = str(ev.get("kind") or "")
+    is_sale = kind == "sold"
+    badge = "Sold" if is_sale else "Bought"
+    badge_cls = "badge-price" if is_sale else "badge-stock"
+    who = str(ev.get("name") or "—")
+    qty = _fmt_qty(ev.get("qty")) or "—"
+    amount = _fmt_price(ev.get("amount"))
+    rate = _fmt_price(ev.get("rate"))
+    bits = [f"Qty: {qty}"]
+    if rate:
+        bits.append(f"Rate: {rate}")
+    if amount:
+        bits.append(f"Amount: {amount}")
+    doc = str(ev.get("doc") or "")
+    date = str(ev.get("date") or "")
+    memo = str(ev.get("memo") or "")
+    return (
+        f"<div class='inv-card'>"
+        f"<div class='inv-top'><span class='inv-no'>{_escape(date or '—')} · {_escape(who)}</span>"
+        f"<span class='badge {badge_cls}'>{badge}</span></div>"
+        f"<div class='inv-meta'>{' · '.join(_escape(bit) for bit in bits)}"
+        f"{(' · Doc: ' + _escape(doc)) if doc else ''}</div>"
+        f"{f'<div class=\'li-desc\'>{_escape(memo)}</div>' if memo else ''}"
+        f"</div>"
+    )
 
 
 def _part_shortage_value(item: dict[str, Any]) -> float:
