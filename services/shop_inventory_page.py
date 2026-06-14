@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.57 (hide redundant Add part label)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.58 (Select part placeholder)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -87,6 +87,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "negatives_short_on": "Negatives ✓",
         "too_many_results": "Showing the maximum number of parts. Type to narrow the list.",
         "add_part_label": "Add a part",
+        "select_part_placeholder": "Select part",
         "add_part_help": "Search by part number, description or SKU, then pick to add.",
         "add_parts_panel_title": "➕ Add parts to this invoice",
         "add_parts_panel_help": "Search/pick a part below, then tap Add to invoice.",
@@ -247,6 +248,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "negatives_short_on": "Отриц. ✓",
         "too_many_results": "Показан е максималният брой части. Пишете, за да стесните списъка.",
         "add_part_label": "Добавете част",
+        "select_part_placeholder": "Изберете част",
         "add_part_help": "Търсете по номер, описание или SKU, след което изберете.",
         "add_parts_panel_title": "➕ Добавете части към фактурата",
         "add_parts_panel_help": "Търсете/изберете част долу, после натиснете Добави.",
@@ -2250,7 +2252,7 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
             [""] + part_labels,
             key=pick_key,
             index=0,
-            placeholder=_t(lang, "add_part_help"),
+            placeholder=_t(lang, "select_part_placeholder"),
             label_visibility="collapsed",
             accept_new_options=False,
             filter_mode="contains",
