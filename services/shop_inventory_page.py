@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.29 (unified part search)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.30 (render all parts, QBO-style lines)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -79,6 +79,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "results": "parts",
         "of": "of",
         "show_more": "Show more parts",
+        "too_many_results": "Showing the maximum number of parts. Type to narrow the list.",
+        "add_part_label": "Add a part",
+        "add_part_help": "Search by part number, description or SKU, then pick to add.",
+        "li_line": "Line",
+        "li_unit": "Rate",
+        "li_ext": "Amount",
         "add_hint": "Add to invoice (coming soon)",
         "updated": "Inventory last updated",
         "never": "not yet synced",
@@ -214,6 +220,12 @@ _STRINGS: dict[str, dict[str, str]] = {
         "results": "части",
         "of": "от",
         "show_more": "Покажи още части",
+        "too_many_results": "Показан е максималният брой части. Пишете, за да стесните списъка.",
+        "add_part_label": "Добавете част",
+        "add_part_help": "Търсете по номер, описание или SKU, след което изберете.",
+        "li_line": "Ред",
+        "li_unit": "Цена",
+        "li_ext": "Сума",
         "add_hint": "Добави към фактура (скоро)",
         "updated": "Последно обновяване",
         "never": "още не е синхронизирано",
@@ -405,6 +417,68 @@ _MOBILE_CSS = """
       margin: 0.55rem 0 !important;
   }
   .part-card-bare { padding: 0; margin: 0; background: transparent; }
+
+  /* QuickBooks-style invoice line items. */
+  .cli-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.6rem;
+      margin-bottom: 0.1rem;
+  }
+  .cli-line {
+      font-size: 0.82rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      color: #5b6a7d;
+      background: #eef1f5;
+      border-radius: 6px;
+      padding: 0.1rem 0.45rem;
+  }
+  .cli-amount {
+      font-size: 1.25rem;
+      font-weight: 800;
+      color: #1f2933;
+  }
+  .cli-name {
+      font-size: 1.12rem;
+      font-weight: 650;
+      line-height: 1.3;
+      color: #1f2933;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 0.45rem;
+  }
+  .cli-sku {
+      font-size: 0.95rem;
+      font-weight: 800;
+      color: #1a55b0;
+      background: #eaf1fb;
+      border: 1px solid #d3e2f6;
+      border-radius: 7px;
+      padding: 0.08rem 0.45rem;
+      white-space: nowrap;
+  }
+  .cli-desc {
+      font-size: 0.98rem;
+      color: #54606e;
+      margin-top: 0.15rem;
+      line-height: 1.35;
+  }
+  .li-rate-label {
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: #5b6a7d;
+      margin-bottom: 0.15rem;
+  }
+  .li-rate-value {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: #1f2933;
+      padding-top: 0.35rem;
+  }
 
   /* Buttons: flat, professional, full-width and easy to tap. */
   div[data-testid="stButton"] > button,
@@ -785,6 +859,34 @@ def _card_html(
     badges_html = f"<div class='part-badges'>{''.join(badges)}</div>"
     wrapper = "part-card-bare" if bare else "part-card"
     return f"<div class='{wrapper}'>{header_html}{meta_html}{badges_html}</div>"
+
+
+def _cart_line_html(
+    lang: str,
+    line_no: int,
+    line: dict[str, Any],
+    unit_price: float,
+    line_total: float,
+) -> str:
+    """One invoice line rendered QuickBooks-style: # · Item · Description · Amount.
+
+    Flat HTML (no leading indentation) so Streamlit's Markdown renderer does not
+    treat it as a code block. The qty stepper / remove button are rendered by the
+    caller as real widgets directly beneath this header.
+    """
+    sku = str(line.get("sku") or "").strip()
+    name = str(line.get("name") or "").strip() or "—"
+    desc = str(line.get("description") or "").strip()
+    sku_html = f"<span class='cli-sku'>{_t(lang, 'sku')} {_escape(sku)}</span>" if sku else ""
+    desc_html = f"<div class='cli-desc'>{_escape(desc)}</div>" if desc else ""
+    return (
+        f"<div class='cli-head'>"
+        f"<span class='cli-line'>{_t(lang, 'li_line')} {line_no}</span>"
+        f"<span class='cli-amount'>{_fmt_price(line_total)}</span>"
+        f"</div>"
+        f"<div class='cli-name'>{_escape(name)}{sku_html}</div>"
+        f"{desc_html}"
+    )
 
 
 def _escape(value: str) -> str:
@@ -1184,15 +1286,10 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
             st.info(_t(lang, "no_results") if term else _t(lang, "type_to_search"))
             return
 
-    # Reset paging when the search term or filter mode changes.
-    page_key = f"neg:{negatives_on}|{term}"
-    if st.session_state.get("shop_last_term") != page_key:
-        st.session_state["shop_last_term"] = page_key
-        st.session_state["shop_visible_count"] = _INVENTORY_PAGE
-    visible_count = int(st.session_state.get("shop_visible_count", _INVENTORY_PAGE))
-
-    visible_items = items[:visible_count]
-    has_more = len(items) > visible_count
+    # Render the FULL result set (search already covers every cached part, not
+    # just a page). Capped only as a safety valve against a pathological catalog.
+    visible_items = items[:_MAX_RESULTS]
+    has_more = len(items) > len(visible_items)
     shown = len(visible_items)
     st.caption(f"{_t(lang, 'showing')} {shown}{'+' if has_more else ''} {_t(lang, 'results')}")
 
@@ -1210,15 +1307,7 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
                 _render_add_popover(item, lang, realm_id)
 
     if has_more:
-        if st.button(
-            f"\u2b07\ufe0f {_t(lang, 'show_more')}",
-            use_container_width=True,
-            key="shop_show_more",
-        ):
-            st.session_state["shop_visible_count"] = min(
-                visible_count + _INVENTORY_PAGE, _MAX_RESULTS
-            )
-            st.rerun()
+        st.caption(_t(lang, "too_many_results"))
 
 
 def _part_shortage_value(item: dict[str, Any]) -> float:
@@ -1820,43 +1909,39 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
 
     _render_invoice_locked_header(lang)
 
-    # --- Add parts: same search behaviour as the Inventory List (search name,
-    # SKU, and both descriptions over the cached catalog, with light "00"/"0-0"
-    # normalization). Kept as a flat list so it stays fast on a phone. ---
-    add_term = st.text_input(
-        _t(lang, "cart_search"),
-        key="invoice_add_search",
-        placeholder=_t(lang, "search_placeholder"),
-    ).strip()
-    if add_term:
-        try:
-            parts = _all_active_parts(realm_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Invoice add-search failed: %s", exc)
-            parts = []
-        matches = _filter_parts(parts, add_term)[:50]
-        if not matches:
-            st.caption(_t(lang, "no_results"))
-        for item in matches:
-            label_col, add_col = st.columns([4, 1])
-            with label_col:
-                sku = str(item.get("sku") or "").strip()
-                name = str(item.get("name") or "").strip()
-                desc = str(
-                    item.get("sales_description") or item.get("purchase_description") or ""
-                ).strip()
-                price = _fmt_price(item.get("sales_price"))
-                head = " · ".join(
-                    b for b in (f"{_t(lang, 'sku')} {sku}" if sku else "", name, price) if b
-                )
-                st.markdown(head or name or "—")
-                if desc:
-                    st.caption(_escape(desc))
-            with add_col:
-                if st.button("➕", key=f"add_{item.get('qbo_item_id')}", use_container_width=True):
-                    _cart_add(item)
-                    st.session_state["shop_cart_flash"] = _t(lang, "added_toast")
-                    st.rerun()
+    # --- Add parts: a pre-rendered dropdown (like the customer picker). Every
+    # active part is an option; QuickBooks-style, you type to filter by part
+    # number / description / SKU and pick one to add it as a line. ---
+    try:
+        part_labels, part_by_label = _active_part_options(realm_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Could not build part options: %s", exc)
+        part_labels, part_by_label = [], {}
+
+    nonce = int(st.session_state.get("invoice_part_nonce", 0))
+    pick_key = f"invoice_part_pick_{nonce}"
+    picked = st.selectbox(
+        _t(lang, "add_part_label"),
+        [""] + part_labels,
+        key=pick_key,
+        index=0,
+        placeholder=_t(lang, "add_part_help"),
+        accept_new_options=False,
+        filter_mode="contains",
+    )
+    if picked and picked in part_by_label:
+        item = part_by_label[picked]
+        if st.button(
+            f"➕ {_t(lang, 'add_to_invoice')}",
+            key=f"add_picked_{nonce}",
+            use_container_width=True,
+            type="primary",
+        ):
+            _cart_add(item)
+            # Bump the nonce so the dropdown resets to blank for the next part.
+            st.session_state["invoice_part_nonce"] = nonce + 1
+            st.session_state["shop_cart_flash"] = _t(lang, "added_toast")
+            st.rerun()
 
     st.markdown(f"<div class='shop-title'>{_t(lang, 'cart_title')}</div>", unsafe_allow_html=True)
     cart = _cart()
@@ -1864,33 +1949,47 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
         st.info(_t(lang, "cart_empty"))
         total = 0.0
     else:
-        # --- Cart line items with quantity steppers + remove. ---
+        # --- QuickBooks-style line items: # · Item / Description · Qty · Rate ·
+        # Amount, each on its own clean card so it is readable on a phone. ---
         total = 0.0
         for idx, line in enumerate(cart):
-            line_total = float(line.get("unit_price") or 0) * int(line.get("qty") or 0)
+            unit_price = float(line.get("unit_price") or 0)
+            qty = int(line.get("qty") or 0)
+            line_total = unit_price * qty
             total += line_total
-            name_col, qty_col, rm_col = st.columns([3, 2, 1])
-            with name_col:
-                sku = str(line.get("sku") or "").strip()
-                head = f"{_t(lang, 'sku')} {sku} · " if sku else ""
-                st.markdown(f"**{head}{_escape(str(line.get('name') or ''))}**")
-                st.caption(f"{_fmt_price(line.get('unit_price'))} · {_fmt_price(line_total)}")
-            with qty_col:
-                new_qty = st.number_input(
-                    _t(lang, "qty"),
-                    min_value=1,
-                    step=1,
-                    value=int(line.get("qty") or 1),
-                    key=f"qty_{idx}_{line.get('qbo_item_id')}",
+            with st.container(border=True):
+                st.markdown(
+                    _cart_line_html(lang, idx + 1, line, unit_price, line_total),
+                    unsafe_allow_html=True,
                 )
-                if int(new_qty) != int(line.get("qty") or 1):
-                    line["qty"] = int(new_qty)
-                    st.rerun()
-            with rm_col:
-                st.markdown("&nbsp;", unsafe_allow_html=True)
-                if st.button("🗑", key=f"rm_{idx}_{line.get('qbo_item_id')}", help=_t(lang, "remove")):
-                    cart.pop(idx)
-                    st.rerun()
+                qty_col, rate_col, rm_col = st.columns([2, 2, 1], vertical_alignment="bottom")
+                with qty_col:
+                    new_qty = st.number_input(
+                        _t(lang, "li_qty"),
+                        min_value=1,
+                        step=1,
+                        value=max(1, qty),
+                        key=f"qty_{idx}_{line.get('qbo_item_id')}",
+                    )
+                    if int(new_qty) != qty:
+                        line["qty"] = int(new_qty)
+                        st.rerun()
+                with rate_col:
+                    st.markdown(
+                        f"<div class='li-rate-label'>{_t(lang, 'li_unit')}</div>"
+                        f"<div class='li-rate-value'>{_fmt_price(unit_price)}</div>",
+                        unsafe_allow_html=True,
+                    )
+                with rm_col:
+                    st.markdown("<div class='li-rate-label'>&nbsp;</div>", unsafe_allow_html=True)
+                    if st.button(
+                        "🗑",
+                        key=f"rm_{idx}_{line.get('qbo_item_id')}",
+                        help=_t(lang, "remove"),
+                        use_container_width=True,
+                    ):
+                        cart.pop(idx)
+                        st.rerun()
 
     st.markdown(f"### {_t(lang, 'invoice_total_label')}: {_fmt_price(total)}")
 
@@ -1943,6 +2042,7 @@ _INVOICE_FIELD_KEYS = (
     "invoice_customer_is_new",
     "invoice_customer_pick",
     "invoice_add_search",
+    "invoice_part_nonce",
     "invoice_draft_id",
     "invoice_draft_sig",
 )
@@ -2205,6 +2305,7 @@ def _load_draft_into_session(draft: dict[str, Any], *, navigate: bool = True) ->
                 "qbo_item_id": str(li.get("qbo_item_id") or ""),
                 "sku": str(li.get("sku") or ""),
                 "name": str(li.get("name") or ""),
+                "description": str(li.get("description") or ""),
                 "unit_price": float(li.get("unit_price") or 0),
                 "qty": int(li.get("qty") or 1),
             }
@@ -2230,6 +2331,7 @@ def _invoice_line_items() -> list[dict[str, Any]]:
             "qbo_item_id": str(line.get("qbo_item_id") or ""),
             "sku": str(line.get("sku") or ""),
             "name": str(line.get("name") or ""),
+            "description": str(line.get("description") or ""),
             "qty": int(line.get("qty") or 0),
             "unit_price": float(line.get("unit_price") or 0),
             "line_total": round(float(line.get("unit_price") or 0) * int(line.get("qty") or 0), 2),
@@ -2328,6 +2430,9 @@ def _cart_add(item: dict[str, Any]) -> None:
             "qbo_item_id": item_id,
             "sku": str(item.get("sku") or ""),
             "name": str(item.get("name") or ""),
+            "description": str(
+                item.get("sales_description") or item.get("purchase_description") or ""
+            ),
             "unit_price": float(item.get("sales_price") or 0),
             "qty": 1,
         }
