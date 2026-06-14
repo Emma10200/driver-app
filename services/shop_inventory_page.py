@@ -67,7 +67,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.06 (purchase history cache/UI)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.07 (purchase full re-pull + account lines)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -147,6 +147,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "purchase_history_search_placeholder": "Search part, vendor, or document...",
         "purchase_history_empty": "No purchase history found yet. Tap Refresh purchases.",
         "purchase_history_refresh": "Refresh purchases",
+        "purchase_history_full_refresh": "Re-pull all purchases",
         "purchase_history_refreshing": "Checking QuickBooks for purchase changes…",
         "purchase_history_refresh_done": "Purchase history updated",
         "purchase_history_refresh_none": "Purchase history already up to date",
@@ -328,6 +329,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "purchase_history_search_placeholder": "Търси част, доставчик или документ...",
         "purchase_history_empty": "Няма история на покупки. Натиснете обновяване.",
         "purchase_history_refresh": "Обнови покупки",
+        "purchase_history_full_refresh": "Изтегли всички покупки",
         "purchase_history_refreshing": "Проверка за промени в покупките…",
         "purchase_history_refresh_done": "Историята на покупки е обновена",
         "purchase_history_refresh_none": "Историята на покупки вече е актуална",
@@ -1797,7 +1799,6 @@ def _part_sales_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, An
 
 
 def _part_purchase_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, Any]]:
-    names = _part_match_names(part)
     part_id = str(part.get("qbo_item_id") or "")
     events: list[dict[str, Any]] = []
     for doc in _cached_recent_purchases(realm_id, 2000):
@@ -1810,8 +1811,7 @@ def _part_purchase_events(realm_id: str, part: dict[str, Any]) -> list[dict[str,
             raw = doc.get("raw") if isinstance(doc.get("raw"), dict) else doc
             lines = raw.get("Line") or []
         for line in lines:
-            item_name, item_id = _purchase_line_item_ref(line)
-            if item_id != part_id and item_name.lower() not in names:
+            if not _purchase_line_matches_part(line, part, part_id):
                 continue
             qty, rate, amount = _purchase_line_qty_rate_amount(line)
             events.append(
@@ -1827,6 +1827,31 @@ def _part_purchase_events(realm_id: str, part: dict[str, Any]) -> list[dict[str,
                 }
             )
     return events
+
+
+def _purchase_line_matches_part(line: dict[str, Any], part: dict[str, Any], part_id: str) -> bool:
+    item_name, item_id = _purchase_line_item_ref(line)
+    if part_id and item_id == part_id:
+        return True
+    names = _part_match_names(part)
+    if item_name.lower() in names:
+        return True
+    blob = _line_item_search_text(line)
+    haystack = blob.lower()
+    haystack_norm = _collapse_alnum(blob)
+    needles = [
+        str(part.get("name") or ""),
+        str(part.get("fully_qualified_name") or ""),
+        str(part.get("sku") or ""),
+    ]
+    for raw in needles:
+        needle = raw.strip().lower()
+        needle_norm = _collapse_alnum(raw)
+        if needle and needle in haystack:
+            return True
+        if needle_norm and len(needle_norm) >= 4 and needle_norm in haystack_norm:
+            return True
+    return False
 
 
 def _line_item_name(line: Any) -> str:
@@ -2375,19 +2400,13 @@ def _render_purchase_history_view(lang: str, realm_id: str) -> None:
     synced_at = _cached_purchase_history_synced_at(realm_id)
     if synced_at:
         st.caption(f"{_t(lang, 'updated')}: {synced_at.replace('T', ' ')[:16]}")
-    if st.button(f"🔄 {_t(lang, 'purchase_history_refresh')}", use_container_width=True):
-        with st.spinner(_t(lang, "purchase_history_refreshing")):
-            result = sync_shop_purchase_history(realm_id)
-        _cached_recent_purchases.clear()
-        _cached_purchase_history_synced_at.clear()
-        if result.status == "success":
-            if result.purchases_upserted:
-                st.success(f"{_t(lang, 'purchase_history_refresh_done')} (+{result.purchases_upserted})")
-            else:
-                st.info(_t(lang, "purchase_history_refresh_none"))
-        else:
-            st.error(f"{_t(lang, 'history_error')} {result.message}")
-        st.rerun()
+    refresh_col, full_col = st.columns(2)
+    with refresh_col:
+        if st.button(f"🔄 {_t(lang, 'purchase_history_refresh')}", use_container_width=True):
+            _run_purchase_history_refresh(realm_id, lang, force_full=False)
+    with full_col:
+        if st.button(f"⟳ {_t(lang, 'purchase_history_full_refresh')}", use_container_width=True):
+            _run_purchase_history_refresh(realm_id, lang, force_full=True)
 
     term = st.text_input(
         _t(lang, "purchase_history_title"),
@@ -2408,6 +2427,21 @@ def _render_purchase_history_view(lang: str, realm_id: str) -> None:
         return
     for row in purchases:
         st.markdown(_purchase_html(row), unsafe_allow_html=True)
+
+
+def _run_purchase_history_refresh(realm_id: str, lang: str, *, force_full: bool) -> None:
+    with st.spinner(_t(lang, "purchase_history_refreshing")):
+        result = sync_shop_purchase_history(realm_id, force_full=force_full)
+    _cached_recent_purchases.clear()
+    _cached_purchase_history_synced_at.clear()
+    if result.status == "success":
+        if result.purchases_upserted:
+            st.success(f"{_t(lang, 'purchase_history_refresh_done')} (+{result.purchases_upserted})")
+        else:
+            st.info(_t(lang, "purchase_history_refresh_none"))
+    else:
+        st.error(f"{_t(lang, 'history_error')} {result.message}")
+    st.rerun()
 
 
 def _filter_purchase_history(rows: list[dict[str, Any]], term: str) -> list[dict[str, Any]]:
@@ -2447,7 +2481,7 @@ def _purchase_html(row: dict[str, Any]) -> str:
     for line in lines[:6]:
         if not isinstance(line, dict):
             continue
-        name = str(line.get("item_name") or "")
+        name = str(line.get("item_name") or line.get("account_name") or line.get("description") or "")
         qty = _fmt_qty(line.get("qty")) or "—"
         amt = _fmt_price(line.get("amount"))
         line_bits.append(f"{_escape(name or '—')} · Qty: {_escape(qty)}{(' · ' + _escape(amt)) if amt else ''}")
@@ -2582,7 +2616,7 @@ def _line_item_search_text(line: Any) -> str:
     if not isinstance(line, dict):
         return str(line or "")
     parts: list[str] = []
-    for key in ("item_name", "name", "description", "Description"):
+    for key in ("item_id", "item_name", "name", "account_name", "description", "Description"):
         value = line.get(key)
         if value:
             parts.append(str(value))

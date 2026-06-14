@@ -167,21 +167,22 @@ def _map_purchase_doc(realm_id: str, entity: str, doc: dict[str, Any]) -> dict[s
 def _line_items(doc: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for line in doc.get("Line") or []:
-        detail = line.get("ItemBasedExpenseLineDetail") or {}
-        item_ref = detail.get("ItemRef") if isinstance(detail, dict) else None
-        if not isinstance(item_ref, dict):
-            # Account-based expense lines don't identify a part, so they cannot
-            # participate in part-specific history. Keep them out of the flattened
-            # searchable cache; the full raw payload is still retained.
-            continue
+        detail_type = str(line.get("DetailType") or "")
+        item_detail = line.get("ItemBasedExpenseLineDetail") or {}
+        account_detail = line.get("AccountBasedExpenseLineDetail") or {}
+        item_ref = item_detail.get("ItemRef") if isinstance(item_detail, dict) else None
+        account_ref = account_detail.get("AccountRef") if isinstance(account_detail, dict) else None
         out.append(
             {
                 "line_id": str(line.get("Id") or ""),
-                "item_id": str(item_ref.get("value") or ""),
-                "item_name": str(item_ref.get("name") or ""),
+                "detail_type": detail_type,
+                "item_id": str(item_ref.get("value") or "") if isinstance(item_ref, dict) else "",
+                "item_name": str(item_ref.get("name") or "") if isinstance(item_ref, dict) else "",
+                "account_id": str(account_ref.get("value") or "") if isinstance(account_ref, dict) else "",
+                "account_name": str(account_ref.get("name") or "") if isinstance(account_ref, dict) else "",
                 "description": str(line.get("Description") or ""),
-                "qty": _as_number(detail.get("Qty")),
-                "unit_price": _as_number(detail.get("UnitPrice")),
+                "qty": _as_number(item_detail.get("Qty")) if isinstance(item_detail, dict) else None,
+                "unit_price": _as_number(item_detail.get("UnitPrice")) if isinstance(item_detail, dict) else None,
                 "amount": _as_number(line.get("Amount")),
             }
         )
