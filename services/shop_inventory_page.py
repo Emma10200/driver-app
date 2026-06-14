@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any
+from urllib.parse import quote_plus
 
 import streamlit as st
 
@@ -61,7 +62,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.03 (history unpaid toggle)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.04 (part web search icon)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -749,24 +750,27 @@ _MOBILE_CSS = """
       padding: 0.18rem 0.55rem;
       white-space: nowrap;
   }
-  /* Placeholder "add to invoice" affordance (not wired yet). */
-  .part-add {
+  /* Web search affordance: small magnifying glass in the top-right of each part
+     card. Pure HTML link, so it reliably stays where widget columns could not. */
+  .part-web-search {
       flex: 0 0 auto;
       display: inline-flex;
       align-items: center;
       justify-content: center;
       width: 2.1rem;
       height: 2.1rem;
-      border-radius: 999px;
-      font-size: 1.5rem;
-      font-weight: 600;
+      border-radius: 10px;
+      font-size: 1.15rem;
+      font-weight: 700;
       line-height: 1;
-      color: #2f7a48;
-      background: #e8f5ed;
-      border: 1px solid #cdead8;
+      color: #1a55b0 !important;
+      background: #eaf1fb;
+      border: 1px solid #d3e2f6;
       cursor: pointer;
       user-select: none;
+      text-decoration: none !important;
   }
+  .part-web-search:hover { background: #dceafc; border-color: #bfd6f2; }
   .part-meta { font-size: 1.0rem; color: #616e7c; margin-top: 0.3rem; line-height: 1.35; }
   .part-badges { margin-top: 0.65rem; display: flex; flex-wrap: wrap; gap: 0.4rem; }
   .badge {
@@ -1041,11 +1045,25 @@ def _card_html(
     sku_html = (
         f"<span class='part-sku'>{_t(lang, 'sku')} {_escape(sku)}</span>" if sku else ""
     )
+    search_query = " ".join(
+        value
+        for value in (
+            str(item.get("name") or item.get("fully_qualified_name") or "").strip(),
+            description,
+        )
+        if value
+    )
+    search_url = f"https://www.google.com/search?q={quote_plus(search_query)}" if search_query else "https://www.google.com/"
+    search_html = (
+        f"<a class='part-web-search' href='{_escape(search_url)}' target='_blank' "
+        f"rel='noopener noreferrer' title='Search web for this part' aria-label='Search web for this part'>🔎</a>"
+    )
     header_html = (
         f"<div class='part-header'>"
         f"<span class='part-head-main'>"
         f"<span class='part-name'>{_escape(name)}</span>{sku_html}"
         f"</span>"
+        f"{search_html}"
         f"</div>"
     )
 
