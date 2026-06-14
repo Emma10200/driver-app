@@ -58,7 +58,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.19 (bigger add button + prior miles)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.20 (VIN normalization)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -1235,7 +1235,7 @@ def _cached_vehicle_customer_suggestions(realm_id: str, unit: str, vin: str) -> 
         score = 0
         if unit_norm and any(_vehicle_match(unit_norm, c, min_len=2) for c in unit_candidates):
             score += 3
-        if vin_norm and any(_vehicle_match(vin_norm, c, min_len=5) for c in vin_candidates):
+        if vin_norm and any(_vin_match(vin_norm, c) for c in vin_candidates):
             score += 5
         if score:
             scores[customer] = max(scores.get(customer, 0), score)
@@ -1258,6 +1258,7 @@ def _cached_vehicle_field_suggestions(realm_id: str, unit: str, vin: str) -> dic
     all_units: list[str] = []
     all_vins: list[str] = []
     all_miles: list[str] = []
+    seen_vin_norms: set[str] = set()
     matched_vins: list[str] = []
     matched_miles: list[str] = []
     if not realm_id:
@@ -1266,18 +1267,22 @@ def _cached_vehicle_field_suggestions(realm_id: str, unit: str, vin: str) -> dic
     for inv in list_cached_invoices(realm_id, limit=2000):
         vehicle = _invoice_vehicle_values(inv)
         inv_unit = vehicle["unit"]
-        inv_vin = vehicle["vin"]
+        # Normalize VIN for display: uppercase + trimmed, deduped case-insensitively
+        # so "1w700482" and "1W700482" collapse to a single suggestion.
+        inv_vin = vehicle["vin"].strip().upper()
+        inv_vin_norm = _norm_vehicle_key(inv_vin)
         inv_miles = vehicle["miles"]
 
         if inv_unit and inv_unit not in all_units:
             all_units.append(inv_unit)
-        if inv_vin and inv_vin not in all_vins:
+        if inv_vin and inv_vin_norm and inv_vin_norm not in seen_vin_norms:
+            seen_vin_norms.add(inv_vin_norm)
             all_vins.append(inv_vin)
         if inv_miles and inv_miles not in all_miles:
             all_miles.append(inv_miles)
 
         unit_match = bool(unit_norm and _vehicle_match(unit_norm, inv_unit, min_len=2))
-        vin_match = bool(vin_norm and _vehicle_match(vin_norm, inv_vin, min_len=5))
+        vin_match = bool(vin_norm and _vin_match(vin_norm, inv_vin))
         if unit_match or vin_match:
             if inv_vin and inv_vin not in matched_vins:
                 matched_vins.append(inv_vin)
@@ -1306,14 +1311,35 @@ def _invoice_vehicle_values(inv: dict[str, Any]) -> dict[str, str]:
 
 
 def _norm_vehicle_key(value: str) -> str:
+    """Normalize a unit/VIN for comparison: uppercase, alphanumeric only.
+
+    This makes matching case-insensitive and ignores spaces/dashes, so the same
+    VIN typed as ``1w7 00482`` and ``1W700482`` compare equal.
+    """
     return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
 
 
 def _vehicle_match(needle: str, candidate: str, *, min_len: int) -> bool:
+    """Loose match for UNIT numbers (substring either direction)."""
     haystack = _norm_vehicle_key(candidate)
     if len(needle) < min_len or len(haystack) < min_len:
         return False
-    return needle in haystack or haystack in needle or needle[-min_len:] == haystack[-min_len:]
+    return needle in haystack or haystack in needle
+
+
+def _vin_match(a_norm: str, b_value: str, *, min_len: int = 5) -> bool:
+    """Match VINs by suffix containment so partials map to the full VIN.
+
+    Real VINs are 17 chars but the shop often enters only the last 6-8. So a
+    match means one normalized VIN is a *suffix* of the other (e.g. ``700482``
+    matches ``1GRAR06281W700482``). Suffix containment - not "share the last N
+    characters" - prevents two genuinely different VINs that merely end the same
+    (``ABC700482`` vs ``XYZ700482``) from being treated as the same vehicle.
+    """
+    b_norm = _norm_vehicle_key(b_value)
+    if len(a_norm) < min_len or len(b_norm) < min_len:
+        return False
+    return a_norm == b_norm or a_norm.endswith(b_norm) or b_norm.endswith(a_norm)
 
 
 def _render_history_view(lang: str, realm_id: str) -> None:
@@ -1901,7 +1927,7 @@ def _submit_shop_invoice(lang: str, realm_id: str, *, status: str, total: float)
                 customer_name=str(st.session_state.get("invoice_customer") or ""),
                 customer_is_new=bool(st.session_state.get("invoice_customer_is_new")),
                 truck_unit=str(st.session_state.get("invoice_truck") or ""),
-                vin=str(st.session_state.get("invoice_vin") or ""),
+                vin=str(st.session_state.get("invoice_vin") or "").strip().upper(),
                 miles=str(st.session_state.get("invoice_miles") or ""),
                 notes=str(st.session_state.get("invoice_notes") or ""),
                 line_items=_invoice_line_items(),
@@ -2016,7 +2042,7 @@ def _autosave_draft(realm_id: str, total: float) -> None:
             customer_name=str(st.session_state.get("invoice_customer") or ""),
             customer_is_new=bool(st.session_state.get("invoice_customer_is_new")),
             truck_unit=str(st.session_state.get("invoice_truck") or ""),
-            vin=str(st.session_state.get("invoice_vin") or ""),
+            vin=str(st.session_state.get("invoice_vin") or "").strip().upper(),
             miles=str(st.session_state.get("invoice_miles") or ""),
             notes=str(st.session_state.get("invoice_notes") or ""),
             line_items=line_items,
@@ -2033,22 +2059,33 @@ def _autosave_draft(realm_id: str, total: float) -> None:
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
 def _last_invoice_for_unit(realm_id: str, unit: str, vin: str) -> dict[str, str]:
-    """Return the most recent invoice doc/date/miles for a unit (or VIN)."""
+    """Return the MOST RECENT invoice doc/date/miles for a unit (or VIN).
+
+    Matching is case-insensitive (normalized), and recency wins regardless of how
+    the VIN was capitalized on each past invoice - so the newest reading is shown
+    even if an older one used different casing.
+    """
     unit_norm = _norm_vehicle_key(unit)
     vin_norm = _norm_vehicle_key(vin)
     if not realm_id or (not unit_norm and not vin_norm):
         return {}
+
+    best: dict[str, str] = {}
+    best_date = ""
     for inv in list_cached_invoices(realm_id, limit=2000):
         vehicle = _invoice_vehicle_values(inv)
         if (unit_norm and _vehicle_match(unit_norm, vehicle["unit"], min_len=2)) or (
-            vin_norm and _vehicle_match(vin_norm, vehicle["vin"], min_len=5)
+            vin_norm and _vin_match(vin_norm, vehicle["vin"])
         ):
-            return {
-                "doc": str(inv.get("doc_number") or ""),
-                "date": str(inv.get("txn_date") or ""),
-                "miles": vehicle["miles"],
-            }
-    return {}
+            date = str(inv.get("txn_date") or "")
+            if date >= best_date:  # ISO dates sort lexically; newest wins
+                best_date = date
+                best = {
+                    "doc": str(inv.get("doc_number") or ""),
+                    "date": date,
+                    "miles": vehicle["miles"],
+                }
+    return best
 
 
 def _cart_add(item: dict[str, Any]) -> None:
