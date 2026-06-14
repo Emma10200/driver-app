@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.58 (Select part placeholder)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.01 (history filters + oil toggle)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -132,6 +132,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "history_loading": "Loading invoices…",
         "history_empty": "No invoices yet.",
         "history_error": "Could not load invoices right now. Please try again shortly.",
+        "history_search_placeholder": "Search unit, VIN, or customer...",
+        "oil_changes_only": "Oil changes only",
+        "history_no_filter_results": "No invoices match those filters.",
         "history_refresh": "Refresh invoices",
         "history_refreshing": "Checking QuickBooks for invoice changes…",
         "history_refresh_done": "Invoice history updated",
@@ -293,6 +296,9 @@ _STRINGS: dict[str, dict[str, str]] = {
         "history_loading": "Зареждане на фактури…",
         "history_empty": "Все още няма фактури.",
         "history_error": "Фактурите не могат да се заредят сега. Опитайте отново.",
+        "history_search_placeholder": "Търси номер, VIN или клиент...",
+        "oil_changes_only": "Само смяна на масло",
+        "history_no_filter_results": "Няма фактури с тези филтри.",
         "history_refresh": "Обнови фактурите",
         "history_refreshing": "Проверка за промени във фактурите…",
         "history_refresh_done": "Историята е обновена",
@@ -1975,16 +1981,28 @@ def _render_history_view(lang: str, realm_id: str) -> None:
         f"<div class='shop-title'>{_t(lang, 'qbo_invoices_title')}</div>",
         unsafe_allow_html=True,
     )
+    hist_search = st.text_input(
+        _t(lang, "history_title"),
+        key="invoice_history_search",
+        placeholder=_t(lang, "history_search_placeholder"),
+        label_visibility="collapsed",
+    ).strip()
+    oil_only = st.toggle(
+        f"🛢️ {_t(lang, 'oil_changes_only')}",
+        key="invoice_history_oil_only",
+    )
     try:
         with st.spinner(_t(lang, "history_loading")):
-            invoices = _cached_recent_invoices(realm_id, 50)
+            invoices = _cached_recent_invoices(realm_id, 500)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Invoice history load failed: %s", exc)
         st.error(_t(lang, "history_error"))
         return
 
+    invoices = _filter_history_invoices(invoices, hist_search, oil_only)
+
     if not invoices:
-        st.info(_t(lang, "history_empty"))
+        st.info(_t(lang, "history_no_filter_results") if (hist_search or oil_only) else _t(lang, "history_empty"))
         return
 
     for inv in invoices:
@@ -2043,6 +2061,84 @@ def _render_drafts_section(lang: str, realm_id: str) -> None:
                 delete_draft(draft_id)
                 _clear_draft_derived_caches()
                 st.rerun()
+
+
+def _filter_history_invoices(
+    invoices: list[dict[str, Any]], search_term: str, oil_only: bool
+) -> list[dict[str, Any]]:
+    """Filter cached invoice rows by Unit/VIN/Customer and Oil Change lines."""
+    tokens = [tok for tok in str(search_term or "").strip().lower().split() if tok]
+    out: list[dict[str, Any]] = []
+    for inv in invoices:
+        if tokens:
+            blob = _invoice_history_search_blob(inv).lower()
+            if not all(tok in blob for tok in tokens):
+                continue
+        if oil_only and not _invoice_has_oil_change(inv):
+            continue
+        out.append(inv)
+    return out
+
+
+def _invoice_history_search_blob(inv: dict[str, Any]) -> str:
+    """Searchable vehicle/customer text for the history filter."""
+    vehicle = _invoice_vehicle_values(inv)
+    raw = inv.get("raw") if isinstance(inv.get("raw"), dict) else inv
+    customer = str(inv.get("customer_name") or "").strip()
+    if not customer:
+        ref = raw.get("CustomerRef") if isinstance(raw, dict) else None
+        if isinstance(ref, dict):
+            customer = str(ref.get("name") or "").strip()
+    return " ".join(
+        str(value or "")
+        for value in (
+            customer,
+            vehicle.get("unit"),
+            vehicle.get("vin"),
+            vehicle.get("miles"),
+        )
+    )
+
+
+def _invoice_has_oil_change(inv: dict[str, Any]) -> bool:
+    """True when any invoice line's item/product-service name is Oil Change."""
+    line_sources: list[Any] = []
+    line_items = inv.get("line_items")
+    if isinstance(line_items, list):
+        line_sources.extend(line_items)
+    raw = inv.get("raw") if isinstance(inv.get("raw"), dict) else inv
+    raw_lines = raw.get("Line") if isinstance(raw, dict) else None
+    if isinstance(raw_lines, list):
+        line_sources.extend(raw_lines)
+
+    for line in line_sources:
+        text = _line_item_search_text(line).lower()
+        # QBO item name is expected to be "Oil Change". Contains-match is used so
+        # names like "Oil Change - Diesel" still qualify.
+        if "oil change" in text:
+            return True
+    return False
+
+
+def _line_item_search_text(line: Any) -> str:
+    """Best-effort item-name text extraction for normalized and raw QBO lines."""
+    if not isinstance(line, dict):
+        return str(line or "")
+    parts: list[str] = []
+    for key in ("item_name", "name", "description", "Description"):
+        value = line.get(key)
+        if value:
+            parts.append(str(value))
+    detail = line.get("SalesItemLineDetail")
+    if isinstance(detail, dict):
+        item_ref = detail.get("ItemRef")
+        if isinstance(item_ref, dict):
+            parts.append(str(item_ref.get("name") or ""))
+            parts.append(str(item_ref.get("value") or ""))
+    item_ref = line.get("ItemRef")
+    if isinstance(item_ref, dict):
+        parts.append(str(item_ref.get("name") or ""))
+    return " ".join(part for part in parts if part)
 
 
 def _invoice_html(inv: dict[str, Any], lang: str) -> str:
