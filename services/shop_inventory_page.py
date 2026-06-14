@@ -33,12 +33,17 @@ from qbo.shop_invoices import (
     next_invoice_number,
 )
 from qbo.shop_invoice_history_sync import sync_shop_invoice_history
+from qbo.shop_purchase_history_sync import sync_shop_purchase_history
 from services.qbo_supabase import SupabaseRestClient
 from services.shop_customer_cache import customer_names, last_customer_sync
 from services.shop_invoice_history_cache import (
     get_cached_invoice,
     last_invoice_history_sync,
     list_cached_invoices,
+)
+from services.shop_purchase_history_cache import (
+    last_purchase_history_sync,
+    list_cached_purchases,
 )
 from services.shop_invoice_queue import (
     delete_draft,
@@ -62,7 +67,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.05 (part detail sales/purchase history)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.06 (purchase history cache/UI)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -122,6 +127,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "card_new_invoice_desc": "Start an invoice for a job",
         "card_history": "Invoice History",
         "card_history_desc": "See past invoices",
+        "card_purchase_history": "Purchase History",
+        "card_purchase_history_desc": "See where parts were bought",
         "card_scan": "Scan Document",
         "card_scan_desc": "Snap a part to find it",
         "coming_soon": "Coming soon",
@@ -136,6 +143,13 @@ _STRINGS: dict[str, dict[str, str]] = {
         "history_empty": "No invoices yet.",
         "history_error": "Could not load invoices right now. Please try again shortly.",
         "history_search_placeholder": "Search unit, VIN, or customer...",
+        "purchase_history_title": "Purchase History",
+        "purchase_history_search_placeholder": "Search part, vendor, or document...",
+        "purchase_history_empty": "No purchase history found yet. Tap Refresh purchases.",
+        "purchase_history_refresh": "Refresh purchases",
+        "purchase_history_refreshing": "Checking QuickBooks for purchase changes…",
+        "purchase_history_refresh_done": "Purchase history updated",
+        "purchase_history_refresh_none": "Purchase history already up to date",
         "oil_changes_only": "Oil changes only",
         "unpaid_only": "Unpaid only",
         "history_no_filter_results": "No invoices match those filters.",
@@ -294,6 +308,8 @@ _STRINGS: dict[str, dict[str, str]] = {
         "card_new_invoice_desc": "Започни фактура за работа",
         "card_history": "История на фактурите",
         "card_history_desc": "Виж минали фактури",
+        "card_purchase_history": "История на покупки",
+        "card_purchase_history_desc": "Виж откъде са купени части",
         "card_scan": "Сканирай документ",
         "card_scan_desc": "Снимай част, за да я намериш",
         "coming_soon": "Очаквайте скоро",
@@ -308,6 +324,13 @@ _STRINGS: dict[str, dict[str, str]] = {
         "history_empty": "Все още няма фактури.",
         "history_error": "Фактурите не могат да се заредят сега. Опитайте отново.",
         "history_search_placeholder": "Търси номер, VIN или клиент...",
+        "purchase_history_title": "История на покупки",
+        "purchase_history_search_placeholder": "Търси част, доставчик или документ...",
+        "purchase_history_empty": "Няма история на покупки. Натиснете обновяване.",
+        "purchase_history_refresh": "Обнови покупки",
+        "purchase_history_refreshing": "Проверка за промени в покупките…",
+        "purchase_history_refresh_done": "Историята на покупки е обновена",
+        "purchase_history_refresh_none": "Историята на покупки вече е актуална",
         "oil_changes_only": "Само смяна на масло",
         "unpaid_only": "Само неплатени",
         "history_no_filter_results": "Няма фактури с тези филтри.",
@@ -1284,7 +1307,7 @@ def _run_sync_all(realm_id: str, lang: str) -> None:
 
     Each sync uses its own Supabase high-water cursor (QBO LastUpdatedTime), so
     after the initial full pulls this is gentle: it only asks QuickBooks for
-    changed Inventory Items, Invoices, and Customers.
+    changed Inventory Items, Invoices, Purchases, and Customers.
     """
     if not realm_id:
         st.warning(_t(lang, "not_connected"))
@@ -1292,6 +1315,7 @@ def _run_sync_all(realm_id: str, lang: str) -> None:
     with st.spinner(_t(lang, "sync_all_running")):
         inventory = sync_shop_inventory(realm_id)
         invoices = sync_shop_invoice_history(realm_id)
+        purchases = sync_shop_purchase_history(realm_id)
         customers = sync_shop_customers(realm_id)
 
     _search_inventory.clear()
@@ -1301,11 +1325,13 @@ def _run_sync_all(realm_id: str, lang: str) -> None:
     _cached_recent_invoices.clear()
     _cached_invoice_detail.clear()
     _cached_invoice_history_synced_at.clear()
+    _cached_recent_purchases.clear()
+    _cached_purchase_history_synced_at.clear()
     _cached_customer_names.clear()
     _cached_customer_search.clear()
     _cached_customer_synced_at.clear()
 
-    failures = [r for r in (inventory, invoices, customers) if r.status != "success"]
+    failures = [r for r in (inventory, invoices, purchases, customers) if r.status != "success"]
     if failures:
         st.error(
             f"{_t(lang, 'sync_all_error')}: "
@@ -1316,6 +1342,7 @@ def _run_sync_all(realm_id: str, lang: str) -> None:
     changed = (
         int(getattr(inventory, "items_upserted", 0) or 0)
         + int(getattr(invoices, "invoices_upserted", 0) or 0)
+        + int(getattr(purchases, "purchases_upserted", 0) or 0)
         + int(getattr(customers, "customers_upserted", 0) or 0)
     )
     st.success(f"{_t(lang, 'sync_all_done')} (+{changed})")
@@ -1335,6 +1362,7 @@ _VIEW_HOME = "home"
 _VIEW_INVENTORY = "inventory"
 _VIEW_NEW_INVOICE = "new_invoice"
 _VIEW_HISTORY = "history"
+_VIEW_PURCHASE_HISTORY = "purchase_history"
 _VIEW_INVOICE_DETAIL = "invoice"
 _VIEW_PART_DETAIL = "part"
 _VIEW_SCAN = "scan"
@@ -1343,6 +1371,7 @@ _VALID_VIEWS = {
     _VIEW_INVENTORY,
     _VIEW_NEW_INVOICE,
     _VIEW_HISTORY,
+    _VIEW_PURCHASE_HISTORY,
     _VIEW_INVOICE_DETAIL,
     _VIEW_PART_DETAIL,
     _VIEW_SCAN,
@@ -1471,6 +1500,7 @@ def _render_sidebar_nav(lang: str, current: str) -> None:
             (_VIEW_INVENTORY, "📦", _t(lang, "card_inventory")),
             (_VIEW_NEW_INVOICE, "🧾", _t(lang, "card_new_invoice")),
             (_VIEW_HISTORY, "📜", _t(lang, "card_history")),
+            (_VIEW_PURCHASE_HISTORY, "🧾", _t(lang, "card_purchase_history")),
             (_VIEW_SCAN, "📷", _t(lang, "card_scan")),
         ]
         for view, icon, label in nav:
@@ -1520,6 +1550,8 @@ def render_shop_inventory_page() -> None:
         _render_inventory_view(lang, realm_id)
     elif view == _VIEW_HISTORY:
         _render_history_view(lang, realm_id)
+    elif view == _VIEW_PURCHASE_HISTORY:
+        _render_purchase_history_view(lang, realm_id)
     elif view == _VIEW_INVOICE_DETAIL:
         _render_invoice_detail_view(lang, realm_id)
     elif view == _VIEW_PART_DETAIL:
@@ -1548,6 +1580,7 @@ def _render_home_view(lang: str, realm_id: str) -> None:
         (_VIEW_INVENTORY, "📦", "card_inventory", "card_inventory_desc", False),
         (_VIEW_NEW_INVOICE, "🧾", "card_new_invoice", "card_new_invoice_desc", False),
         (_VIEW_HISTORY, "📜", "card_history", "card_history_desc", False),
+        (_VIEW_PURCHASE_HISTORY, "🧾", "card_purchase_history", "card_purchase_history_desc", False),
         (_VIEW_SCAN, "📷", "card_scan", "card_scan_desc", True),
     ]
     for view, icon, title_key, desc_key, soon in cards:
@@ -1715,7 +1748,7 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
         st.info("No sales or purchase history found for this synced part yet.")
         return
     if not purchases:
-        st.caption("Purchase history is best-effort from recent QBO bills/expenses. If older purchases are missing, we can add a dedicated Supabase purchase-history sync next.")
+        st.caption("No cached purchase rows found for this part yet. Run Purchase History refresh after applying the purchase-history migration.")
     for ev in events[:250]:
         st.markdown(_part_event_html(ev), unsafe_allow_html=True)
 
@@ -1763,42 +1796,20 @@ def _part_sales_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, An
     return events
 
 
-@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
-def _recent_qbo_purchase_docs(realm_id: str) -> list[dict[str, Any]]:
-    """Best-effort recent QBO purchase-side docs for part history."""
-    qbo_client, _, _ = build_services()
-    docs: list[dict[str, Any]] = []
-    for entity in ("Purchase", "Bill"):
-        start = 1
-        while start <= 501:  # enough for a useful mobile detail view; avoids huge live queries
-            sql = f"SELECT * FROM {entity} STARTPOSITION {start} MAXRESULTS 100"
-            try:
-                response = qbo_client.query(sql, realm_id=realm_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("QBO %s history query failed: %s", entity, exc)
-                break
-            rows = (response.get("QueryResponse") or {}).get(entity) or []
-            if not rows:
-                break
-            for row in rows:
-                row["_qbo_entity"] = entity
-            docs.extend(rows)
-            if len(rows) < 100:
-                break
-            start += 100
-    return docs
-
-
 def _part_purchase_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, Any]]:
     names = _part_match_names(part)
     part_id = str(part.get("qbo_item_id") or "")
     events: list[dict[str, Any]] = []
-    for doc in _recent_qbo_purchase_docs(realm_id):
-        entity = str(doc.get("_qbo_entity") or "Purchase")
+    for doc in _cached_recent_purchases(realm_id, 2000):
+        entity = str(doc.get("qbo_txn_type") or "Purchase")
         vendor = _purchase_vendor_name(doc)
-        date = str(doc.get("TxnDate") or "")
-        doc_no = str(doc.get("DocNumber") or doc.get("Id") or "")
-        for line in doc.get("Line") or []:
+        date = str(doc.get("txn_date") or doc.get("TxnDate") or "")
+        doc_no = str(doc.get("doc_number") or doc.get("DocNumber") or doc.get("qbo_txn_id") or doc.get("Id") or "")
+        lines = doc.get("line_items") or []
+        if not lines:
+            raw = doc.get("raw") if isinstance(doc.get("raw"), dict) else doc
+            lines = raw.get("Line") or []
+        for line in lines:
             item_name, item_id = _purchase_line_item_ref(line)
             if item_id != part_id and item_name.lower() not in names:
                 continue
@@ -1836,6 +1847,8 @@ def _line_item_qty_rate_amount(line: dict[str, Any]) -> tuple[Any, Any, Any]:
 
 
 def _purchase_line_item_ref(line: dict[str, Any]) -> tuple[str, str]:
+    if line.get("item_name") or line.get("item_id"):
+        return str(line.get("item_name") or "").strip(), str(line.get("item_id") or "").strip()
     detail = line.get("ItemBasedExpenseLineDetail") or line.get("SalesItemLineDetail") or {}
     item_ref = detail.get("ItemRef") or {}
     if isinstance(item_ref, dict):
@@ -1844,11 +1857,15 @@ def _purchase_line_item_ref(line: dict[str, Any]) -> tuple[str, str]:
 
 
 def _purchase_line_qty_rate_amount(line: dict[str, Any]) -> tuple[Any, Any, Any]:
+    if "item_name" in line or "item_id" in line or "unit_price" in line:
+        return line.get("qty"), line.get("unit_price"), line.get("amount")
     detail = line.get("ItemBasedExpenseLineDetail") or line.get("SalesItemLineDetail") or {}
     return detail.get("Qty"), detail.get("UnitPrice"), line.get("Amount")
 
 
 def _purchase_vendor_name(doc: dict[str, Any]) -> str:
+    if doc.get("vendor_name"):
+        return str(doc.get("vendor_name") or "")
     for key in ("EntityRef", "VendorRef"):
         ref = doc.get(key)
         if isinstance(ref, dict) and ref.get("name"):
@@ -2061,6 +2078,11 @@ def _cached_recent_invoices(realm_id: str, limit: int) -> list[dict[str, Any]]:
 
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_recent_purchases(realm_id: str, limit: int) -> list[dict[str, Any]]:
+    return list_cached_purchases(realm_id, limit=limit)
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
 def _cached_next_invoice_number(realm_id: str) -> int | None:
     qbo_client, _, _ = build_services()
     next_no = next_invoice_number(qbo_client, realm_id)
@@ -2107,6 +2129,11 @@ def _cached_invoice_detail(realm_id: str, invoice_id: str) -> dict[str, Any] | N
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
 def _cached_invoice_history_synced_at(realm_id: str) -> str:
     return last_invoice_history_sync(realm_id)
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_purchase_history_synced_at(realm_id: str) -> str:
+    return last_purchase_history_sync(realm_id)
 
 
 @st.cache_data(ttl=_REALM_CACHE_TTL, show_spinner=False)
@@ -2335,6 +2362,105 @@ def _render_history_view(lang: str, realm_id: str) -> None:
         ):
             st.session_state["shop_invoice_id"] = inv_id
             _go(_VIEW_INVOICE_DETAIL)
+
+
+def _render_purchase_history_view(lang: str, realm_id: str) -> None:
+    """Purchase-side history: QBO Purchase + Bill docs cached in Supabase."""
+    _render_view_header(lang, "purchase_history_title")
+
+    if not realm_id:
+        st.info(_t(lang, "not_connected"))
+        return
+
+    synced_at = _cached_purchase_history_synced_at(realm_id)
+    if synced_at:
+        st.caption(f"{_t(lang, 'updated')}: {synced_at.replace('T', ' ')[:16]}")
+    if st.button(f"🔄 {_t(lang, 'purchase_history_refresh')}", use_container_width=True):
+        with st.spinner(_t(lang, "purchase_history_refreshing")):
+            result = sync_shop_purchase_history(realm_id)
+        _cached_recent_purchases.clear()
+        _cached_purchase_history_synced_at.clear()
+        if result.status == "success":
+            if result.purchases_upserted:
+                st.success(f"{_t(lang, 'purchase_history_refresh_done')} (+{result.purchases_upserted})")
+            else:
+                st.info(_t(lang, "purchase_history_refresh_none"))
+        else:
+            st.error(f"{_t(lang, 'history_error')} {result.message}")
+        st.rerun()
+
+    term = st.text_input(
+        _t(lang, "purchase_history_title"),
+        key="purchase_history_search",
+        placeholder=_t(lang, "purchase_history_search_placeholder"),
+        label_visibility="collapsed",
+    ).strip()
+    try:
+        with st.spinner(_t(lang, "history_loading")):
+            purchases = _cached_recent_purchases(realm_id, 1000)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Purchase history load failed: %s", exc)
+        st.error(_t(lang, "history_error"))
+        return
+    purchases = _filter_purchase_history(purchases, term)
+    if not purchases:
+        st.info(_t(lang, "history_no_filter_results") if term else _t(lang, "purchase_history_empty"))
+        return
+    for row in purchases:
+        st.markdown(_purchase_html(row), unsafe_allow_html=True)
+
+
+def _filter_purchase_history(rows: list[dict[str, Any]], term: str) -> list[dict[str, Any]]:
+    tokens = [tok for tok in str(term or "").lower().split() if tok]
+    if not tokens:
+        return rows
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        blob = _purchase_search_blob(row).lower()
+        if all(tok in blob for tok in tokens):
+            out.append(row)
+    return out
+
+
+def _purchase_search_blob(row: dict[str, Any]) -> str:
+    parts = [
+        str(row.get("vendor_name") or ""),
+        str(row.get("doc_number") or ""),
+        str(row.get("qbo_txn_type") or ""),
+        str(row.get("payment_type") or ""),
+    ]
+    for line in row.get("line_items") or []:
+        parts.append(_line_item_search_text(line))
+        parts.append(str(line.get("item_id") or "")) if isinstance(line, dict) else None
+    return " ".join(parts)
+
+
+def _purchase_html(row: dict[str, Any]) -> str:
+    date = str(row.get("txn_date") or "")
+    vendor = str(row.get("vendor_name") or "Vendor")
+    doc = str(row.get("doc_number") or row.get("qbo_txn_id") or "")
+    txn_type = str(row.get("qbo_txn_type") or "Purchase")
+    payment_type = str(row.get("payment_type") or "")
+    total = _fmt_price(row.get("total"))
+    lines = row.get("line_items") or []
+    line_bits = []
+    for line in lines[:6]:
+        if not isinstance(line, dict):
+            continue
+        name = str(line.get("item_name") or "")
+        qty = _fmt_qty(line.get("qty")) or "—"
+        amt = _fmt_price(line.get("amount"))
+        line_bits.append(f"{_escape(name or '—')} · Qty: {_escape(qty)}{(' · ' + _escape(amt)) if amt else ''}")
+    lines_html = "".join(f"<div class='li-desc'>{bit}</div>" for bit in line_bits)
+    label = txn_type if not payment_type else f"{txn_type} · {payment_type}"
+    return (
+        f"<div class='inv-card'>"
+        f"<div class='inv-top'><span class='inv-no'>{_escape(date or '—')} · {_escape(vendor)}</span>"
+        f"<span class='badge badge-cost'>{_escape(label)}</span></div>"
+        f"<div class='inv-meta'>Doc: {_escape(doc or '—')}{(' · Total: ' + _escape(total)) if total else ''}</div>"
+        f"{lines_html}"
+        f"</div>"
+    )
 
 
 def _render_drafts_section(lang: str, realm_id: str) -> None:
