@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.43 (fix st.iframe height>0)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.44 (revert keyboard scroll, native focus)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -1508,37 +1508,6 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
         placeholder=_t(lang, "search_placeholder"),
         label_visibility="collapsed",
     ).strip()
-
-    # Mobile keyboard fix: when the search input is focused the on-screen keyboard
-    # opens and shrinks the visual viewport, which can push the sticky bar out of
-    # view until the first keystroke. Gently scroll the focused input back into
-    # view so the user always sees what they're typing in. Zero-height iframe so
-    # it takes no layout space. Runs in the parent document via window.parent.
-    st.iframe(
-        """
-        <script>
-        const doc = window.parent.document;
-        function bindSearchFocus() {
-            const inputs = doc.querySelectorAll('input[aria-label]');
-            inputs.forEach((el) => {
-                if (el.dataset.shopFocusBound) return;
-                el.dataset.shopFocusBound = '1';
-                el.addEventListener('focus', () => {
-                    setTimeout(() => {
-                        try { el.scrollIntoView({block: 'center', behavior: 'smooth'}); }
-                        catch (e) { el.scrollIntoView(); }
-                    }, 300);
-                });
-            });
-        }
-        bindSearchFocus();
-        // Re-bind after Streamlit reruns swap the DOM.
-        const obs = new MutationObserver(bindSearchFocus);
-        obs.observe(doc.body, {childList: true, subtree: true});
-        </script>
-        """,
-        height=1,
-    )
 
     last_run = _last_synced(realm_id)
     freshness = last_run.replace("T", " ")[:16] if last_run else _t(lang, "never")
