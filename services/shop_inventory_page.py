@@ -60,7 +60,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.37 (on-hand on invoice lines, wrap part numbers)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.38 (invoice # as title, drop header clutter)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -1359,8 +1359,11 @@ def _render_home_view(lang: str, realm_id: str) -> None:
             else:
                 _go(view)
 
-def _render_view_header(lang: str, title_key: str) -> None:
+def _render_view_header(lang: str, title_key: str, *, title_override: str = "") -> None:
     """Shared header for sub-views: back-to-menu + title + language toggle.
+
+    ``title_override`` lets a caller show literal text (e.g. an invoice number)
+    instead of a translated key.
     """
     top_l, top_r = st.columns([3, 1])
     with top_l:
@@ -1368,7 +1371,8 @@ def _render_view_header(lang: str, title_key: str) -> None:
             _go(_VIEW_HOME)
     with top_r:
         _render_lang_toggle(lang)
-    st.markdown(f"<div class='shop-title'>{_t(lang, title_key)}</div>", unsafe_allow_html=True)
+    title = title_override or _t(lang, title_key)
+    st.markdown(f"<div class='shop-title'>{_escape(title)}</div>", unsafe_allow_html=True)
 
 
 def _render_inventory_view(lang: str, realm_id: str) -> None:
@@ -2126,9 +2130,8 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
     taps "Finish invoice". This does NOT post to QuickBooks - it writes a pending
     draft to the Supabase review queue for accounting.
     """
-    _render_view_header(lang, "card_new_invoice")
-
     if not realm_id:
+        _render_view_header(lang, "card_new_invoice")
         st.info(_t(lang, "not_connected"))
         return
 
@@ -2138,12 +2141,20 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
     step = st.session_state.get("invoice_step", "vehicle")
 
     if step == "vehicle":
+        _render_view_header(lang, "card_new_invoice")
         _render_invoice_vehicle_step(lang)
         return
     if step == "customer":
+        _render_view_header(lang, "card_new_invoice")
         _render_invoice_customer_step(lang, realm_id)
         return
 
+    # Parts step: the invoice number IS the title (no redundant "New Invoice"
+    # heading or "header locked" banner - just the number and its details).
+    doc = str(st.session_state.get("invoice_doc_number") or "").strip()
+    _render_view_header(
+        lang, "card_new_invoice", title_override=f"#{doc}" if doc else _t(lang, "card_new_invoice")
+    )
     _render_invoice_locked_header(lang)
 
     # --- Add parts: a pre-rendered dropdown (like the customer picker). Every
@@ -2454,15 +2465,19 @@ def _render_invoice_customer_step(lang: str, realm_id: str) -> None:
 
 def _render_invoice_locked_header(lang: str) -> None:
     customer = str(st.session_state.get("invoice_customer") or "")
-    doc = str(st.session_state.get("invoice_doc_number") or "")
     unit = str(st.session_state.get("invoice_truck") or "")
     vin = str(st.session_state.get("invoice_vin") or "")
     miles = str(st.session_state.get("invoice_miles") or "")
-    st.success(_t(lang, "header_ready"))
-    st.caption(
-        f"#{doc or '—'} · {customer or '—'} · {_t(lang, 'truck_unit')}: {unit or '—'} · "
-        f"{_t(lang, 'vin')}: {vin or '—'} · {_t(lang, 'miles')}: {miles or '—'}"
-    )
+    # No banner / no "New Invoice" clutter - the invoice number is the page title.
+    # Just the essential details on one tidy line beneath it.
+    details = [customer or "—"]
+    if unit:
+        details.append(f"{_t(lang, 'truck_unit')}: {unit}")
+    if vin:
+        details.append(f"{_t(lang, 'vin')}: {vin}")
+    if miles:
+        details.append(f"{_t(lang, 'miles')}: {miles}")
+    st.caption(" · ".join(details))
 
     # Helpful context: last invoice + miles for this VIN (VIN-only to avoid the
     # unit-number overlap problem).
