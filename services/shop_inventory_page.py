@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.24 (small add on every part)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.25 (negative filter, VIN-only miles)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -148,6 +148,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "add_to_draft": "Add to draft",
         "added_toast": "Added to invoice",
         "low_stock_warn": "⚠️ No stock on hand — adding this may go negative.",
+        "negatives_only": "⚠️ Show negative stock",
+        "negatives_on": "✖ Showing negative stock (worst $ first)",
+        "neg_value": "Shortage",
+        "no_negatives": "No negative-stock parts. 🎉",
         "cart_title": "Current Invoice",
         "cart_empty": "No parts added yet. Search and tap + to add parts.",
         "cart_search": "Search parts to add",
@@ -279,6 +283,10 @@ _STRINGS: dict[str, dict[str, str]] = {
         "add_to_draft": "Добави към чернова",
         "added_toast": "Добавено към фактурата",
         "low_stock_warn": "⚠️ Няма наличност — добавянето може да стане отрицателно.",
+        "negatives_only": "⚠️ Покажи отрицателна наличност",
+        "negatives_on": "✖ Показана отрицателна наличност",
+        "neg_value": "Недостиг",
+        "no_negatives": "Няма части с отрицателна наличност. 🎉",
         "cart_title": "Текуща фактура",
         "cart_empty": "Още няма добавени части. Търсете и натиснете +, за да добавите.",
         "cart_search": "Търсете части за добавяне",
@@ -677,7 +685,7 @@ def _fmt_qty(value: Any) -> str | None:
     return f"{int(number)}" if number == int(number) else f"{number:g}"
 
 
-def _card_html(item: dict[str, Any], lang: str) -> str:
+def _card_html(item: dict[str, Any], lang: str, *, show_shortage: bool = False) -> str:
     """Build one part card as a single flat HTML string.
 
     Returns HTML (rather than rendering) so the caller can join many cards into
@@ -724,6 +732,13 @@ def _card_html(item: dict[str, Any], lang: str) -> str:
         badges.append(f"<span class='badge badge-price'>{_t(lang, 'price')}: {price}</span>")
     if cost:
         badges.append(f"<span class='badge badge-cost'>{_t(lang, 'cost')}: {cost}</span>")
+    if show_shortage:
+        shortage = _part_shortage_value(item)
+        if shortage < 0:
+            badges.append(
+                f"<span class='badge badge-stock-zero'>{_t(lang, 'neg_value')}: "
+                f"{_fmt_price(shortage)}</span>"
+            )
 
     # NOTE: keep this HTML flat (no leading indentation). Streamlit's Markdown
     # renderer treats 4+ leading spaces as a code block and would print the raw
@@ -1097,26 +1112,41 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
         label_visibility="collapsed",
     ).strip()
 
-    if st.button(f"\U0001f504 {_t(lang, 'refresh')}", use_container_width=True):
-        _all_active_parts.clear()
-        _active_part_options.clear()
-        _run_refresh(realm_id, lang)
+    refresh_col, neg_col = st.columns([1, 1])
+    with refresh_col:
+        if st.button(f"\U0001f504 {_t(lang, 'refresh')}", use_container_width=True):
+            _all_active_parts.clear()
+            _active_part_options.clear()
+            _run_refresh(realm_id, lang)
+    with neg_col:
+        negatives_on = bool(st.session_state.get("shop_negatives_only"))
+        label = _t(lang, "negatives_on") if negatives_on else _t(lang, "negatives_only")
+        if st.button(label, use_container_width=True, key="shop_neg_toggle"):
+            st.session_state["shop_negatives_only"] = not negatives_on
+            st.rerun()
+    negatives_on = bool(st.session_state.get("shop_negatives_only"))
 
     last_run = _last_synced(realm_id)
     freshness = last_run.replace("T", " ")[:16] if last_run else _t(lang, "never")
     st.caption(f"{_t(lang, 'updated')}: {freshness}")
 
-    items = _filter_parts(parts, term)
+    if negatives_on:
+        items = _negative_parts(parts)
+        if not items:
+            st.success(_t(lang, "no_negatives"))
+            return
+    else:
+        items = _filter_parts(parts, term)
+        if not items:
+            st.info(_t(lang, "no_results") if term else _t(lang, "type_to_search"))
+            return
 
-    # Reset paging when the search term changes.
-    if st.session_state.get("shop_last_term") != term:
-        st.session_state["shop_last_term"] = term
+    # Reset paging when the search term or filter mode changes.
+    page_key = f"neg:{negatives_on}|{term}"
+    if st.session_state.get("shop_last_term") != page_key:
+        st.session_state["shop_last_term"] = page_key
         st.session_state["shop_visible_count"] = _INVENTORY_PAGE
     visible_count = int(st.session_state.get("shop_visible_count", _INVENTORY_PAGE))
-
-    if not items:
-        st.info(_t(lang, "no_results") if term else _t(lang, "type_to_search"))
-        return
 
     visible_items = items[:visible_count]
     has_more = len(items) > visible_count
@@ -1128,7 +1158,7 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
     for item in visible_items:
         card_col, add_col = st.columns([6, 1])
         with card_col:
-            st.markdown(_card_html(item, lang), unsafe_allow_html=True)
+            st.markdown(_card_html(item, lang, show_shortage=negatives_on), unsafe_allow_html=True)
         with add_col:
             _render_add_popover(item, lang, realm_id)
 
@@ -1142,6 +1172,42 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
                 visible_count + _INVENTORY_PAGE, _MAX_RESULTS
             )
             st.rerun()
+
+
+def _part_shortage_value(item: dict[str, Any]) -> float:
+    """Negative dollar shortage = qty_on_hand * unit cost, for qty < 0.
+
+    Uses purchase_cost (cost basis) with sales_price as a fallback. Returns 0 for
+    non-negative quantities. More negative = bigger problem.
+    """
+    try:
+        qty = float(item.get("qty_on_hand"))
+    except (TypeError, ValueError):
+        return 0.0
+    if qty >= 0:
+        return 0.0
+    cost = item.get("purchase_cost")
+    if cost in (None, ""):
+        cost = item.get("sales_price")
+    try:
+        unit_cost = float(cost)
+    except (TypeError, ValueError):
+        unit_cost = 0.0
+    return qty * unit_cost  # negative number
+
+
+def _negative_parts(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Only negative-stock parts, sorted by total dollar shortage (worst first)."""
+    negs = []
+    for item in parts:
+        try:
+            qty = float(item.get("qty_on_hand"))
+        except (TypeError, ValueError):
+            continue
+        if qty < 0:
+            negs.append(item)
+    negs.sort(key=lambda it: (_part_shortage_value(it), str(it.get("name") or "").lower()))
+    return negs
 
 
 def _filter_parts(parts: list[dict[str, Any]], term: str) -> list[dict[str, Any]]:
@@ -1826,11 +1892,11 @@ def _render_invoice_vehicle_step(lang: str) -> None:
         # Miles is a free-typed value (NOT a dropdown).
         st.text_input(_t(lang, "miles"), key="invoice_miles")
 
-    # Show the previous miles recorded for this unit/VIN right here, so the shop
-    # manager has a reference while typing the current odometer reading.
-    if unit_now or vin_now:
+    # Show the previous miles only once a VIN is entered (a unit alone is not
+    # specific enough - lots of units overlap). Match strictly on the VIN.
+    if vin_now:
         try:
-            prior = _last_invoice_for_unit(realm_id, unit_now, vin_now)
+            prior = _last_invoice_for_unit(realm_id, "", vin_now)
         except Exception:  # noqa: BLE001
             prior = {}
         if prior.get("miles") or prior.get("doc"):
@@ -1947,12 +2013,15 @@ def _render_invoice_locked_header(lang: str) -> None:
         f"{_t(lang, 'vin')}: {vin or '—'} · {_t(lang, 'miles')}: {miles or '—'}"
     )
 
-    # Helpful context: last invoice number + miles previously recorded for this unit.
-    try:
-        realm_id = _cached_shop_realm_id()
-        prior = _last_invoice_for_unit(realm_id, unit, vin)
-    except Exception:  # noqa: BLE001
-        prior = {}
+    # Helpful context: last invoice + miles for this VIN (VIN-only to avoid the
+    # unit-number overlap problem).
+    prior = {}
+    if vin:
+        try:
+            realm_id = _cached_shop_realm_id()
+            prior = _last_invoice_for_unit(realm_id, "", vin)
+        except Exception:  # noqa: BLE001
+            prior = {}
     if prior.get("doc") or prior.get("miles"):
         bits = []
         if prior.get("doc"):
