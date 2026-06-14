@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.47 (+ as full-width green bar under card)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.48 (VIN narrows unit suggestions)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -1803,7 +1803,8 @@ def _cached_vehicle_field_suggestions(realm_id: str, unit: str, vin: str) -> dic
     """Suggest unit/VIN/miles values from cached invoice history.
 
     - ``units``: every distinct unit ever seen, so the unit dropdown can search
-      the full list client-side.
+            the full list client-side; if a VIN is entered, narrow to units previously
+            seen with that VIN so VIN -> Unit works the same way Unit -> VIN does.
     - ``vins`` / ``miles``: when a unit (or VIN) is already entered, narrow to the
       vehicles that match it; otherwise fall back to every distinct value so the
       dropdown is never empty.
@@ -1814,6 +1815,7 @@ def _cached_vehicle_field_suggestions(realm_id: str, unit: str, vin: str) -> dic
     all_vins: list[str] = []
     all_miles: list[str] = []
     seen_vin_norms: set[str] = set()
+    matched_units: list[str] = []
     matched_vins: list[str] = []
     matched_miles: list[str] = []
     if not realm_id:
@@ -1839,16 +1841,19 @@ def _cached_vehicle_field_suggestions(realm_id: str, unit: str, vin: str) -> dic
         unit_match = bool(unit_norm and _vehicle_match(unit_norm, inv_unit, min_len=2))
         vin_match = bool(vin_norm and _vin_match(vin_norm, inv_vin))
         if unit_match or vin_match:
+            if inv_unit and inv_unit not in matched_units:
+                matched_units.append(inv_unit)
             if inv_vin and inv_vin not in matched_vins:
                 matched_vins.append(inv_vin)
             if inv_miles and inv_miles not in matched_miles:
                 matched_miles.append(inv_miles)
 
     has_query = bool(unit_norm or vin_norm)
+    units = matched_units if (has_query and matched_units) else all_units
     vins = matched_vins if (has_query and matched_vins) else all_vins
     miles = matched_miles if (has_query and matched_miles) else all_miles
     return {
-        "units": all_units[:1000],
+        "units": units[:1000],
         "vins": vins[:1000],
         "miles": miles[:500],
     }
