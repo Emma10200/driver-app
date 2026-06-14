@@ -59,7 +59,7 @@ _SEARCH_CACHE_TTL = 60  # seconds
 _REALM_CACHE_TTL = 600  # seconds
 _INVOICE_CACHE_TTL = 120  # seconds
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.45 (live remaining stock, qty=0 removes w/ confirm, small + square)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-13.46 (pin + to card top-right via absolute pos)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -461,25 +461,24 @@ _MOBILE_CSS = """
       padding: 0.6rem 0.55rem 0.6rem 0.85rem !important;
       margin: 0.55rem 0 !important;
   }
-  /* Keep the part card's [card | + ] columns side-by-side on phones. Streamlit
-     stacks st.columns vertically on narrow screens by default, which dropped the
-     green + button full-width BELOW the card. Force the row inside a part card to
-     stay horizontal and let the text column shrink so the + stays top-right. */
-  div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stHorizontalBlock"] {
-      flex-wrap: nowrap !important;
-      align-items: center !important;
+  /* Inventory PART card only (the one containing .part-card-bare): pin the green
+     + popover to the TOP-RIGHT corner with absolute positioning. This is immune
+     to Streamlit stacking st.columns vertically on phones (which kept dropping
+     the button to the bottom). Scoped via :has() so invoice line cards (qty/rate/
+     remove rows) are NOT affected. */
+  div[data-testid="stVerticalBlockBorderWrapper"]:has(.part-card-bare) {
+      position: relative !important;
+      padding-right: 4rem !important;
   }
-  div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] {
-      min-width: 0 !important;
+  div[data-testid="stVerticalBlockBorderWrapper"]:has(.part-card-bare) div[data-testid="stHorizontalBlock"] {
+      display: block !important;
   }
-  /* The + popover column hugs its content on the right (don't let it grow). */
-  div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:last-child {
-      flex: 0 0 auto !important;
+  div[data-testid="stVerticalBlockBorderWrapper"]:has(.part-card-bare) div[data-testid="stColumn"]:last-child {
+      position: absolute !important;
+      top: 0.5rem !important;
+      right: 0.5rem !important;
       width: auto !important;
-  }
-  div[data-testid="stVerticalBlockBorderWrapper"] div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"]:last-child div[data-testid="stPopover"] {
-      display: flex !important;
-      justify-content: flex-end !important;
+      min-width: 0 !important;
   }
   .part-card-bare { padding: 0; margin: 0; background: transparent; }
 
