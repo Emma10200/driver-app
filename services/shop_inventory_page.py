@@ -72,7 +72,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.08 (part sold history + smooth detail)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.09 (clean part history headers)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -1834,6 +1834,7 @@ def _part_sales_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, An
         raw = inv.get("raw") if isinstance(inv.get("raw"), dict) else inv
         if not lines:
             lines = [line for line in (raw.get("Line") or []) if str(line.get("DetailType") or "") == "SalesItemLineDetail"]
+        vehicle = _invoice_vehicle_values(inv)
         for line in lines:
             if not _sales_line_matches_part(line, part, part_id):
                 continue
@@ -1845,6 +1846,7 @@ def _part_sales_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, An
                     "date": str(inv.get("txn_date") or inv.get("TxnDate") or ""),
                     "doc": str(inv.get("doc_number") or inv.get("DocNumber") or ""),
                     "name": _invoice_customer_name(inv),
+                    "unit": vehicle.get("unit", ""),
                     "qty": qty,
                     "rate": rate,
                     "amount": amount,
@@ -2049,6 +2051,7 @@ def _part_event_html(ev: dict[str, Any]) -> str:
     badge = "Sold" if is_sale else "Adjusted" if is_adjustment else "Bought"
     badge_cls = "badge-price" if is_sale else "badge-draft" if is_adjustment else "badge-stock"
     who = str(ev.get("name") or "—")
+    unit = str(ev.get("unit") or "").strip()
     qty = _fmt_qty(ev.get("qty")) or "—"
     amount = _fmt_price(ev.get("amount"))
     rate = _fmt_price(ev.get("rate"))
@@ -2061,15 +2064,38 @@ def _part_event_html(ev: dict[str, Any]) -> str:
     doc = str(ev.get("doc") or "")
     date = str(ev.get("date") or "")
     memo = str(ev.get("memo") or "")
+    header_bits = [_short_history_date(date), who]
+    if unit:
+        header_bits.append(f"Unit {unit}")
+    header = " · ".join(bit for bit in header_bits if bit)
     return (
         f"<div class='inv-card'>"
-        f"<div class='inv-top'><span class='inv-no'>{_escape(date or '—')} · {_escape(who)}</span>"
+        f"<div class='inv-top'><span class='inv-no'>{_escape(header or '—')}</span>"
         f"<span class='badge {badge_cls}'>{badge}</span></div>"
         f"<div class='inv-meta'>{' · '.join(_escape(bit) for bit in bits)}"
         f"{(' · Doc: ' + _escape(doc)) if doc else ''}</div>"
         f"{f'<div class=\'li-desc\'>{_escape(memo)}</div>' if memo else ''}"
         f"</div>"
     )
+
+
+def _short_history_date(value: Any) -> str:
+    """Return compact M/D/YY for QBO date strings, else a readable fallback."""
+    raw = str(value or "").strip()
+    if not raw:
+        return "—"
+    # QBO cache dates are usually YYYY-MM-DD; raw LastUpdated-style values may
+    # include a time suffix. Keep only the date portion for this mobile card.
+    date_part = raw.split("T", 1)[0].split(" ", 1)[0]
+    match = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", date_part)
+    if match:
+        year, month, day = match.groups()
+        return f"{int(month)}/{int(day)}/{year[-2:]}"
+    match = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{2}|\d{4})", date_part)
+    if match:
+        month, day, year = match.groups()
+        return f"{int(month)}/{int(day)}/{year[-2:]}"
+    return date_part[:10] if len(date_part) > 10 else date_part
 
 
 def _part_shortage_value(item: dict[str, Any]) -> float:
