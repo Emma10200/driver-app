@@ -72,7 +72,12 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-15.01 (exact QBO item-id history matching)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-15.02 (deep part-history scan + date sort)"
+
+# How many cached transactions part history scans per type. Big enough to cover
+# a multi-year shop's full Bill/Purchase/Invoice/Adjustment history (reads are
+# paginated past PostgREST's 1000-row server cap and cached for a short TTL).
+_PART_HISTORY_SCAN = 20000
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -1868,7 +1873,11 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
         sales = _part_sales_events(realm_id, part)
         purchases = _part_purchase_events(realm_id, part)
         adjustments = _part_adjustment_events(realm_id, part)
-    events = sorted([*sales, *purchases, *adjustments], key=lambda ev: (ev.get("date", ""), ev.get("doc", "")), reverse=True)
+    events = sorted(
+        [*sales, *purchases, *adjustments],
+        key=_part_event_sort_key,
+        reverse=True,
+    )
 
     if not events:
         st.info("No sales or purchase history found for this synced part yet.")
@@ -1958,7 +1967,7 @@ def _part_sales_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, An
     events: list[dict[str, Any]] = []
     if not part_id:
         return events
-    for inv in list_cached_invoices(realm_id, limit=2000):
+    for inv in list_cached_invoices(realm_id, limit=_PART_HISTORY_SCAN):
         raw = inv.get("raw") if isinstance(inv.get("raw"), dict) else {}
         # Match against the raw QBO invoice lines so the authoritative
         # ItemRef.value (QBO Item Id) is always available, even for rows cached
@@ -2004,7 +2013,7 @@ def _part_purchase_events(realm_id: str, part: dict[str, Any]) -> list[dict[str,
     events: list[dict[str, Any]] = []
     if not part_id:
         return events
-    for doc in _cached_recent_purchases(realm_id, 2000):
+    for doc in _cached_recent_purchases(realm_id, _PART_HISTORY_SCAN):
         entity = str(doc.get("qbo_txn_type") or "Purchase")
         vendor = _purchase_vendor_name(doc)
         date = str(doc.get("txn_date") or doc.get("TxnDate") or "")
@@ -2040,7 +2049,7 @@ def _part_adjustment_events(realm_id: str, part: dict[str, Any]) -> list[dict[st
     if not part_id:
         return events
     try:
-        docs = _cached_recent_adjustments(realm_id, 2000)
+        docs = _cached_recent_adjustments(realm_id, _PART_HISTORY_SCAN)
     except Exception as exc:  # noqa: BLE001
         logger.info("Inventory adjustment cache unavailable: %s", exc)
         return []
@@ -2184,6 +2193,23 @@ def _purchase_vendor_name(doc: dict[str, Any]) -> str:
         if isinstance(ref, dict) and ref.get("name"):
             return str(ref.get("name") or "")
     return "Vendor"
+
+
+def _part_event_sort_key(ev: dict[str, Any]) -> tuple[int, str]:
+    """Sort part-history events newest-first by a numeric date key.
+
+    Converts the event date to a YYYYMMDD integer so ordering is correct
+    regardless of the underlying string format and so events with a missing or
+    unparseable date sort to the bottom instead of jumping to the top. The doc
+    number is a stable tiebreak within the same day.
+    """
+    raw = str(ev.get("date") or "").strip()
+    digits = re.sub(r"\D+", "", raw.split("T", 1)[0].split(" ", 1)[0])[:8]
+    try:
+        key = int(digits) if len(digits) == 8 else 0
+    except ValueError:
+        key = 0
+    return (key, str(ev.get("doc") or ""))
 
 
 def _part_event_html(ev: dict[str, Any]) -> str:

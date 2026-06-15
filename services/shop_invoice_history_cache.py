@@ -18,13 +18,19 @@ def list_cached_invoices(realm_id: str, *, limit: int = 100) -> list[dict[str, A
     # Fetch a generous window and sort in Python so invoice numbers like
     # 6498 / 6498a / 6498.0 stay grouped together. PostgREST's simple text sort
     # cannot do this natural-number grouping without an extra SQL function.
+    #
+    # Use select_all (paginated) rather than select(limit=...): PostgREST applies
+    # a server-side max-rows cap (commonly 1000) that silently truncates a plain
+    # select, which would hide older invoices from part Sold history on shops
+    # with more than ~1000 invoices.
     fetch_limit = max(int(limit or 100), 1000)
-    rows = supabase.select(
+    rows = supabase.select_all(
         _TABLE,
         select="realm_id,qbo_invoice_id,doc_number,txn_date,customer_name,total,balance,unit,vin,miles,line_items,qbo_last_updated_at,last_synced,raw",
         filters={"realm_id": f"eq.{realm_id}"},
         order="doc_number.desc,txn_date.desc",
-        limit=fetch_limit,
+        page_size=1000,
+        hard_cap=fetch_limit,
     )
     rows = [row for row in rows if _is_display_invoice_doc(row.get("doc_number"))]
     rows.sort(key=_invoice_sort_key)
