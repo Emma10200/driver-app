@@ -72,7 +72,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-14.12 (part history filters)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-15.01 (exact QBO item-id history matching)"
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -1956,11 +1956,18 @@ def _part_match_name_keys(part: dict[str, Any]) -> set[str]:
 def _part_sales_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, Any]]:
     part_id = str(part.get("qbo_item_id") or "")
     events: list[dict[str, Any]] = []
+    if not part_id:
+        return events
     for inv in list_cached_invoices(realm_id, limit=2000):
-        lines = inv.get("line_items") or []
-        raw = inv.get("raw") if isinstance(inv.get("raw"), dict) else inv
-        if not lines:
-            lines = [line for line in (raw.get("Line") or []) if str(line.get("DetailType") or "") == "SalesItemLineDetail"]
+        raw = inv.get("raw") if isinstance(inv.get("raw"), dict) else {}
+        # Match against the raw QBO invoice lines so the authoritative
+        # ItemRef.value (QBO Item Id) is always available, even for rows cached
+        # before the flattened item_id existed. Fall back to flattened lines only
+        # if the raw payload is somehow missing.
+        lines = [
+            line for line in (raw.get("Line") or [])
+            if str(line.get("DetailType") or "") == "SalesItemLineDetail"
+        ] or (inv.get("line_items") or [])
         vehicle = _invoice_vehicle_values(inv)
         for line in lines:
             if not _sales_line_matches_part(line, part, part_id):
@@ -1984,31 +1991,30 @@ def _part_sales_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, An
 
 
 def _sales_line_matches_part(line: dict[str, Any], part: dict[str, Any], part_id: str) -> bool:
-    item_name, item_id = _sales_line_item_ref(line)
-    if part_id and item_id == part_id:
-        return True
-    # Invoice history must be exact: QBO Product/Service item name on the invoice
-    # line must equal the clicked inventory Product/Service name. Do NOT fall
-    # back to description/SKU contains matching for sales, or part history will
-    # show invoices where the part is mentioned but not actually sold as that
-    # Product/Service line item.
-    if _exact_item_name_key(item_name) in _part_match_name_keys(part):
-        return True
-    return False
+    # Exact QBO Item Id match only. The invoice line's Product/Service ItemRef
+    # value must equal the clicked inventory item's QBO Id. No name or
+    # description fallbacks: those produced invoices where the part was only
+    # mentioned but not actually the line item that was sold.
+    _, item_id = _sales_line_item_ref(line)
+    return bool(part_id and item_id and item_id == part_id)
 
 
 def _part_purchase_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, Any]]:
     part_id = str(part.get("qbo_item_id") or "")
     events: list[dict[str, Any]] = []
+    if not part_id:
+        return events
     for doc in _cached_recent_purchases(realm_id, 2000):
         entity = str(doc.get("qbo_txn_type") or "Purchase")
         vendor = _purchase_vendor_name(doc)
         date = str(doc.get("txn_date") or doc.get("TxnDate") or "")
         doc_no = str(doc.get("doc_number") or doc.get("DocNumber") or doc.get("qbo_txn_id") or doc.get("Id") or "")
-        lines = doc.get("line_items") or []
-        if not lines:
-            raw = doc.get("raw") if isinstance(doc.get("raw"), dict) else doc
-            lines = raw.get("Line") or []
+        # Match raw QBO lines so the item-based ItemRef.value is always present.
+        # Account-based expense lines have no ItemRef and therefore never match a
+        # specific inventory item (which is correct: nothing was bought as that
+        # Product/Service).
+        raw = doc.get("raw") if isinstance(doc.get("raw"), dict) else {}
+        lines = (raw.get("Line") or []) or (doc.get("line_items") or [])
         for line in lines:
             if not _purchase_line_matches_part(line, part, part_id):
                 continue
@@ -2031,6 +2037,8 @@ def _part_purchase_events(realm_id: str, part: dict[str, Any]) -> list[dict[str,
 def _part_adjustment_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, Any]]:
     part_id = str(part.get("qbo_item_id") or "")
     events: list[dict[str, Any]] = []
+    if not part_id:
+        return events
     try:
         docs = _cached_recent_adjustments(realm_id, 2000)
     except Exception as exc:  # noqa: BLE001
@@ -2041,10 +2049,9 @@ def _part_adjustment_events(realm_id: str, part: dict[str, Any]) -> list[dict[st
         date = str(doc.get("txn_date") or doc.get("TxnDate") or doc.get("AdjustmentDate") or "")
         doc_no = str(doc.get("doc_number") or doc.get("DocNumber") or doc.get("ReferenceNumber") or doc.get("qbo_adjustment_id") or doc.get("Id") or "")
         memo = str(doc.get("reason") or doc.get("private_note") or doc.get("PrivateNote") or "")
-        lines = doc.get("line_items") or []
-        if not lines:
-            raw = doc.get("raw") if isinstance(doc.get("raw"), dict) else doc
-            lines = raw.get("Line") or []
+        # Match raw QBO ItemAdjustmentLineDetail lines by exact ItemRef.value.
+        raw = doc.get("raw") if isinstance(doc.get("raw"), dict) else {}
+        lines = (raw.get("Line") or []) or (doc.get("line_items") or [])
         for line in lines:
             if not _adjustment_line_matches_part(line, part, part_id):
                 continue
@@ -2066,23 +2073,17 @@ def _part_adjustment_events(realm_id: str, part: dict[str, Any]) -> list[dict[st
 
 
 def _adjustment_line_matches_part(line: dict[str, Any], part: dict[str, Any], part_id: str) -> bool:
-    item_name, item_id = _adjustment_line_item_ref(line)
-    if part_id and item_id == part_id:
-        return True
-    names = _part_match_names(part)
-    if item_name.lower() in names:
-        return True
-    return _line_text_matches_part(line, part)
+    # Exact QBO Item Id match only (inventory adjustment lines always carry an
+    # ItemRef). No name/description fallbacks.
+    _, item_id = _adjustment_line_item_ref(line)
+    return bool(part_id and item_id and item_id == part_id)
 
 
 def _purchase_line_matches_part(line: dict[str, Any], part: dict[str, Any], part_id: str) -> bool:
-    item_name, item_id = _purchase_line_item_ref(line)
-    if part_id and item_id == part_id:
-        return True
-    names = _part_match_names(part)
-    if item_name.lower() in names:
-        return True
-    return _line_text_matches_part(line, part)
+    # Exact QBO Item Id match only. Item-based expense lines carry an ItemRef;
+    # account-based lines do not and correctly never match a specific item.
+    _, item_id = _purchase_line_item_ref(line)
+    return bool(part_id and item_id and item_id == part_id)
 
 
 def _line_text_matches_part(line: dict[str, Any], part: dict[str, Any]) -> bool:
