@@ -76,7 +76,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-16.02 (clean history sort + doc download fix)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-16.03 (native PDF preview via st.pdf)"
 
 # How many cached transactions part history scans per type. Big enough to cover
 # a multi-year shop's full Bill/Purchase/Invoice/Adjustment history (reads are
@@ -2980,7 +2980,7 @@ def _render_single_attachment(lang: str, realm_id: str, att: dict[str, Any]) -> 
     if is_image:
         st.image(data, use_container_width=True)
     elif is_pdf:
-        _render_pdf_preview(data)
+        _render_pdf_preview(data, file_name)
     else:
         st.info(_t(lang, "docs_unsupported"))
 
@@ -2994,16 +2994,22 @@ def _render_single_attachment(lang: str, realm_id: str, att: dict[str, Any]) -> 
     )
 
 
-def _render_pdf_preview(data: bytes) -> None:
-    """Best-effort inline PDF preview; the download button is the reliable path."""
-    import base64
+def _render_pdf_preview(data: bytes, file_name: str = "document.pdf") -> None:
+    """Inline PDF preview.
 
-    b64 = base64.b64encode(data).decode("ascii")
-    st.markdown(
-        f"<iframe src='data:application/pdf;base64,{b64}' "
-        f"style='width:100%;height:70vh;border:1px solid #ddd;border-radius:8px;'></iframe>",
-        unsafe_allow_html=True,
-    )
+    Chrome blocks ``data:application/pdf`` iframes for security ("This page has
+    been blocked by Chrome"), so prefer Streamlit's native PDF renderer when the
+    installed version supports it. The download button above is always the
+    reliable fallback.
+    """
+    pdf_renderer = getattr(st, "pdf", None)
+    if callable(pdf_renderer):
+        try:
+            pdf_renderer(data, height=700)
+            return
+        except Exception:  # noqa: BLE001 - fall through to the caption below
+            logger.exception("st.pdf preview failed for %s", file_name)
+    st.caption("📄 Preview not supported in this browser — use the download button below.")
 
 
 def _render_purchase_history_view(lang: str, realm_id: str) -> None:
