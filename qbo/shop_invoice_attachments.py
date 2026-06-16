@@ -91,7 +91,11 @@ def fresh_temp_download_uri(
     if not realm_id or not attachable_id:
         return ""
     try:
-        response = qbo_client.get(f"/download/{attachable_id}", realm_id=realm_id)
+        response = qbo_client.get(
+            f"/download/{attachable_id}",
+            realm_id=realm_id,
+            headers={"Accept": "text/plain, application/json"},
+        )
     except Exception:  # noqa: BLE001
         logger.exception("Download-URL fetch failed for attachable %s", attachable_id)
         return ""

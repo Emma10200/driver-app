@@ -38,8 +38,14 @@ class QboClient:
     def query(self, sql: str, realm_id: str) -> dict[str, Any]:
         return self.get("/query", realm_id=realm_id, params={"query": sql}).json()
 
-    def get(self, path: str, realm_id: str, params: dict[str, Any] | None = None) -> requests.Response:
-        return self._request("GET", path=path, realm_id=realm_id, params=params)
+    def get(
+        self,
+        path: str,
+        realm_id: str,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> requests.Response:
+        return self._request("GET", path=path, realm_id=realm_id, params=params, headers=headers)
 
     def post(
         self,

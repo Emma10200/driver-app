@@ -76,17 +76,19 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-16.01 (invoice docs button + full history window)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-16.02 (clean history sort + doc download fix)"
 
 # How many cached transactions part history scans per type. Big enough to cover
 # a multi-year shop's full Bill/Purchase/Invoice/Adjustment history (reads are
 # paginated past PostgREST's 1000-row server cap and cached for a short TTL).
 _PART_HISTORY_SCAN = 20000
 
-# Invoice History: load a multi-year window (past PostgREST's 1000-row cap) so
-# search can reach old invoices, but only render a recent slice when no filter
-# is active to keep the phone responsive.
-_INVOICE_HISTORY_WINDOW = 6000
+# Invoice History: the default (unfiltered) list shows a clean recent window so
+# old outlier invoice numbers (e.g. a one-off #152285 from 2025) don't float to
+# the top. When the user searches/filters, load a multi-year window (past
+# PostgREST's 1000-row cap) so search can reach old invoices.
+_INVOICE_HISTORY_DEFAULT = 500
+_INVOICE_HISTORY_WINDOW = 8000
 _INVOICE_HISTORY_RENDER_CAP = 400
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
@@ -2631,10 +2633,16 @@ def _cached_invoice_attachments(realm_id: str, invoice_id: str) -> list[dict[str
 
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
-def _cached_attachment_bytes(realm_id: str, attachable_id: str) -> bytes:
-    """Download one attachment's bytes (fresh temp URL each cache miss)."""
+def _cached_attachment_bytes(realm_id: str, attachable_id: str, temp_download_uri: str = "") -> bytes:
+    """Download one attachment's bytes.
+
+    Prefers the ``TempDownloadUri`` captured when listing (avoids an extra QBO
+    round-trip); falls back to requesting a fresh download URL if it expired.
+    """
     qbo_client, _, _ = build_services()
-    return download_attachment_bytes(qbo_client, realm_id, attachable_id)
+    return download_attachment_bytes(
+        qbo_client, realm_id, attachable_id, temp_download_uri=temp_download_uri
+    )
 
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
@@ -2853,9 +2861,13 @@ def _render_history_view(lang: str, realm_id: str) -> None:
             f"💵 {_t(lang, 'unpaid_only')}",
             key="invoice_history_unpaid_only",
         )
+    has_filter = bool(hist_search or oil_only or unpaid_only)
+    # Unfiltered: clean recent window (avoids old high-numbered outliers at top).
+    # Filtered: wide multi-year window so search can reach old invoices.
+    window = _INVOICE_HISTORY_WINDOW if has_filter else _INVOICE_HISTORY_DEFAULT
     try:
         with st.spinner(_t(lang, "history_loading")):
-            invoices = _cached_recent_invoices(realm_id, _INVOICE_HISTORY_WINDOW)
+            invoices = _cached_recent_invoices(realm_id, window)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Invoice history load failed: %s", exc)
         st.error(_t(lang, "history_error"))
@@ -2864,15 +2876,13 @@ def _render_history_view(lang: str, realm_id: str) -> None:
     invoices = _filter_history_invoices(invoices, hist_search, oil_only, unpaid_only)
 
     if not invoices:
-        has_filter = bool(hist_search or oil_only or unpaid_only)
         st.info(_t(lang, "history_no_filter_results") if has_filter else _t(lang, "history_empty"))
         return
 
-    # Keep the page responsive: search reaches the full multi-year window, but an
-    # unfiltered list only renders the most recent slice.
-    has_filter = bool(hist_search or oil_only or unpaid_only)
+    # Keep the page responsive: render only the newest slice and tell the user to
+    # search for anything older.
     total = len(invoices)
-    if not has_filter and total > _INVOICE_HISTORY_RENDER_CAP:
+    if total > _INVOICE_HISTORY_RENDER_CAP:
         invoices = invoices[:_INVOICE_HISTORY_RENDER_CAP]
         st.caption(_t(lang, "history_render_cap").format(shown=len(invoices), total=total))
 
@@ -2950,7 +2960,9 @@ def _render_single_attachment(lang: str, realm_id: str, att: dict[str, Any]) -> 
         st.caption(note)
 
     try:
-        data = _cached_attachment_bytes(realm_id, attachable_id)
+        data = _cached_attachment_bytes(
+            realm_id, attachable_id, str(att.get("temp_download_uri") or "")
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception("Attachment download failed: %s", exc)
         data = b""
