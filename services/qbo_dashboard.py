@@ -70,6 +70,7 @@ QBO_CATALOG_CACHE_KEY = "qbo_catalog_cache"
 QBO_MISSING_CUSTOMERS_KEY = "qbo_missing_customers"
 QBO_MISSING_VENDORS_KEY = "qbo_missing_vendors"
 QBO_RETRY_FILTER_KEY = "qbo_retry_filter"
+QBO_INVOICE_AUDIT_KEY = "qbo_invoice_audit"
 _DATE_USE_ROW = "Use row dates (or most recent Friday)"
 _TEMPLATE_OPTIONS = {
     "invoices": "Invoices",
@@ -670,6 +671,7 @@ def _render_importer(
         st.session_state.pop(QBO_PREVIEW_KEY, None)
         st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
         st.session_state.pop(QBO_MISSING_VENDORS_KEY, None)
+        st.session_state.pop(QBO_INVOICE_AUDIT_KEY, None)
         st.session_state.pop(QBO_DRIVER_EDIT_NOTICE_KEY, None)
         st.session_state.pop(QBO_DRIVER_PENDING_KEY, None)
         st.session_state.pop(QBO_DRIVER_RESET_KEY, None)
@@ -686,7 +688,13 @@ def _render_importer(
     if template_key != "invoices" and selected_realm is None:
         post_disabled = True
 
-    preview_col, clear_col, post_col, hint_col = st.columns([0.16, 0.12, 0.16, 0.56])
+    if template_key == "invoices":
+        preview_col, clear_col, post_col, audit_col, hint_col = st.columns(
+            [0.16, 0.12, 0.16, 0.16, 0.40]
+        )
+    else:
+        preview_col, clear_col, post_col, hint_col = st.columns([0.16, 0.12, 0.16, 0.56])
+        audit_col = None
     with preview_col:
         if st.button("Preview", type="primary", use_container_width=True):
             try:
@@ -713,6 +721,7 @@ def _render_importer(
             st.session_state.pop(QBO_PREVIEW_KEY, None)
             st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
             st.session_state.pop(QBO_MISSING_VENDORS_KEY, None)
+            st.session_state.pop(QBO_INVOICE_AUDIT_KEY, None)
             st.session_state.pop(QBO_RETRY_FILTER_KEY, None)
             st.session_state.pop(QBO_DRIVER_EDIT_NOTICE_KEY, None)
             st.session_state.pop(QBO_DRIVER_PENDING_KEY, None)
@@ -728,6 +737,19 @@ def _render_importer(
             disabled=post_disabled,
             use_container_width=True,
         )
+    audit_clicked = False
+    if audit_col is not None:
+        with audit_col:
+            audit_clicked = st.button(
+                "Audit",
+                key="qbo_audit_invoices",
+                disabled=not preview_ready or not bool(preview.drafts),
+                use_container_width=True,
+                help=(
+                    "Compare this file against QuickBooks: confirms every row is "
+                    "imported and lands in the company its Division resolves to."
+                ),
+            )
     with hint_col:
         if template_key == "invoices":
             st.caption("Ready to post: customers are checked first; missing customers can be created before posting.")
@@ -788,7 +810,15 @@ def _render_importer(
         return
 
     if template_key == "invoices":
+        if audit_clicked:
+            with st.spinner("Auditing this file against QuickBooks…"):
+                st.session_state[QBO_INVOICE_AUDIT_KEY] = _audit_invoice_import(
+                    preview=preview,
+                    realms=realms,
+                    auth_service=auth_service,
+                )
         _render_invoice_routing_summary(preview, realms)
+        _render_invoice_audit_result(preview)
 
     _render_preview(preview)
 
@@ -2171,6 +2201,260 @@ def _render_editable_expense_lines(
 
     if changed:
         st.success(f"Updated expense account on {changed} line(s). Click Post to QBO when ready.")
+
+
+# =============================================================================
+# Invoice import audit (compare export vs. QuickBooks)
+# =============================================================================
+
+# Audit status buckets. "OK" is the only non-anomaly outcome.
+_AUDIT_OK = "Imported (correct company)"
+_AUDIT_MISSING = "Missing import"
+_AUDIT_AMOUNT_MISMATCH = "Amount mismatch"
+_AUDIT_WRONG_COMPANY = "Division mismatch (wrong company)"
+_AUDIT_DUPLICATE = "In correct + other company"
+_AUDIT_UNRESOLVED = "Unresolved Division"
+_AUDIT_NOT_CHECKED = "Not checked (lookup failed)"
+
+# Largest absolute dollar difference treated as "same" amount (rounding noise).
+_AUDIT_AMOUNT_TOLERANCE = 0.01
+
+
+def _qbo_total(row: dict[str, Any]) -> float | None:
+    try:
+        return float(row.get("TotalAmt"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _preload_realm_invoices(
+    *,
+    realm_id: str,
+    min_date: str,
+    max_date: str,
+    qbo_client: QboClient,
+) -> dict[str, list[dict[str, Any]]]:
+    """Map normalized DocNumber -> invoice rows for one realm over a date window."""
+    page_size = 1000
+    by_doc: dict[str, list[dict[str, Any]]] = {}
+    start = 1
+    while True:
+        sql = (
+            "SELECT DocNumber, TxnDate, CustomerRef, TotalAmt FROM Invoice "
+            f"WHERE TxnDate >= '{min_date}' AND TxnDate <= '{max_date}' "
+            f"STARTPOSITION {start} MAXRESULTS {page_size}"
+        )
+        rows = (qbo_client.query(sql, realm_id=realm_id).get("QueryResponse") or {}).get("Invoice") or []
+        if not rows:
+            break
+        for row in rows:
+            doc = str(row.get("DocNumber") or "").strip().lower()
+            if doc:
+                by_doc.setdefault(doc, []).append(row)
+        if len(rows) < page_size:
+            break
+        start += page_size
+    return by_doc
+
+
+def _audit_invoice_import(
+    *,
+    preview: PreviewResult,
+    realms: list[ConnectedRealm],
+    auth_service: QboAuthService,
+) -> dict[str, Any]:
+    """Check every previewed invoice row against QuickBooks.
+
+    For each row resolved to a company by its Division, confirm the invoice
+    actually exists in that company (imported) and is not sitting in a
+    different connected company instead (division mismatch). Reads only.
+    """
+    drafts = preview.drafts or []
+    realm_names = {realm.realm_id: realm.company_name for realm in realms}
+    qbo_client = QboClient(auth_service)
+
+    dates = [str(d.get("TxnDate") or "").strip() for d in drafts if str(d.get("TxnDate") or "").strip()]
+    min_date = min(dates) if dates else ""
+    max_date = max(dates) if dates else ""
+
+    realm_maps: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    query_errors: list[dict[str, Any]] = []
+    if min_date and max_date:
+        for realm in realms:
+            try:
+                realm_maps[realm.realm_id] = _preload_realm_invoices(
+                    realm_id=realm.realm_id,
+                    min_date=min_date,
+                    max_date=max_date,
+                    qbo_client=qbo_client,
+                )
+            except Exception as exc:  # noqa: BLE001 - surface per-company, keep auditing the rest
+                logger.exception("Invoice audit preload failed for realm %s", realm.realm_id)
+                query_errors.append(
+                    {
+                        "realm_id": realm.realm_id,
+                        "company": realm_names.get(realm.realm_id) or realm.realm_id,
+                        "error": str(exc),
+                    }
+                )
+
+    rows: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+    for draft in drafts:
+        doc = str(draft.get("DocNumber") or "").strip()
+        doc_key = doc.lower()
+        txn_date = str(draft.get("TxnDate") or "").strip()
+        division = str(draft.get("_division") or "").strip() or "(blank)"
+        customer = str(draft.get("_tempCustomerName") or "").strip()
+        amount = _draft_amount(draft)
+        expected_realm_id = str(draft.get("_realmId") or "").strip()
+        expected_company = realm_names.get(expected_realm_id) or "(unmatched)"
+
+        found_realm_ids = [
+            realm_id
+            for realm_id, by_doc in realm_maps.items()
+            if doc_key and doc_key in by_doc
+        ]
+        found_companies = [realm_names.get(rid) or rid for rid in found_realm_ids]
+
+        # When the invoice is present in the expected company, compare the QBO
+        # total against the export amount. Multiple matches (same DocNumber) are
+        # treated as matching if any one is within tolerance.
+        qbo_amount: float | None = None
+        amount_ok = True
+        if expected_realm_id and expected_realm_id in found_realm_ids:
+            matches = realm_maps.get(expected_realm_id, {}).get(doc_key) or []
+            qbo_totals = [t for t in (_qbo_total(m) for m in matches) if t is not None]
+            if qbo_totals:
+                qbo_amount = min(
+                    qbo_totals, key=lambda total: abs(total - amount)
+                )
+                amount_ok = abs(qbo_amount - amount) <= _AUDIT_AMOUNT_TOLERANCE
+
+        if not expected_realm_id:
+            status = _AUDIT_UNRESOLVED
+        elif expected_realm_id not in realm_maps:
+            status = _AUDIT_NOT_CHECKED
+        elif expected_realm_id in found_realm_ids:
+            others = [rid for rid in found_realm_ids if rid != expected_realm_id]
+            if not amount_ok:
+                status = _AUDIT_AMOUNT_MISMATCH
+            elif others:
+                status = _AUDIT_DUPLICATE
+            else:
+                status = _AUDIT_OK
+        elif found_realm_ids:
+            status = _AUDIT_WRONG_COMPANY
+        else:
+            status = _AUDIT_MISSING
+
+        counts[status] = counts.get(status, 0) + 1
+        rows.append(
+            {
+                "Doc #": doc,
+                "Txn Date": txn_date,
+                "Division": division,
+                "Customer": customer,
+                "Export amount": round(amount, 2),
+                "QBO amount": round(qbo_amount, 2) if qbo_amount is not None else None,
+                "Expected company": expected_company,
+                "Found in": ", ".join(sorted(found_companies)) if found_companies else "(none)",
+                "Status": status,
+            }
+        )
+
+    anomalies = [row for row in rows if row["Status"] != _AUDIT_OK]
+    return {
+        "source_hash": preview.source_hash,
+        "source_file": preview.source_file,
+        "checked_count": len(rows),
+        "date_window": (min_date, max_date),
+        "counts": counts,
+        "rows": rows,
+        "anomalies": anomalies,
+        "query_errors": query_errors,
+    }
+
+
+def _render_invoice_audit_result(preview: PreviewResult) -> None:
+    """Render the latest invoice audit, if it matches the current preview."""
+    result = st.session_state.get(QBO_INVOICE_AUDIT_KEY)
+    if not isinstance(result, dict):
+        return
+    if result.get("source_hash") != preview.source_hash:
+        st.session_state.pop(QBO_INVOICE_AUDIT_KEY, None)
+        return
+
+    counts = result.get("counts") or {}
+    anomalies = list(result.get("anomalies") or [])
+    query_errors = list(result.get("query_errors") or [])
+    checked = int(result.get("checked_count") or 0)
+
+    with st.container(border=True):
+        header_cols = st.columns([0.4, 0.6])
+        with header_cols[0]:
+            st.markdown("**Import audit vs. QuickBooks**")
+        with header_cols[1]:
+            window = result.get("date_window") or ("", "")
+            if window[0] and window[1]:
+                st.caption(f"Checked TxnDate {window[0]} → {window[1]} across all connected companies.")
+
+        metric_cols = st.columns(6)
+        metric_cols[0].metric("Rows", checked)
+        metric_cols[1].metric("Imported OK", counts.get(_AUDIT_OK, 0))
+        metric_cols[2].metric("Missing", counts.get(_AUDIT_MISSING, 0))
+        metric_cols[3].metric("Amount mismatch", counts.get(_AUDIT_AMOUNT_MISMATCH, 0))
+        metric_cols[4].metric(
+            "Wrong company",
+            counts.get(_AUDIT_WRONG_COMPANY, 0) + counts.get(_AUDIT_DUPLICATE, 0),
+        )
+        metric_cols[5].metric("Anomalies", len(anomalies))
+
+        critical = (
+            counts.get(_AUDIT_MISSING, 0)
+            + counts.get(_AUDIT_AMOUNT_MISMATCH, 0)
+        )
+        warn_only = (
+            counts.get(_AUDIT_WRONG_COMPANY, 0)
+            + counts.get(_AUDIT_DUPLICATE, 0)
+        )
+
+        if query_errors:
+            st.error(
+                "Some companies could not be queried, so their rows show as "
+                "\u201cNot checked\u201d. Results below may be incomplete."
+            )
+            with st.expander("Lookup errors", expanded=False):
+                st.dataframe(
+                    [{"Company": item.get("company"), "Error": item.get("error")} for item in query_errors],
+                    hide_index=True,
+                    use_container_width=True,
+                )
+
+        if not anomalies and not query_errors:
+            st.success(
+                "All rows are imported into the company their Division resolves to, "
+                "and amounts match QuickBooks. No anomalies found."
+            )
+            return
+
+        if critical:
+            st.error(
+                f"\U0001F534 {critical} critical row(s): missing imports or amount "
+                "mismatches. These must be fixed."
+            )
+        if warn_only:
+            st.warning(
+                f"\U0001F7E0 {warn_only} row(s) imported into a different company "
+                "than their Division resolves to."
+            )
+
+        if anomalies:
+            with st.expander("Anomaly details", expanded=True):
+                st.dataframe(anomalies, hide_index=True, use_container_width=True)
+
+        with st.expander("Full audit (all rows)", expanded=False):
+            st.dataframe(result.get("rows") or [], hide_index=True, use_container_width=True)
 
 
 # =============================================================================
