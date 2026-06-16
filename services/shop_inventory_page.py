@@ -34,7 +34,10 @@ from qbo.shop_invoices import (
 )
 from qbo.shop_invoice_history_sync import sync_shop_invoice_history
 from qbo.shop_invoice_attachments import (
+    build_attachment_index,
     download_attachment_bytes,
+    index_key,
+    list_entity_attachments,
     list_invoice_attachments,
 )
 from qbo.shop_inventory_adjustment_sync import sync_shop_inventory_adjustments
@@ -51,6 +54,7 @@ from services.shop_invoice_history_cache import (
     list_cached_invoices,
 )
 from services.shop_purchase_history_cache import (
+    get_cached_purchase,
     last_purchase_history_sync,
     list_cached_purchases,
 )
@@ -76,7 +80,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-16.03 (native PDF preview via st.pdf)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-16.04 (doc badges + purchase detail + part history links + last vendor)"
 
 # How many cached transactions part history scans per type. Big enough to cover
 # a multi-year shop's full Bill/Purchase/Invoice/Adjustment history (reads are
@@ -192,6 +196,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "docs_title": "Scanned Documents",
         "docs_loading": "Loading documents…",
         "docs_none": "No documents attached to this invoice in QuickBooks.",
+        "docs_none_short": "No documents",
         "docs_error": "Could not load documents from QuickBooks. Please try again.",
         "docs_download": "Download",
         "docs_unsupported": "Preview not available — use Download to view this file.",
@@ -382,6 +387,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "docs_title": "Сканирани документи",
         "docs_loading": "Зареждане на документи…",
         "docs_none": "Няма прикачени документи към тази фактура в QuickBooks.",
+        "docs_none_short": "Няма документи",
         "docs_error": "Документите не можаха да се заредят от QuickBooks. Опитайте отново.",
         "docs_download": "Изтегли",
         "docs_unsupported": "Няма визуализация — използвайте Изтегли, за да видите файла.",
@@ -1428,6 +1434,7 @@ _VIEW_HISTORY = "history"
 _VIEW_PURCHASE_HISTORY = "purchase_history"
 _VIEW_INVOICE_DETAIL = "invoice"
 _VIEW_INVOICE_DOCS = "invoice_docs"
+_VIEW_PURCHASE_DETAIL = "purchase_detail"
 _VIEW_PART_DETAIL = "part"
 _VIEW_SCAN = "scan"
 _VALID_VIEWS = {
@@ -1438,6 +1445,7 @@ _VALID_VIEWS = {
     _VIEW_PURCHASE_HISTORY,
     _VIEW_INVOICE_DETAIL,
     _VIEW_INVOICE_DOCS,
+    _VIEW_PURCHASE_DETAIL,
     _VIEW_PART_DETAIL,
     _VIEW_SCAN,
 }
@@ -1554,6 +1562,19 @@ def _open_invoice_documents(invoice_id: str) -> None:
         return
     st.session_state["shop_invoice_id"] = invoice_id
     _go(_VIEW_INVOICE_DOCS)
+
+
+def _open_purchase_detail(txn_id: str, *, return_part_id: str = "") -> None:
+    """Open the purchase/bill detail view (line items + documents)."""
+    txn_id = str(txn_id or "").strip()
+    if not txn_id:
+        return
+    st.session_state["shop_purchase_id"] = txn_id
+    if return_part_id:
+        st.session_state["shop_purchase_return_part_id"] = str(return_part_id or "").strip()
+    else:
+        st.session_state.pop("shop_purchase_return_part_id", None)
+    _go(_VIEW_PURCHASE_DETAIL)
 
 
 def _open_app_square_html(lang: str) -> str:
@@ -1712,6 +1733,8 @@ def render_shop_inventory_page() -> None:
         _render_invoice_detail_view(lang, realm_id)
     elif view == _VIEW_INVOICE_DOCS:
         _render_invoice_documents_view(lang, realm_id)
+    elif view == _VIEW_PURCHASE_DETAIL:
+        _render_purchase_detail_view(lang, realm_id)
     elif view == _VIEW_PART_DETAIL:
         _render_part_detail_view(lang, realm_id)
     elif view == _VIEW_NEW_INVOICE:
@@ -1923,6 +1946,11 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
     if not events:
         st.info("No sales or purchase history found for this synced part yet.")
         return
+    # Surface the most recent vendor this part was bought from.
+    last_buy = next((e for e in events if str(e.get("kind") or "") == "bought"), None)
+    if last_buy:
+        vendor = str(last_buy.get("name") or "—")
+        st.caption(f"🛒 Last purchased from {vendor} on {_fmt_user_date(last_buy.get('date'))}")
     if not purchases:
         st.caption("No cached purchase rows found for this part yet. Run Purchase History refresh after applying the purchase-history migration.")
     if not adjustments:
@@ -1934,8 +1962,10 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
     current_part_id = str(part.get("qbo_item_id") or "").strip()
     for idx, ev in enumerate(events[:250]):
         st.markdown(_part_event_html(ev), unsafe_allow_html=True)
+        kind = str(ev.get("kind") or "")
         invoice_id = str(ev.get("invoice_id") or "").strip()
-        if ev.get("kind") == "sold" and invoice_id:
+        purchase_id = str(ev.get("purchase_id") or "").strip()
+        if kind == "sold" and invoice_id:
             doc = str(ev.get("doc") or invoice_id).strip()
             if st.button(
                 f"🔍 Open invoice {doc}",
@@ -1943,6 +1973,14 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
                 use_container_width=True,
             ):
                 _open_invoice_detail(invoice_id, return_part_id=current_part_id)
+        elif kind == "bought" and purchase_id:
+            doc = str(ev.get("doc") or purchase_id).strip()
+            if st.button(
+                f"🔍 Open purchase {doc}",
+                key=f"part_buy_purchase_{purchase_id}_{idx}",
+                use_container_width=True,
+            ):
+                _open_purchase_detail(purchase_id, return_part_id=current_part_id)
 
 
 def _filter_part_history_events(events: list[dict[str, Any]], part_id: str) -> list[dict[str, Any]]:
@@ -2072,6 +2110,8 @@ def _part_purchase_events(realm_id: str, part: dict[str, Any]) -> list[dict[str,
             events.append(
                 {
                     "kind": "bought",
+                    "purchase_id": str(doc.get("qbo_txn_id") or doc.get("Id") or ""),
+                    "purchase_type": entity,
                     "date": date,
                     "doc": doc_no,
                     "name": vendor,
@@ -2633,6 +2673,47 @@ def _cached_invoice_attachments(realm_id: str, invoice_id: str) -> list[dict[str
 
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_entity_attachments(realm_id: str, entity_type: str, entity_id: str) -> list[dict[str, Any]]:
+    """List QBO attachments for any entity (Invoice, Purchase, Bill…)."""
+    qbo_client, _, _ = build_services()
+    return list_entity_attachments(qbo_client, realm_id, entity_type, entity_id)
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_attachment_index(realm_id: str) -> dict[str, list[dict[str, Any]]]:
+    """One scan of all QBO file attachments, indexed by linked entity.
+
+    Lets the history lists show a has/no-document badge without an API call per
+    row. Returns an empty dict on any failure so the lists still render.
+    """
+    try:
+        qbo_client, _, _ = build_services()
+        return build_attachment_index(qbo_client, realm_id)
+    except Exception:  # noqa: BLE001 - indicator is best-effort
+        logger.exception("Attachment index build failed")
+        return {}
+
+
+def _entity_has_documents(realm_id: str, entity_type: str, entity_id: str) -> bool | None:
+    """True/False if the entity has attachments, or None if the index is unavailable."""
+    entity_id = str(entity_id or "").strip()
+    if not entity_id:
+        return False
+    try:
+        index = _cached_attachment_index(realm_id)
+    except Exception:  # noqa: BLE001
+        return None
+    if not index:
+        return None
+    return bool(index.get(index_key(entity_type, entity_id)))
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_purchase_detail(realm_id: str, txn_id: str) -> dict[str, Any] | None:
+    return get_cached_purchase(realm_id, txn_id)
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
 def _cached_attachment_bytes(realm_id: str, attachable_id: str, temp_download_uri: str = "") -> bytes:
     """Download one attachment's bytes.
 
@@ -2886,19 +2967,20 @@ def _render_history_view(lang: str, realm_id: str) -> None:
         invoices = invoices[:_INVOICE_HISTORY_RENDER_CAP]
         st.caption(_t(lang, "history_render_cap").format(shown=len(invoices), total=total))
 
+    # Build the attachment presence index once (one scan, cached) so each row can
+    # show a has/no-document badge without a per-invoice API call.
+    with st.spinner(_t(lang, "docs_loading")):
+        doc_index = _cached_attachment_index(realm_id)
+
     for inv in invoices:
         st.markdown(_invoice_html(inv, lang), unsafe_allow_html=True)
         inv_id = str(inv.get("qbo_invoice_id") or inv.get("Id") or "").strip()
         if not inv_id:
             continue
+        atts = doc_index.get(index_key("Invoice", inv_id), []) if doc_index else None
         docs_col, view_col = st.columns(2)
         with docs_col:
-            if st.button(
-                f"📎 {_t(lang, 'view_docs')}",
-                key=f"inv_docs_{inv_id}",
-                use_container_width=True,
-            ):
-                _open_invoice_documents(inv_id)
+            _render_doc_indicator(lang, "Invoice", inv_id, atts, key=f"inv_docs_{inv_id}")
         with view_col:
             if st.button(
                 f"🔍 {_t(lang, 'view_details')}",
@@ -2906,6 +2988,52 @@ def _render_history_view(lang: str, realm_id: str) -> None:
                 use_container_width=True,
             ):
                 _open_invoice_detail(inv_id)
+
+
+def _render_doc_indicator(
+    lang: str,
+    entity_type: str,
+    entity_id: str,
+    atts: list[dict[str, Any]] | None,
+    *,
+    key: str,
+) -> None:
+    """Inline document control for a history row.
+
+    ``atts`` is the attachment list from the cached index: a non-empty list means
+    documents exist; an empty list means none; ``None`` means the index was
+    unavailable (fall back to a button that fetches on demand).
+    """
+    if atts is None:
+        # Index unavailable - offer the on-demand documents view.
+        if st.button(f"📎 {_t(lang, 'view_docs')}", key=key, use_container_width=True):
+            if entity_type == "Invoice":
+                _open_invoice_documents(entity_id)
+            else:
+                _open_purchase_detail(entity_id)
+        return
+    if not atts:
+        st.caption(f"📎 {_t(lang, 'docs_none_short')}")
+        return
+    # One file with a live URL -> one-tap download. Otherwise open the docs view.
+    single_uri = str(atts[0].get("temp_download_uri") or "") if len(atts) == 1 else ""
+    if single_uri:
+        st.link_button(
+            f"⬇ {_t(lang, 'docs_download')}",
+            single_uri,
+            use_container_width=True,
+        )
+        return
+    if st.button(
+        f"📎 {_t(lang, 'view_docs')} ({len(atts)})",
+        key=key,
+        use_container_width=True,
+    ):
+        if entity_type == "Invoice":
+            _open_invoice_documents(entity_id)
+        else:
+            _open_purchase_detail(entity_id)
+
 
 
 def _render_invoice_documents_view(lang: str, realm_id: str) -> None:
@@ -3012,6 +3140,88 @@ def _render_pdf_preview(data: bytes, file_name: str = "document.pdf") -> None:
     st.caption("📄 Preview not supported in this browser — use the download button below.")
 
 
+def _render_documents_section(
+    lang: str, realm_id: str, entity_type: str, entity_id: str
+) -> None:
+    """Render the scanned-document download/preview block for any QBO entity."""
+    st.markdown(
+        f"<div class='shop-title'>📎 {_t(lang, 'docs_title')}</div>",
+        unsafe_allow_html=True,
+    )
+    try:
+        with st.spinner(_t(lang, "docs_loading")):
+            atts = _cached_entity_attachments(realm_id, entity_type, entity_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Documents load failed for %s %s: %s", entity_type, entity_id, exc)
+        st.error(_t(lang, "docs_error"))
+        return
+    if not atts:
+        st.caption(_t(lang, "docs_none_short"))
+        return
+    for att in atts:
+        _render_single_attachment(lang, realm_id, att)
+
+
+def _purchase_line_html(line: dict[str, Any]) -> str:
+    """One purchase/bill line row for the purchase detail view."""
+    if not isinstance(line, dict):
+        return ""
+    name = str(line.get("item_name") or line.get("account_name") or line.get("description") or "—")
+    qty = _fmt_qty(line.get("qty")) or "—"
+    rate = _fmt_price(line.get("unit_price"))
+    amount = _fmt_price(line.get("amount"))
+    desc = str(line.get("description") or "")
+    bits = [f"Qty: {qty}"]
+    if rate:
+        bits.append(f"Rate: {rate}")
+    if amount:
+        bits.append(f"Amount: {amount}")
+    return (
+        f"<div class='inv-card'>"
+        f"<div class='inv-top'><span class='inv-no'>{_escape(name)}</span></div>"
+        f"<div class='inv-meta'>{' · '.join(_escape(bit) for bit in bits)}</div>"
+        f"{f'<div class=\"li-desc\">{_escape(desc)}</div>' if desc and desc != name else ''}"
+        f"</div>"
+    )
+
+
+def _render_purchase_detail_view(lang: str, realm_id: str) -> None:
+    """Purchase/Bill detail: line items + scanned documents, with download."""
+    _render_view_header(lang, "purchase_history_title")
+
+    txn_id = str(st.session_state.get("shop_purchase_id") or "").strip()
+    return_part_id = str(st.session_state.get("shop_purchase_return_part_id") or "").strip()
+    back_label = "Part detail" if return_part_id else _t(lang, "card_purchase_history")
+    if st.button(f"⬅ {back_label}", key="purchase_detail_back_top"):
+        if return_part_id:
+            _open_part_detail(return_part_id)
+        else:
+            _go(_VIEW_PURCHASE_HISTORY)
+    if not realm_id or not txn_id:
+        st.info(_t(lang, "detail_error"))
+        return
+
+    try:
+        with st.spinner(_t(lang, "history_loading")):
+            doc = _cached_purchase_detail(realm_id, txn_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Purchase detail load failed: %s", exc)
+        doc = None
+    if not doc:
+        st.error(_t(lang, "detail_error"))
+        return
+
+    st.markdown(_purchase_html(doc), unsafe_allow_html=True)
+
+    lines = doc.get("line_items") or []
+    if lines:
+        st.markdown(f"<div class='shop-title'>{_t(lang, 'line_items')}</div>", unsafe_allow_html=True)
+        st.markdown("".join(_purchase_line_html(line) for line in lines), unsafe_allow_html=True)
+
+    entity_type = str(doc.get("qbo_txn_type") or "Purchase")
+    _render_documents_section(lang, realm_id, entity_type, txn_id)
+
+
 def _render_purchase_history_view(lang: str, realm_id: str) -> None:
     """Purchase-side history: QBO Purchase + Bill docs cached in Supabase."""
     _render_view_header(lang, "purchase_history_title")
@@ -3048,8 +3258,25 @@ def _render_purchase_history_view(lang: str, realm_id: str) -> None:
     if not purchases:
         st.info(_t(lang, "history_no_filter_results") if term else _t(lang, "purchase_history_empty"))
         return
+    with st.spinner(_t(lang, "docs_loading")):
+        doc_index = _cached_attachment_index(realm_id)
     for row in purchases:
         st.markdown(_purchase_html(row), unsafe_allow_html=True)
+        txn_id = str(row.get("qbo_txn_id") or "").strip()
+        if not txn_id:
+            continue
+        etype = str(row.get("qbo_txn_type") or "Purchase")
+        atts = doc_index.get(index_key(etype, txn_id), []) if doc_index else None
+        docs_col, view_col = st.columns(2)
+        with docs_col:
+            _render_doc_indicator(lang, etype, txn_id, atts, key=f"pur_docs_{txn_id}")
+        with view_col:
+            if st.button(
+                f"🔍 {_t(lang, 'view_details')}",
+                key=f"pur_detail_{txn_id}",
+                use_container_width=True,
+            ):
+                _open_purchase_detail(txn_id)
 
 
 def _run_purchase_history_refresh(realm_id: str, lang: str, *, force_full: bool) -> None:
@@ -3371,12 +3598,14 @@ def _render_invoice_detail_view(lang: str, realm_id: str) -> None:
             line for line in (raw.get("Line") or [])
             if str(line.get("DetailType") or "") == "SalesItemLineDetail"
         ]
-    if not lines:
+    if lines:
+        st.markdown(f"<div class='shop-title'>{_t(lang, 'line_items')}</div>", unsafe_allow_html=True)
+        st.markdown("".join(_line_item_html(line, lang) for line in lines), unsafe_allow_html=True)
+    else:
         st.info(_t(lang, "no_lines"))
-        return
 
-    st.markdown(f"<div class='shop-title'>{_t(lang, 'line_items')}</div>", unsafe_allow_html=True)
-    st.markdown("".join(_line_item_html(line, lang) for line in lines), unsafe_allow_html=True)
+    # Scanned supporting documents (read on demand from QBO).
+    _render_documents_section(lang, realm_id, "Invoice", inv_id)
 
 
 def _copy_invoice_to_new_draft_session(inv: dict[str, Any], realm_id: str, lang: str) -> None:

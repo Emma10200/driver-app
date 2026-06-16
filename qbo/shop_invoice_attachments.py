@@ -28,10 +28,100 @@ logger = logging.getLogger(__name__)
 
 _DOWNLOAD_TIMEOUT = 45
 
+# Upper bound on how many Attachable records the index scan will pull. Big
+# enough for a multi-year shop; paginated 1000 at a time.
+_ATTACHMENT_SCAN_CAP = 20000
+
 
 def _escape_literal(value: str) -> str:
     """Escape a value for safe use inside a QBO query string literal."""
     return str(value or "").replace("'", "''")
+
+
+def _attachment_meta(row: dict[str, Any]) -> dict[str, Any]:
+    """Normalize one QBO Attachable file row into the UI's metadata shape."""
+    return {
+        "attachable_id": str(row.get("Id") or ""),
+        "file_name": str(row.get("FileName") or "").strip(),
+        "content_type": str(row.get("ContentType") or ""),
+        "category": str(row.get("Category") or ""),
+        "size": row.get("Size"),
+        "note": str(row.get("Note") or ""),
+        "temp_download_uri": str(row.get("TempDownloadUri") or ""),
+        "thumbnail_temp_download_uri": str(row.get("ThumbnailTempDownloadUri") or ""),
+    }
+
+
+def index_key(entity_type: str, entity_id: str) -> str:
+    """Stable lookup key for the attachment index (case-insensitive type)."""
+    return f"{str(entity_type or '').strip().lower()}:{str(entity_id or '').strip()}"
+
+
+def build_attachment_index(qbo_client: QboClient, realm_id: str) -> dict[str, list[dict[str, Any]]]:
+    """Scan ALL file attachments once and index them by linked entity.
+
+    Returns ``{"invoice:123": [meta, ...], "purchase:88": [meta, ...]}`` so the
+    history lists can show a has/no-document indicator without one API call per
+    row. One Attachable can be linked to several entities, so every
+    ``AttachableRef.EntityRef`` is indexed.
+    """
+    index: dict[str, list[dict[str, Any]]] = {}
+    if not realm_id:
+        return index
+    start = 1
+    page = 1000
+    fetched = 0
+    while fetched < _ATTACHMENT_SCAN_CAP:
+        sql = f"SELECT * FROM Attachable STARTPOSITION {start} MAXRESULTS {page}"
+        try:
+            response = qbo_client.query(sql, realm_id=realm_id)
+        except Exception:  # noqa: BLE001 - degrade to whatever was indexed so far
+            logger.exception("Attachable index scan failed at start=%s", start)
+            break
+        rows = (response.get("QueryResponse") or {}).get("Attachable") or []
+        if not rows:
+            break
+        for row in rows:
+            if not str(row.get("FileName") or "").strip():
+                continue  # standalone note, no file
+            meta = _attachment_meta(row)
+            for ref in row.get("AttachableRef") or []:
+                if not isinstance(ref, dict):
+                    continue
+                ent = ref.get("EntityRef") or {}
+                etype = str(ent.get("type") or "").strip()
+                eid = str(ent.get("value") or "").strip()
+                if etype and eid:
+                    index.setdefault(index_key(etype, eid), []).append(meta)
+        fetched += len(rows)
+        if len(rows) < page:
+            break
+        start += page
+    return index
+
+
+def list_entity_attachments(
+    qbo_client: QboClient, realm_id: str, entity_type: str, entity_id: str
+) -> list[dict[str, Any]]:
+    """List file attachments linked to any QBO entity (Invoice, Purchase, Bill…)."""
+    entity_type = str(entity_type or "").strip()
+    entity_id = str(entity_id or "").strip()
+    if not realm_id or not entity_type or not entity_id:
+        return []
+
+    sql = (
+        "SELECT * FROM Attachable WHERE "
+        f"AttachableRef.EntityRef.Type = '{_escape_literal(entity_type)}' AND "
+        f"AttachableRef.EntityRef.value = '{_escape_literal(entity_id)}'"
+    )
+    try:
+        response = qbo_client.query(sql, realm_id=realm_id)
+    except Exception:  # noqa: BLE001 - surface to caller, the UI shows a notice
+        logger.exception("Attachable query failed for %s %s", entity_type, entity_id)
+        raise
+
+    rows = (response.get("QueryResponse") or {}).get("Attachable") or []
+    return [_attachment_meta(row) for row in rows if str(row.get("FileName") or "").strip()]
 
 
 def list_invoice_attachments(
@@ -43,41 +133,7 @@ def list_invoice_attachments(
     fresh (~15 minute) ``temp_download_uri`` that can be downloaded directly.
     Notes (attachments without a file) are skipped.
     """
-    invoice_id = str(invoice_id or "").strip()
-    if not realm_id or not invoice_id:
-        return []
-
-    sql = (
-        "SELECT * FROM Attachable WHERE "
-        f"AttachableRef.EntityRef.Type = 'Invoice' AND "
-        f"AttachableRef.EntityRef.value = '{_escape_literal(invoice_id)}'"
-    )
-    try:
-        response = qbo_client.query(sql, realm_id=realm_id)
-    except Exception:  # noqa: BLE001 - surface an empty list, the UI shows a notice
-        logger.exception("Attachable query failed for invoice %s", invoice_id)
-        raise
-
-    rows = (response.get("QueryResponse") or {}).get("Attachable") or []
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        file_name = str(row.get("FileName") or "").strip()
-        if not file_name:
-            # Standalone note (no file) - nothing to display as a document.
-            continue
-        out.append(
-            {
-                "attachable_id": str(row.get("Id") or ""),
-                "file_name": file_name,
-                "content_type": str(row.get("ContentType") or ""),
-                "category": str(row.get("Category") or ""),
-                "size": row.get("Size"),
-                "note": str(row.get("Note") or ""),
-                "temp_download_uri": str(row.get("TempDownloadUri") or ""),
-                "thumbnail_temp_download_uri": str(row.get("ThumbnailTempDownloadUri") or ""),
-            }
-        )
-    return out
+    return list_entity_attachments(qbo_client, realm_id, "Invoice", invoice_id)
 
 
 def fresh_temp_download_uri(

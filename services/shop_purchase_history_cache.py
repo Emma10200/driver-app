@@ -26,6 +26,20 @@ def list_cached_purchases(realm_id: str, *, limit: int = 500) -> list[dict[str, 
     return rows[: max(1, int(limit or 500))]
 
 
+def get_cached_purchase(realm_id: str, txn_id: str) -> dict[str, Any] | None:
+    """Fetch a single cached purchase/bill document by its QBO transaction id."""
+    if not realm_id or not txn_id:
+        return None
+    supabase = SupabaseRestClient()
+    rows = supabase.select(
+        _TABLE,
+        select="*",
+        filters={"realm_id": f"eq.{realm_id}", "qbo_txn_id": f"eq.{txn_id}"},
+        limit=1,
+    )
+    return rows[0] if rows else None
+
+
 def last_purchase_history_sync(realm_id: str) -> str:
     if not realm_id:
         return ""
