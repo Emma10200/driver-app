@@ -33,6 +33,10 @@ from qbo.shop_invoices import (
     next_invoice_number,
 )
 from qbo.shop_invoice_history_sync import sync_shop_invoice_history
+from qbo.shop_invoice_attachments import (
+    download_attachment_bytes,
+    list_invoice_attachments,
+)
 from qbo.shop_inventory_adjustment_sync import sync_shop_inventory_adjustments
 from qbo.shop_purchase_history_sync import sync_shop_purchase_history
 from services.qbo_supabase import SupabaseRestClient
@@ -72,12 +76,18 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-15.02 (deep part-history scan + date sort)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-16.01 (invoice docs button + full history window)"
 
 # How many cached transactions part history scans per type. Big enough to cover
 # a multi-year shop's full Bill/Purchase/Invoice/Adjustment history (reads are
 # paginated past PostgREST's 1000-row server cap and cached for a short TTL).
 _PART_HISTORY_SCAN = 20000
+
+# Invoice History: load a multi-year window (past PostgREST's 1000-row cap) so
+# search can reach old invoices, but only render a recent slice when no filter
+# is active to keep the phone responsive.
+_INVOICE_HISTORY_WINDOW = 6000
+_INVOICE_HISTORY_RENDER_CAP = 400
 
 # Minimal UI string table. Full Bulgarian translation is a follow-up; this gets
 # the label toggle wired so the shop manager sees familiar words on key labels.
@@ -176,6 +186,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "invoice_paid": "Paid",
         "next_invoice_hint": "Next invoice number will be",
         "view_details": "View details",
+        "view_docs": "Documents",
+        "docs_title": "Scanned Documents",
+        "docs_loading": "Loading documents…",
+        "docs_none": "No documents attached to this invoice in QuickBooks.",
+        "docs_error": "Could not load documents from QuickBooks. Please try again.",
+        "docs_download": "Download",
+        "docs_unsupported": "Preview not available — use Download to view this file.",
+        "history_render_cap": "Showing newest {shown} of {total}. Search to find older invoices.",
         "unit": "Unit",
         "vin": "VIN",
         "miles": "Miles",
@@ -358,6 +376,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "invoice_paid": "Платена",
         "next_invoice_hint": "Следващ номер на фактура ще бъде",
         "view_details": "Виж детайли",
+        "view_docs": "Документи",
+        "docs_title": "Сканирани документи",
+        "docs_loading": "Зареждане на документи…",
+        "docs_none": "Няма прикачени документи към тази фактура в QuickBooks.",
+        "docs_error": "Документите не можаха да се заредят от QuickBooks. Опитайте отново.",
+        "docs_download": "Изтегли",
+        "docs_unsupported": "Няма визуализация — използвайте Изтегли, за да видите файла.",
+        "history_render_cap": "Показани са най-новите {shown} от {total}. Търсете, за да намерите по-стари фактури.",
         "unit": "Номер",
         "vin": "VIN",
         "miles": "Мили",
@@ -1399,6 +1425,7 @@ _VIEW_NEW_INVOICE = "new_invoice"
 _VIEW_HISTORY = "history"
 _VIEW_PURCHASE_HISTORY = "purchase_history"
 _VIEW_INVOICE_DETAIL = "invoice"
+_VIEW_INVOICE_DOCS = "invoice_docs"
 _VIEW_PART_DETAIL = "part"
 _VIEW_SCAN = "scan"
 _VALID_VIEWS = {
@@ -1408,6 +1435,7 @@ _VALID_VIEWS = {
     _VIEW_HISTORY,
     _VIEW_PURCHASE_HISTORY,
     _VIEW_INVOICE_DETAIL,
+    _VIEW_INVOICE_DOCS,
     _VIEW_PART_DETAIL,
     _VIEW_SCAN,
 }
@@ -1515,6 +1543,15 @@ def _open_invoice_detail(invoice_id: str, *, return_part_id: str = "") -> None:
     else:
         st.session_state.pop("shop_invoice_return_part_id", None)
     _go(_VIEW_INVOICE_DETAIL)
+
+
+def _open_invoice_documents(invoice_id: str) -> None:
+    """Open the scanned-documents view for an invoice."""
+    invoice_id = str(invoice_id or "").strip()
+    if not invoice_id:
+        return
+    st.session_state["shop_invoice_id"] = invoice_id
+    _go(_VIEW_INVOICE_DOCS)
 
 
 def _open_app_square_html(lang: str) -> str:
@@ -1671,6 +1708,8 @@ def render_shop_inventory_page() -> None:
         _render_purchase_history_view(lang, realm_id)
     elif view == _VIEW_INVOICE_DETAIL:
         _render_invoice_detail_view(lang, realm_id)
+    elif view == _VIEW_INVOICE_DOCS:
+        _render_invoice_documents_view(lang, realm_id)
     elif view == _VIEW_PART_DETAIL:
         _render_part_detail_view(lang, realm_id)
     elif view == _VIEW_NEW_INVOICE:
@@ -2458,6 +2497,73 @@ def _add_item_to_draft(realm_id: str, draft_id: str, item: dict[str, Any]) -> No
     _go(_VIEW_NEW_INVOICE)
 
 
+def _refresh_cart_line_stock(realm_id: str, lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Refresh draft/cart line stock from the current inventory cache.
+
+    Drafts store a snapshot of each line. If a draft is opened days later, that
+    saved ``on_hand`` value can be stale (often 0). Rehydrate from the live
+    synced inventory row so the cart shows the current QBO stock count.
+    """
+    if not realm_id or not lines:
+        return lines
+    try:
+        parts = _all_active_parts(realm_id)
+    except Exception:  # noqa: BLE001 - stale stock is better than crashing
+        return lines
+
+    def _part_stock(part: dict[str, Any]) -> Any:
+        for key in ("qty_on_hand", "quantity_on_hand", "stock_qty", "on_hand"):
+            if part.get(key) is not None:
+                return part.get(key)
+        return None
+
+    def _line_item_id(line: dict[str, Any]) -> str:
+        for key in ("qbo_item_id", "item_id", "item_ref_id", "product_service_id", "qbo_id"):
+            value = line.get(key)
+            if value:
+                return str(value).strip()
+        item_ref = line.get("ItemRef") or line.get("item_ref")
+        if isinstance(item_ref, dict):
+            return str(item_ref.get("value") or item_ref.get("id") or "").strip()
+        return ""
+
+    def _line_item_name(line: dict[str, Any]) -> str:
+        for key in ("name", "item_name", "product_service_name", "invoice_name", "display_name"):
+            value = line.get(key)
+            if value:
+                return str(value).strip().lower()
+        item_ref = line.get("ItemRef") or line.get("item_ref")
+        if isinstance(item_ref, dict):
+            return str(item_ref.get("name") or "").strip().lower()
+        return ""
+
+    by_id = {str(part.get("qbo_item_id") or ""): part for part in parts if part.get("qbo_item_id")}
+    by_name: dict[str, dict[str, Any]] = {}
+    for part in parts:
+        for name in (part.get("name"), part.get("fully_qualified_name"), part.get("invoice_name"), part.get("display_name")):
+            key = str(name or "").strip().lower()
+            if key and key not in by_name:
+                by_name[key] = part
+
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        item_id = _line_item_id(line)
+        name = _line_item_name(line)
+        part = by_id.get(item_id) if item_id else None
+        if part is None and name:
+            part = by_name.get(name)
+        if part is None:
+            continue
+        line["qbo_item_id"] = str(part.get("qbo_item_id") or item_id)
+        current_stock = _part_stock(part)
+        if current_stock is not None:
+            line["on_hand"] = current_stock
+        if not line.get("sku"):
+            line["sku"] = str(part.get("sku") or "")
+    return lines
+
+
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
 def _cached_recent_invoices(realm_id: str, limit: int) -> list[dict[str, Any]]:
     return list_cached_invoices(realm_id, limit=limit)
@@ -2515,6 +2621,20 @@ def _clear_draft_derived_caches() -> None:
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
 def _cached_invoice_detail(realm_id: str, invoice_id: str) -> dict[str, Any] | None:
     return get_cached_invoice(realm_id, invoice_id)
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_invoice_attachments(realm_id: str, invoice_id: str) -> list[dict[str, Any]]:
+    """List QBO attachments for an invoice (live read, short-cached)."""
+    qbo_client, _, _ = build_services()
+    return list_invoice_attachments(qbo_client, realm_id, invoice_id)
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_attachment_bytes(realm_id: str, attachable_id: str) -> bytes:
+    """Download one attachment's bytes (fresh temp URL each cache miss)."""
+    qbo_client, _, _ = build_services()
+    return download_attachment_bytes(qbo_client, realm_id, attachable_id)
 
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
@@ -2735,7 +2855,7 @@ def _render_history_view(lang: str, realm_id: str) -> None:
         )
     try:
         with st.spinner(_t(lang, "history_loading")):
-            invoices = _cached_recent_invoices(realm_id, 500)
+            invoices = _cached_recent_invoices(realm_id, _INVOICE_HISTORY_WINDOW)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Invoice history load failed: %s", exc)
         st.error(_t(lang, "history_error"))
@@ -2748,15 +2868,130 @@ def _render_history_view(lang: str, realm_id: str) -> None:
         st.info(_t(lang, "history_no_filter_results") if has_filter else _t(lang, "history_empty"))
         return
 
+    # Keep the page responsive: search reaches the full multi-year window, but an
+    # unfiltered list only renders the most recent slice.
+    has_filter = bool(hist_search or oil_only or unpaid_only)
+    total = len(invoices)
+    if not has_filter and total > _INVOICE_HISTORY_RENDER_CAP:
+        invoices = invoices[:_INVOICE_HISTORY_RENDER_CAP]
+        st.caption(_t(lang, "history_render_cap").format(shown=len(invoices), total=total))
+
     for inv in invoices:
         st.markdown(_invoice_html(inv, lang), unsafe_allow_html=True)
         inv_id = str(inv.get("qbo_invoice_id") or inv.get("Id") or "").strip()
-        if inv_id and st.button(
+        if not inv_id:
+            continue
+        docs_col, view_col = st.columns(2)
+        with docs_col:
+            if st.button(
+                f"📎 {_t(lang, 'view_docs')}",
+                key=f"inv_docs_{inv_id}",
+                use_container_width=True,
+            ):
+                _open_invoice_documents(inv_id)
+        with view_col:
+            if st.button(
                 f"🔍 {_t(lang, 'view_details')}",
                 key=f"inv_detail_{inv_id}",
                 use_container_width=True,
-        ):
-            _open_invoice_detail(inv_id)
+            ):
+                _open_invoice_detail(inv_id)
+
+
+def _render_invoice_documents_view(lang: str, realm_id: str) -> None:
+    """Show the original scanned documents attached to an invoice in QuickBooks.
+
+    Read-only. Fetches the QBO ``Attachable`` files linked to this invoice on
+    demand (no local storage), renders images inline, and offers a download for
+    every file type.
+    """
+    _render_view_header(lang, "docs_title")
+
+    inv_id = (_query_param_value("invoice_id") or str(st.session_state.get("shop_invoice_id") or "")).strip()
+    if st.button(f"⬅ {_t(lang, 'card_history')}", key="docs_back_hist_top"):
+        _go(_VIEW_HISTORY)
+    if not realm_id or not inv_id:
+        st.info(_t(lang, "detail_error"))
+        return
+
+    # Header card so the user knows which invoice these documents belong to.
+    try:
+        inv = _cached_invoice_detail(realm_id, inv_id)
+    except Exception:  # noqa: BLE001 - header is best-effort
+        inv = None
+    if inv:
+        st.markdown(_invoice_html(inv, lang), unsafe_allow_html=True)
+
+    try:
+        with st.spinner(_t(lang, "docs_loading")):
+            attachments = _cached_invoice_attachments(realm_id, inv_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Invoice documents load failed: %s", exc)
+        st.error(_t(lang, "docs_error"))
+        return
+
+    if not attachments:
+        st.info(_t(lang, "docs_none"))
+        return
+
+    for att in attachments:
+        _render_single_attachment(lang, realm_id, att)
+
+
+def _render_single_attachment(lang: str, realm_id: str, att: dict[str, Any]) -> None:
+    """Render one QBO attachment: inline preview for images + a download button."""
+    attachable_id = str(att.get("attachable_id") or "")
+    file_name = str(att.get("file_name") or "document")
+    content_type = str(att.get("content_type") or "").lower()
+    note = str(att.get("note") or "").strip()
+
+    st.markdown(f"<div class='shop-title'>📎 {_escape(file_name)}</div>", unsafe_allow_html=True)
+    if note:
+        st.caption(note)
+
+    try:
+        data = _cached_attachment_bytes(realm_id, attachable_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Attachment download failed: %s", exc)
+        data = b""
+
+    if not data:
+        st.warning(_t(lang, "docs_error"))
+        return
+
+    name_lower = file_name.lower()
+    is_image = content_type.startswith("image/") or name_lower.endswith(
+        (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+    )
+    is_pdf = content_type == "application/pdf" or name_lower.endswith(".pdf")
+
+    if is_image:
+        st.image(data, use_container_width=True)
+    elif is_pdf:
+        _render_pdf_preview(data)
+    else:
+        st.info(_t(lang, "docs_unsupported"))
+
+    st.download_button(
+        f"⬇ {_t(lang, 'docs_download')} — {file_name}",
+        data=data,
+        file_name=file_name,
+        mime=content_type or "application/octet-stream",
+        use_container_width=True,
+        key=f"dl_att_{attachable_id}",
+    )
+
+
+def _render_pdf_preview(data: bytes) -> None:
+    """Best-effort inline PDF preview; the download button is the reliable path."""
+    import base64
+
+    b64 = base64.b64encode(data).decode("ascii")
+    st.markdown(
+        f"<iframe src='data:application/pdf;base64,{b64}' "
+        f"style='width:100%;height:70vh;border:1px solid #ddd;border-radius:8px;'></iframe>",
+        unsafe_allow_html=True,
+    )
 
 
 def _render_purchase_history_view(lang: str, realm_id: str) -> None:
@@ -3340,6 +3575,7 @@ def _render_new_invoice_view(lang: str, realm_id: str) -> None:
 
     st.markdown(f"<div class='shop-title'>{_t(lang, 'cart_title')}</div>", unsafe_allow_html=True)
     cart = _cart()
+    _refresh_cart_line_stock(realm_id, cart)
     if not cart:
         st.info(_t(lang, "cart_empty"))
         total = 0.0
