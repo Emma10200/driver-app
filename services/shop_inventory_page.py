@@ -18,6 +18,10 @@ from typing import Any
 from urllib.parse import quote_plus
 
 import streamlit as st
+try:
+    from streamlit_keyup import st_keyup as _st_keyup
+except Exception:  # pragma: no cover - dependency fallback for local/dev deploys
+    _st_keyup = None
 
 from qbo.shop_inventory_sync import (
     build_services,
@@ -89,7 +93,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-17.06 (derived part-history index + 50-row Show More + lightweight links)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-17.07 (live keyup inventory/history filters)"
 
 # How many cached transactions part history scans per type. Big enough to cover
 # a multi-year shop's full Bill/Purchase/Invoice/Adjustment history (reads are
@@ -1043,6 +1047,43 @@ def _t(lang: str, key: str) -> str:
     return table.get(key) or _STRINGS["en"].get(key, key)
 
 
+def _live_filter_input(
+    label: str,
+    *,
+    key: str,
+    placeholder: str = "",
+    label_visibility: str = "collapsed",
+) -> str:
+    """Text filter that updates on keyup, with a normal Streamlit fallback.
+
+    Streamlit's native text_input updates on Enter/blur. For search/filter boxes
+    that confuses the shop workflow, so we use streamlit-keyup when installed.
+    The fallback keeps the app functional if the component is temporarily absent.
+    """
+    if _st_keyup is not None:
+        current = str(st.session_state.get(key) or "")
+        try:
+            value = _st_keyup(
+                label,
+                value=current,
+                debounce=250,
+                key=key,
+                placeholder=placeholder,
+            )
+        except TypeError:
+            try:
+                value = _st_keyup(label, value=current, debounce=250, key=key)
+            except TypeError:
+                value = _st_keyup(label, key=key)
+        return str(value if value is not None else current).strip()
+    return st.text_input(
+        label,
+        key=key,
+        placeholder=placeholder,
+        label_visibility=label_visibility,
+    ).strip()
+
+
 @st.cache_data(ttl=_REALM_CACHE_TTL, show_spinner=False)
 def _cached_shop_realm_id() -> str:
     _, token_repo, _ = build_services()
@@ -1959,7 +2000,7 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
     # sub-container) so its sticky scroll context is the whole page, which is what
     # makes it actually pin to the top while the list scrolls underneath.
     st.markdown("<span class='sticky-search-anchor'></span>", unsafe_allow_html=True)
-    term = st.text_input(
+    term = _live_filter_input(
         _t(lang, "search_label"),
         key="shop_search_term",
         placeholder=_t(lang, "search_placeholder"),
@@ -3153,7 +3194,7 @@ def _render_history_view(lang: str, realm_id: str) -> None:
         f"<div class='shop-title'>{_t(lang, 'qbo_invoices_title')}</div>",
         unsafe_allow_html=True,
     )
-    hist_search = st.text_input(
+    hist_search = _live_filter_input(
         _t(lang, "history_title"),
         key="invoice_history_search",
         placeholder=_t(lang, "history_search_placeholder"),
@@ -3490,7 +3531,7 @@ def _render_purchase_history_view(lang: str, realm_id: str) -> None:
         if st.button(f"⟳ {_t(lang, 'purchase_history_full_refresh')}", use_container_width=True):
             _run_purchase_history_refresh(realm_id, lang, force_full=True)
 
-    term = st.text_input(
+    term = _live_filter_input(
         _t(lang, "purchase_history_title"),
         key="purchase_history_search",
         placeholder=_t(lang, "purchase_history_search_placeholder"),
