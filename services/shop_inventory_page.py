@@ -33,6 +33,7 @@ from qbo.shop_invoices import (
     next_invoice_number,
 )
 from qbo.shop_invoice_history_sync import sync_shop_invoice_history
+from qbo.shop_attachment_sync import sync_shop_attachments
 from qbo.shop_invoice_attachments import (
     build_attachment_index,
     download_attachment_bytes,
@@ -80,7 +81,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-16.04 (doc badges + purchase detail + part history links + last vendor)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-17.02 (instant doc downloads + lazy preview + part-history scans + desktop-wide + Supabase doc index)"
 
 # How many cached transactions part history scans per type. Big enough to cover
 # a multi-year shop's full Bill/Purchase/Invoice/Adjustment history (reads are
@@ -199,6 +200,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "docs_none_short": "No documents",
         "docs_error": "Could not load documents from QuickBooks. Please try again.",
         "docs_download": "Download",
+        "docs_preview": "Preview",
         "docs_unsupported": "Preview not available — use Download to view this file.",
         "history_render_cap": "Showing newest {shown} of {total}. Search to find older invoices.",
         "unit": "Unit",
@@ -390,6 +392,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "docs_none_short": "Няма документи",
         "docs_error": "Документите не можаха да се заредят от QuickBooks. Опитайте отново.",
         "docs_download": "Изтегли",
+        "docs_preview": "Преглед",
         "docs_unsupported": "Няма визуализация — използвайте Изтегли, за да видите файла.",
         "history_render_cap": "Показани са най-новите {shown} от {total}. Търсете, за да намерите по-стари фактури.",
         "unit": "Номер",
@@ -977,6 +980,36 @@ _MOBILE_CSS = """
 """
 
 
+# Desktop-only override. Layered on top of _MOBILE_CSS for non-phone clients so
+# accounting gets a wider working area while the shop manager's phone keeps the
+# narrow, thumb-friendly 680px column.
+_DESKTOP_CSS = """
+<style>
+  .block-container { max-width: 1180px; }
+</style>
+"""
+
+
+def _is_mobile_client() -> bool:
+    """Best-effort phone detection from the request User-Agent.
+
+    Streamlit has no native viewport API, but the User-Agent header is a
+    reliable enough signal to widen the layout for desktop while keeping the
+    phone-first sizing for the shop manager. Defaults to mobile (the safer,
+    narrower layout) when the header is missing.
+    """
+    try:
+        headers = getattr(st.context, "headers", None)
+        user_agent = (headers.get("User-Agent") if headers else "") or ""
+    except Exception:  # noqa: BLE001 - context not available in every runtime
+        return True
+    user_agent = user_agent.lower()
+    if not user_agent:
+        return True
+    mobile_tokens = ("mobi", "android", "iphone", "ipod", "windows phone", "blackberry")
+    return any(token in user_agent for token in mobile_tokens)
+
+
 def _t(lang: str, key: str) -> str:
     table = _STRINGS.get(lang) or _STRINGS["en"]
     return table.get(key) or _STRINGS["en"].get(key, key)
@@ -1379,6 +1412,7 @@ def _run_sync_all(realm_id: str, lang: str) -> None:
         purchases = sync_shop_purchase_history(realm_id)
         adjustments = sync_shop_inventory_adjustments(realm_id)
         customers = sync_shop_customers(realm_id)
+        attachments = sync_shop_attachments(realm_id)
 
     _search_inventory.clear()
     _all_active_parts.clear()
@@ -1394,6 +1428,7 @@ def _run_sync_all(realm_id: str, lang: str) -> None:
     _cached_customer_names.clear()
     _cached_customer_search.clear()
     _cached_customer_synced_at.clear()
+    _cached_attachment_index.clear()
 
     failures = [r for r in (inventory, invoices, purchases, customers) if r.status != "success"]
     if failures:
@@ -1415,6 +1450,12 @@ def _run_sync_all(realm_id: str, lang: str) -> None:
         st.warning(getattr(adjustments, "message", "Run migration 0011 to enable inventory adjustments."))
     elif getattr(adjustments, "status", "") not in ("", "success"):
         st.warning(f"Inventory adjustment sync issue: {getattr(adjustments, 'message', '')}")
+    if getattr(attachments, "status", "") not in ("", "success"):
+        st.warning(
+            "Document index not cached: "
+            f"{getattr(attachments, 'message', '')}. "
+            "Run migration 0012, then Sync All again."
+        )
 
 
 def _shop_app_url() -> str:
@@ -1699,6 +1740,10 @@ def render_shop_inventory_page() -> None:
     same navigation so the user can switch views from anywhere. Public-by-link.
     """
     st.markdown(_MOBILE_CSS, unsafe_allow_html=True)
+    if not _is_mobile_client():
+        # Desktop (accounting) gets a wider, roomier layout; phones keep the
+        # phone-first 680px column so the shop manager's view is unchanged.
+        st.markdown(_DESKTOP_CSS, unsafe_allow_html=True)
 
     lang = st.session_state.get("shop_lang", "en")
 
@@ -1960,6 +2005,10 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
         st.info("No part history matches the selected filters.")
         return
     current_part_id = str(part.get("qbo_item_id") or "").strip()
+    # One cached scan of all attachments so each transaction can offer a direct
+    # scan download without a per-row QBO call (same fast path as the history list).
+    with st.spinner(_t(lang, "docs_loading")):
+        doc_index = _cached_attachment_index(realm_id)
     for idx, ev in enumerate(events[:250]):
         st.markdown(_part_event_html(ev), unsafe_allow_html=True)
         kind = str(ev.get("kind") or "")
@@ -1967,20 +2016,35 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
         purchase_id = str(ev.get("purchase_id") or "").strip()
         if kind == "sold" and invoice_id:
             doc = str(ev.get("doc") or invoice_id).strip()
-            if st.button(
-                f"🔍 Open invoice {doc}",
-                key=f"part_sale_invoice_{invoice_id}_{idx}",
-                use_container_width=True,
-            ):
-                _open_invoice_detail(invoice_id, return_part_id=current_part_id)
+            open_col, docs_col = st.columns(2)
+            with open_col:
+                if st.button(
+                    f"🔍 Open invoice {doc}",
+                    key=f"part_sale_invoice_{invoice_id}_{idx}",
+                    use_container_width=True,
+                ):
+                    _open_invoice_detail(invoice_id, return_part_id=current_part_id)
+            with docs_col:
+                atts = doc_index.get(index_key("Invoice", invoice_id), []) if doc_index else None
+                _render_doc_indicator(
+                    lang, "Invoice", invoice_id, atts, key=f"part_sale_docs_{invoice_id}_{idx}"
+                )
         elif kind == "bought" and purchase_id:
             doc = str(ev.get("doc") or purchase_id).strip()
-            if st.button(
-                f"🔍 Open purchase {doc}",
-                key=f"part_buy_purchase_{purchase_id}_{idx}",
-                use_container_width=True,
-            ):
-                _open_purchase_detail(purchase_id, return_part_id=current_part_id)
+            etype = str(ev.get("purchase_type") or "Purchase")
+            open_col, docs_col = st.columns(2)
+            with open_col:
+                if st.button(
+                    f"🔍 Open purchase {doc}",
+                    key=f"part_buy_purchase_{purchase_id}_{idx}",
+                    use_container_width=True,
+                ):
+                    _open_purchase_detail(purchase_id, return_part_id=current_part_id)
+            with docs_col:
+                atts = doc_index.get(index_key(etype, purchase_id), []) if doc_index else None
+                _render_doc_indicator(
+                    lang, etype, purchase_id, atts, key=f"part_buy_docs_{purchase_id}_{idx}"
+                )
 
 
 def _filter_part_history_events(events: list[dict[str, Any]], part_id: str) -> list[dict[str, Any]]:
@@ -2681,17 +2745,48 @@ def _cached_entity_attachments(realm_id: str, entity_type: str, entity_id: str) 
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
 def _cached_attachment_index(realm_id: str) -> dict[str, list[dict[str, Any]]]:
-    """One scan of all QBO file attachments, indexed by linked entity.
+    """All QBO file attachments indexed by linked entity.
 
-    Lets the history lists show a has/no-document badge without an API call per
-    row. Returns an empty dict on any failure so the lists still render.
+    Prefers the Supabase attachment-index cache (instant; populated by Sync All),
+    so the history lists can show has/no-document badges without scanning QBO on
+    every page view. Falls back to a live QBO scan only when the cache is empty
+    (e.g. before the first Sync All) so documents still work out of the box.
+    Returns an empty dict on any failure so the lists still render.
     """
+    try:
+        cached = _attachment_index_from_cache(realm_id)
+        if cached:
+            return cached
+    except Exception:  # noqa: BLE001 - cache read is best-effort; fall back to live
+        logger.exception("Attachment index cache read failed; falling back to live scan")
     try:
         qbo_client, _, _ = build_services()
         return build_attachment_index(qbo_client, realm_id)
     except Exception:  # noqa: BLE001 - indicator is best-effort
         logger.exception("Attachment index build failed")
         return {}
+
+
+def _attachment_index_from_cache(realm_id: str) -> dict[str, list[dict[str, Any]]]:
+    """Rebuild the in-memory attachment index from the Supabase cache table."""
+    if not realm_id:
+        return {}
+    _, _, supabase = build_services()
+    rows = supabase.select_all(
+        "shop_attachment_index_cache",
+        select="entity_type,entity_id,attachments",
+        filters={"realm_id": f"eq.{realm_id}"},
+        order="entity_type",
+    )
+    index: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        entity_type = str(row.get("entity_type") or "").strip()
+        entity_id = str(row.get("entity_id") or "").strip()
+        atts = row.get("attachments")
+        if entity_type and entity_id and isinstance(atts, list):
+            index[index_key(entity_type, entity_id)] = atts
+    return index
+
 
 
 def _entity_has_documents(realm_id: str, entity_type: str, entity_id: str) -> bool | None:
@@ -3077,49 +3172,67 @@ def _render_invoice_documents_view(lang: str, realm_id: str) -> None:
 
 
 def _render_single_attachment(lang: str, realm_id: str, att: dict[str, Any]) -> None:
-    """Render one QBO attachment: inline preview for images + a download button."""
+    """Render one QBO attachment, download-first.
+
+    The download control renders immediately (a direct, pre-signed QuickBooks
+    URL when available) so the list never blocks on byte transfers. The inline
+    preview is lazy: bytes are only pulled when the user opens the preview,
+    showing a spinner while the backend fetches them.
+    """
     attachable_id = str(att.get("attachable_id") or "")
     file_name = str(att.get("file_name") or "document")
     content_type = str(att.get("content_type") or "").lower()
     note = str(att.get("note") or "").strip()
+    temp_uri = str(att.get("temp_download_uri") or "").strip()
 
     st.markdown(f"<div class='shop-title'>📎 {_escape(file_name)}</div>", unsafe_allow_html=True)
     if note:
         st.caption(note)
 
-    try:
-        data = _cached_attachment_bytes(
-            realm_id, attachable_id, str(att.get("temp_download_uri") or "")
+    # Instant, zero-wait download straight from QuickBooks' pre-signed URL. The
+    # browser hits the QBO CDN directly, so this renders without any backend wait.
+    if temp_uri:
+        st.link_button(
+            f"⬇ {_t(lang, 'docs_download')} — {file_name}",
+            temp_uri,
+            use_container_width=True,
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Attachment download failed: %s", exc)
-        data = b""
-
-    if not data:
-        st.warning(_t(lang, "docs_error"))
-        return
 
     name_lower = file_name.lower()
     is_image = content_type.startswith("image/") or name_lower.endswith(
         (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
     )
     is_pdf = content_type == "application/pdf" or name_lower.endswith(".pdf")
+    can_preview = is_image or is_pdf
 
-    if is_image:
-        st.image(data, use_container_width=True)
-    elif is_pdf:
-        _render_pdf_preview(data, file_name)
-    else:
-        st.info(_t(lang, "docs_unsupported"))
-
-    st.download_button(
-        f"⬇ {_t(lang, 'docs_download')} — {file_name}",
-        data=data,
-        file_name=file_name,
-        mime=content_type or "application/octet-stream",
-        use_container_width=True,
-        key=f"dl_att_{attachable_id}",
-    )
+    # Lazy preview + reliable (app-routed) download. Bytes are only fetched when
+    # the user opens this expander, so the documents list paints instantly. If
+    # the pre-signed URL above has expired, this path requests a fresh one.
+    label = _t(lang, "docs_preview") if can_preview else _t(lang, "docs_download")
+    with st.expander(f"👁 {label}", expanded=False):
+        with st.spinner(_t(lang, "docs_loading")):
+            try:
+                data = _cached_attachment_bytes(realm_id, attachable_id, temp_uri)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Attachment download failed: %s", exc)
+                data = b""
+        if not data:
+            st.warning(_t(lang, "docs_error"))
+            return
+        if is_image:
+            st.image(data, use_container_width=True)
+        elif is_pdf:
+            _render_pdf_preview(data, file_name)
+        else:
+            st.info(_t(lang, "docs_unsupported"))
+        st.download_button(
+            f"⬇ {_t(lang, 'docs_download')} — {file_name}",
+            data=data,
+            file_name=file_name,
+            mime=content_type or "application/octet-stream",
+            use_container_width=True,
+            key=f"dl_att_{attachable_id}",
+        )
 
 
 def _render_pdf_preview(data: bytes, file_name: str = "document.pdf") -> None:
