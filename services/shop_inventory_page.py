@@ -84,7 +84,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-17.04 (part history server-side item filter + GIN index = instant first open)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-17.05 (part history restores purchases/adjustments via raw ItemRef fallback)"
 
 # How many cached transactions part history scans per type. Big enough to cover
 # a multi-year shop's full Bill/Purchase/Invoice/Adjustment history (reads are

@@ -17,16 +17,50 @@ def _item_contains_filter(item_id: str) -> str:
     return "cs." + json.dumps([{"item_id": str(item_id)}], separators=(",", ":"))
 
 
+def _raw_item_contains_filter(item_id: str) -> str:
+    """PostgREST jsonb containment value matching raw QBO ItemRef.value."""
+    return "cs." + json.dumps(
+        {
+            "Line": [
+                {
+                    "ItemBasedExpenseLineDetail": {
+                        "ItemRef": {"value": str(item_id)},
+                    }
+                }
+            ]
+        },
+        separators=(",", ":"),
+    )
+
+
+def _merge_purchase_rows(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for rows in groups:
+        for row in rows:
+            key = (
+                str(row.get("realm_id") or ""),
+                str(row.get("qbo_txn_type") or ""),
+                str(row.get("qbo_txn_id") or ""),
+            )
+            if key[2]:
+                merged[key] = row
+    out = list(merged.values())
+    out.sort(key=_purchase_sort_key)
+    return out
+
+
 def list_purchases_with_item(realm_id: str, item_id: str, *, limit: int = 2000) -> list[dict[str, Any]]:
     """Cached purchases/bills whose line_items contain ``item_id`` (server filtered).
 
     Uses the GIN index on line_items so part Bought history fetches only the few
-    relevant purchase documents instead of the whole history.
+    relevant purchase documents instead of the whole history. Also checks the
+    authoritative raw QBO payload as a server-side fallback for older cache rows
+    whose flattened line_items are incomplete.
     """
     if not realm_id or not str(item_id or "").strip():
         return []
     supabase = SupabaseRestClient()
-    rows = supabase.select_all(
+    line_rows = supabase.select_all(
         _TABLE,
         select=_PURCHASE_SELECT,
         filters={
@@ -37,7 +71,18 @@ def list_purchases_with_item(realm_id: str, item_id: str, *, limit: int = 2000) 
         page_size=1000,
         hard_cap=max(1000, int(limit or 2000)),
     )
-    rows.sort(key=_purchase_sort_key)
+    raw_rows = supabase.select_all(
+        _TABLE,
+        select=_PURCHASE_SELECT,
+        filters={
+            "realm_id": f"eq.{realm_id}",
+            "raw": _raw_item_contains_filter(item_id),
+        },
+        order="txn_date.desc,doc_number.desc",
+        page_size=1000,
+        hard_cap=max(1000, int(limit or 2000)),
+    )
+    rows = _merge_purchase_rows(line_rows, raw_rows)
     return rows[: max(1, int(limit or 2000))]
 
 
