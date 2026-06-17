@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -9,6 +10,39 @@ from services.qbo_supabase import SupabaseRestClient
 
 _TABLE = "shop_invoice_history_cache"
 _STATE_TABLE = "shop_invoice_history_sync_state"
+_INVOICE_SELECT = "realm_id,qbo_invoice_id,doc_number,txn_date,customer_name,total,balance,unit,vin,miles,line_items,qbo_last_updated_at,last_synced,raw"
+
+
+def _item_contains_filter(item_id: str) -> str:
+    """PostgREST jsonb containment value matching a flattened line item_id."""
+    return "cs." + json.dumps([{"item_id": str(item_id)}], separators=(",", ":"))
+
+
+def list_invoices_with_item(realm_id: str, item_id: str, *, limit: int = 2000) -> list[dict[str, Any]]:
+    """Cached invoices whose line_items contain ``item_id`` (server-side filtered).
+
+    Uses the GIN index (migration 0013) so part Sold history fetches only the few
+    relevant invoices instead of the whole history. Applies the same display-doc
+    filter and natural-number sort as :func:`list_cached_invoices` so the result
+    is identical to scanning everything - just far fewer rows over the wire.
+    """
+    if not realm_id or not str(item_id or "").strip():
+        return []
+    supabase = SupabaseRestClient()
+    rows = supabase.select_all(
+        _TABLE,
+        select=_INVOICE_SELECT,
+        filters={
+            "realm_id": f"eq.{realm_id}",
+            "line_items": _item_contains_filter(item_id),
+        },
+        order="doc_number.desc,txn_date.desc",
+        page_size=1000,
+        hard_cap=max(1000, int(limit or 2000)),
+    )
+    rows = [row for row in rows if _is_display_invoice_doc(row.get("doc_number"))]
+    rows.sort(key=_invoice_sort_key)
+    return rows[: max(1, int(limit or 2000))]
 
 
 def list_cached_invoices(realm_id: str, *, limit: int = 100) -> list[dict[str, Any]]:

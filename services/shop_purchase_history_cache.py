@@ -2,12 +2,43 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from services.qbo_supabase import SupabaseRestClient
 
 _TABLE = "shop_purchase_history_cache"
 _STATE_TABLE = "shop_purchase_history_sync_state"
+_PURCHASE_SELECT = "realm_id,qbo_txn_type,qbo_txn_id,doc_number,txn_date,vendor_name,payment_type,total,line_items,qbo_last_updated_at,last_synced,raw"
+
+
+def _item_contains_filter(item_id: str) -> str:
+    """PostgREST jsonb containment value matching a flattened line item_id."""
+    return "cs." + json.dumps([{"item_id": str(item_id)}], separators=(",", ":"))
+
+
+def list_purchases_with_item(realm_id: str, item_id: str, *, limit: int = 2000) -> list[dict[str, Any]]:
+    """Cached purchases/bills whose line_items contain ``item_id`` (server filtered).
+
+    Uses the GIN index on line_items so part Bought history fetches only the few
+    relevant purchase documents instead of the whole history.
+    """
+    if not realm_id or not str(item_id or "").strip():
+        return []
+    supabase = SupabaseRestClient()
+    rows = supabase.select_all(
+        _TABLE,
+        select=_PURCHASE_SELECT,
+        filters={
+            "realm_id": f"eq.{realm_id}",
+            "line_items": _item_contains_filter(item_id),
+        },
+        order="txn_date.desc,doc_number.desc",
+        page_size=1000,
+        hard_cap=max(1000, int(limit or 2000)),
+    )
+    rows.sort(key=_purchase_sort_key)
+    return rows[: max(1, int(limit or 2000))]
 
 
 def list_cached_purchases(realm_id: str, *, limit: int = 500) -> list[dict[str, Any]]:

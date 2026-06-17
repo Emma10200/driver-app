@@ -47,17 +47,20 @@ from services.qbo_supabase import SupabaseRestClient
 from services.shop_customer_cache import customer_names, last_customer_sync
 from services.shop_inventory_adjustment_cache import (
     last_inventory_adjustment_sync,
+    list_adjustments_with_item,
     list_cached_inventory_adjustments,
 )
 from services.shop_invoice_history_cache import (
     get_cached_invoice,
     last_invoice_history_sync,
     list_cached_invoices,
+    list_invoices_with_item,
 )
 from services.shop_purchase_history_cache import (
     get_cached_purchase,
     last_purchase_history_sync,
     list_cached_purchases,
+    list_purchases_with_item,
 )
 from services.shop_invoice_queue import (
     delete_draft,
@@ -81,7 +84,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-17.02 (instant doc downloads + lazy preview + part-history scans + desktop-wide + Supabase doc index)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-17.04 (part history server-side item filter + GIN index = instant first open)"
 
 # How many cached transactions part history scans per type. Big enough to cover
 # a multi-year shop's full Bill/Purchase/Invoice/Adjustment history (reads are
@@ -1429,6 +1432,10 @@ def _run_sync_all(realm_id: str, lang: str) -> None:
     _cached_customer_search.clear()
     _cached_customer_synced_at.clear()
     _cached_attachment_index.clear()
+    _cached_part_history_events.clear()
+    _cached_invoices_with_item.clear()
+    _cached_purchases_with_item.clear()
+    _cached_adjustments_with_item.clear()
 
     failures = [r for r in (inventory, invoices, purchases, customers) if r.status != "success"]
     if failures:
@@ -1979,14 +1986,7 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
     st.markdown("<div class='shop-title'>Part history</div>", unsafe_allow_html=True)
 
     with st.spinner("Loading part history…"):
-        sales = _part_sales_events(realm_id, part)
-        purchases = _part_purchase_events(realm_id, part)
-        adjustments = _part_adjustment_events(realm_id, part)
-    events = sorted(
-        [*sales, *purchases, *adjustments],
-        key=_part_event_sort_key,
-        reverse=True,
-    )
+        events = _cached_part_history_events(realm_id, part_id)
 
     if not events:
         st.info("No sales or purchase history found for this synced part yet.")
@@ -1996,9 +1996,11 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
     if last_buy:
         vendor = str(last_buy.get("name") or "—")
         st.caption(f"🛒 Last purchased from {vendor} on {_fmt_user_date(last_buy.get('date'))}")
-    if not purchases:
+    has_purchases = any(str(e.get("kind") or "") == "bought" for e in events)
+    has_adjustments = any(str(e.get("kind") or "") == "adjusted" for e in events)
+    if not has_purchases:
         st.caption("No cached purchase rows found for this part yet. Run Purchase History refresh after applying the purchase-history migration.")
-    if not adjustments:
+    if not has_adjustments:
         st.caption("No cached inventory adjustments found for this part yet. Run the 0011 adjustment SQL migration, then Sync All.")
     events = _filter_part_history_events(events, part_id)
     if not events:
@@ -2110,7 +2112,7 @@ def _part_sales_events(realm_id: str, part: dict[str, Any]) -> list[dict[str, An
     events: list[dict[str, Any]] = []
     if not part_id:
         return events
-    for inv in list_cached_invoices(realm_id, limit=_PART_HISTORY_SCAN):
+    for inv in _cached_invoices_with_item(realm_id, part_id):
         raw = inv.get("raw") if isinstance(inv.get("raw"), dict) else {}
         # Match against the raw QBO invoice lines so the authoritative
         # ItemRef.value (QBO Item Id) is always available, even for rows cached
@@ -2156,7 +2158,7 @@ def _part_purchase_events(realm_id: str, part: dict[str, Any]) -> list[dict[str,
     events: list[dict[str, Any]] = []
     if not part_id:
         return events
-    for doc in _cached_recent_purchases(realm_id, _PART_HISTORY_SCAN):
+    for doc in _cached_purchases_with_item(realm_id, part_id):
         entity = str(doc.get("qbo_txn_type") or "Purchase")
         vendor = _purchase_vendor_name(doc)
         date = str(doc.get("txn_date") or doc.get("TxnDate") or "")
@@ -2194,7 +2196,7 @@ def _part_adjustment_events(realm_id: str, part: dict[str, Any]) -> list[dict[st
     if not part_id:
         return events
     try:
-        docs = _cached_recent_adjustments(realm_id, _PART_HISTORY_SCAN)
+        docs = _cached_adjustments_with_item(realm_id, part_id)
     except Exception as exc:  # noqa: BLE001
         logger.info("Inventory adjustment cache unavailable: %s", exc)
         return []
@@ -2683,6 +2685,46 @@ def _cached_recent_purchases(realm_id: str, limit: int) -> list[dict[str, Any]]:
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
 def _cached_recent_adjustments(realm_id: str, limit: int) -> list[dict[str, Any]]:
     return list_cached_inventory_adjustments(realm_id, limit=limit)
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_invoices_with_item(realm_id: str, item_id: str) -> list[dict[str, Any]]:
+    """Invoices containing a part, server-side filtered via the line_items GIN index."""
+    return list_invoices_with_item(realm_id, item_id)
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_purchases_with_item(realm_id: str, item_id: str) -> list[dict[str, Any]]:
+    """Purchases/bills containing a part, server-side filtered via the GIN index."""
+    return list_purchases_with_item(realm_id, item_id)
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_adjustments_with_item(realm_id: str, item_id: str) -> list[dict[str, Any]]:
+    """Inventory adjustments containing a part, server-side filtered via the GIN index."""
+    return list_adjustments_with_item(realm_id, item_id)
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_part_history_events(realm_id: str, part_id: str) -> list[dict[str, Any]]:
+    """Assemble a part's full sold/bought/adjusted history, newest first.
+
+    Memoized per (realm, part): the heavy work (scanning the cached invoice,
+    purchase, and adjustment history) runs once, so re-opening the same part -
+    e.g. after viewing a document and tapping Back - is instant. Cleared on Sync
+    All so a fresh sync is reflected.
+    """
+    part = _find_active_part(realm_id, part_id)
+    if not part:
+        return []
+    sales = _part_sales_events(realm_id, part)
+    purchases = _part_purchase_events(realm_id, part)
+    adjustments = _part_adjustment_events(realm_id, part)
+    return sorted(
+        [*sales, *purchases, *adjustments],
+        key=_part_event_sort_key,
+        reverse=True,
+    )
 
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
