@@ -62,6 +62,11 @@ from services.shop_purchase_history_cache import (
     list_cached_purchases,
     list_purchases_with_item,
 )
+from services.shop_part_history_cache import (
+    list_part_history_events,
+    part_history_index_ready,
+    rebuild_shop_part_history_index,
+)
 from services.shop_invoice_queue import (
     delete_draft,
     finalize_invoice_draft,
@@ -84,12 +89,14 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-17.05 (part history restores purchases/adjustments via raw ItemRef fallback)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-17.06 (derived part-history index + 50-row Show More + lightweight links)"
 
 # How many cached transactions part history scans per type. Big enough to cover
 # a multi-year shop's full Bill/Purchase/Invoice/Adjustment history (reads are
 # paginated past PostgREST's 1000-row server cap and cached for a short TTL).
 _PART_HISTORY_SCAN = 20000
+_PART_HISTORY_INITIAL_RENDER = 50
+_PART_HISTORY_RENDER_STEP = 50
 
 # Invoice History: the default (unfiltered) list shows a clean recent window so
 # old outlier invoice numbers (e.g. a one-off #152285 from 2025) don't float to
@@ -818,6 +825,24 @@ _MOBILE_CSS = """
   }
     .part-detail-link { color: #1f2933 !important; text-decoration: none !important; }
     .part-detail-link:active, .part-detail-link:hover { text-decoration: underline !important; }
+    .shop-action-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            min-height: 3rem;
+            padding: 0.7rem 1rem;
+            border-radius: 12px;
+            border: 1px solid #cfd6de;
+            background: #ffffff;
+            color: #1f2933 !important;
+            text-decoration: none !important;
+            font-size: 1.08rem;
+            font-weight: 600;
+            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+            text-align: center;
+    }
+    .shop-action-link:hover { background: #f5f7fa; border-color: #b8c2cc; }
   /* Tier 1: part number + SKU share a prominent header row. */
   .part-header {
       display: flex;
@@ -1416,6 +1441,7 @@ def _run_sync_all(realm_id: str, lang: str) -> None:
         adjustments = sync_shop_inventory_adjustments(realm_id)
         customers = sync_shop_customers(realm_id)
         attachments = sync_shop_attachments(realm_id)
+        part_history = rebuild_shop_part_history_index(realm_id)
 
     _search_inventory.clear()
     _all_active_parts.clear()
@@ -1436,6 +1462,7 @@ def _run_sync_all(realm_id: str, lang: str) -> None:
     _cached_invoices_with_item.clear()
     _cached_purchases_with_item.clear()
     _cached_adjustments_with_item.clear()
+    _cached_part_history_index_ready.clear()
 
     failures = [r for r in (inventory, invoices, purchases, customers) if r.status != "success"]
     if failures:
@@ -1462,6 +1489,12 @@ def _run_sync_all(realm_id: str, lang: str) -> None:
             "Document index not cached: "
             f"{getattr(attachments, 'message', '')}. "
             "Run migration 0012, then Sync All again."
+        )
+    if getattr(part_history, "status", "") not in ("", "success"):
+        st.warning(
+            "Part history index not rebuilt: "
+            f"{getattr(part_history, 'message', '')}. "
+            "Run migration 0015, then Sync All again."
         )
 
 
@@ -1625,6 +1658,22 @@ def _open_purchase_detail(txn_id: str, *, return_part_id: str = "") -> None:
     _go(_VIEW_PURCHASE_DETAIL)
 
 
+def _shop_deep_link(view: str, **params: str) -> str:
+    """Build a refresh-safe shop URL for lightweight row action links."""
+    base = _shop_app_url()
+    sep = "&" if "?" in base else "?"
+    pieces = [f"v={quote_plus(view)}"]
+    for key, value in params.items():
+        value = str(value or "").strip()
+        if value:
+            pieces.append(f"{quote_plus(key)}={quote_plus(value)}")
+    return base + sep + "&".join(pieces)
+
+
+def _action_link_html(label: str, url: str) -> str:
+    return f"<a class='shop-action-link' href='{_escape(url)}'>{_escape(label)}</a>"
+
+
 def _open_app_square_html(lang: str) -> str:
     """Small home-page-only app link.
 
@@ -1647,6 +1696,12 @@ def _current_view() -> str:
     if raw not in _VALID_VIEWS or raw == _VIEW_HOME:
         return _VIEW_HOME
     if raw == _VIEW_PART_DETAIL and _query_param_value("part_id"):
+        st.session_state["shop_allow_url_view"] = True
+        return raw
+    if raw in {_VIEW_INVOICE_DETAIL, _VIEW_INVOICE_DOCS} and _query_param_value("invoice_id"):
+        st.session_state["shop_allow_url_view"] = True
+        return raw
+    if raw == _VIEW_PURCHASE_DETAIL and _query_param_value("purchase_id"):
         st.session_state["shop_allow_url_view"] = True
         return raw
     if not st.session_state.get("shop_allow_url_view"):
@@ -2007,11 +2062,17 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
         st.info("No part history matches the selected filters.")
         return
     current_part_id = str(part.get("qbo_item_id") or "").strip()
+    show_key = f"part_history_show_{_collapse_alnum(current_part_id) or 'part'}"
+    visible_count = int(st.session_state.get(show_key, _PART_HISTORY_INITIAL_RENDER) or _PART_HISTORY_INITIAL_RENDER)
+    visible_count = max(_PART_HISTORY_INITIAL_RENDER, visible_count)
     # One cached scan of all attachments so each transaction can offer a direct
     # scan download without a per-row QBO call (same fast path as the history list).
     with st.spinner(_t(lang, "docs_loading")):
         doc_index = _cached_attachment_index(realm_id)
-    for idx, ev in enumerate(events[:250]):
+    visible_events = events[:visible_count]
+    if len(events) > len(visible_events):
+        st.caption(f"Showing newest {len(visible_events)} of {len(events)} part-history events.")
+    for idx, ev in enumerate(visible_events):
         st.markdown(_part_event_html(ev), unsafe_allow_html=True)
         kind = str(ev.get("kind") or "")
         invoice_id = str(ev.get("invoice_id") or "").strip()
@@ -2020,12 +2081,17 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
             doc = str(ev.get("doc") or invoice_id).strip()
             open_col, docs_col = st.columns(2)
             with open_col:
-                if st.button(
-                    f"🔍 Open invoice {doc}",
-                    key=f"part_sale_invoice_{invoice_id}_{idx}",
-                    use_container_width=True,
-                ):
-                    _open_invoice_detail(invoice_id, return_part_id=current_part_id)
+                st.markdown(
+                    _action_link_html(
+                        f"🔍 Open invoice {doc}",
+                        _shop_deep_link(
+                            _VIEW_INVOICE_DETAIL,
+                            invoice_id=invoice_id,
+                            return_part_id=current_part_id,
+                        ),
+                    ),
+                    unsafe_allow_html=True,
+                )
             with docs_col:
                 atts = doc_index.get(index_key("Invoice", invoice_id), []) if doc_index else None
                 _render_doc_indicator(
@@ -2036,17 +2102,26 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
             etype = str(ev.get("purchase_type") or "Purchase")
             open_col, docs_col = st.columns(2)
             with open_col:
-                if st.button(
-                    f"🔍 Open purchase {doc}",
-                    key=f"part_buy_purchase_{purchase_id}_{idx}",
-                    use_container_width=True,
-                ):
-                    _open_purchase_detail(purchase_id, return_part_id=current_part_id)
+                st.markdown(
+                    _action_link_html(
+                        f"🔍 Open purchase {doc}",
+                        _shop_deep_link(
+                            _VIEW_PURCHASE_DETAIL,
+                            purchase_id=purchase_id,
+                            return_part_id=current_part_id,
+                        ),
+                    ),
+                    unsafe_allow_html=True,
+                )
             with docs_col:
                 atts = doc_index.get(index_key(etype, purchase_id), []) if doc_index else None
                 _render_doc_indicator(
                     lang, etype, purchase_id, atts, key=f"part_buy_docs_{purchase_id}_{idx}"
                 )
+    if len(events) > len(visible_events):
+        if st.button("Show more history", key=f"part_history_show_more_{current_part_id}", use_container_width=True):
+            st.session_state[show_key] = visible_count + _PART_HISTORY_RENDER_STEP
+            st.rerun()
 
 
 def _filter_part_history_events(events: list[dict[str, Any]], part_id: str) -> list[dict[str, Any]]:
@@ -2706,14 +2781,30 @@ def _cached_adjustments_with_item(realm_id: str, item_id: str) -> list[dict[str,
 
 
 @st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_part_history_index_ready(realm_id: str) -> bool:
+    try:
+        return part_history_index_ready(realm_id)
+    except Exception as exc:  # noqa: BLE001 - migration 0015 may not be installed yet
+        logger.info("Part history index readiness check unavailable: %s", exc)
+        return False
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
 def _cached_part_history_events(realm_id: str, part_id: str) -> list[dict[str, Any]]:
     """Assemble a part's full sold/bought/adjusted history, newest first.
 
-    Memoized per (realm, part): the heavy work (scanning the cached invoice,
-    purchase, and adjustment history) runs once, so re-opening the same part -
-    e.g. after viewing a document and tapping Back - is instant. Cleared on Sync
-    All so a fresh sync is reflected.
+    Uses the derived shop_part_history_index when it is ready (single indexed
+    lookup). Before migration 0015 / first Sync All, falls back to the older
+    exact builders so no history disappears.
     """
+    try:
+        indexed = list_part_history_events(realm_id, part_id, limit=2000)
+    except Exception as exc:  # noqa: BLE001 - migration 0015 may not be installed yet
+        logger.info("Part history index read unavailable; using fallback builders: %s", exc)
+        indexed = []
+    if indexed or _cached_part_history_index_ready(realm_id):
+        return indexed
+
     part = _find_active_part(realm_id, part_id)
     if not part:
         return []
@@ -3344,8 +3435,11 @@ def _render_purchase_detail_view(lang: str, realm_id: str) -> None:
     """Purchase/Bill detail: line items + scanned documents, with download."""
     _render_view_header(lang, "purchase_history_title")
 
-    txn_id = str(st.session_state.get("shop_purchase_id") or "").strip()
-    return_part_id = str(st.session_state.get("shop_purchase_return_part_id") or "").strip()
+    txn_id = (_query_param_value("purchase_id") or str(st.session_state.get("shop_purchase_id") or "")).strip()
+    return_part_id = (
+        _query_param_value("return_part_id")
+        or str(st.session_state.get("shop_purchase_return_part_id") or "")
+    ).strip()
     back_label = "Part detail" if return_part_id else _t(lang, "card_purchase_history")
     if st.button(f"⬅ {back_label}", key="purchase_detail_back_top"):
         if return_part_id:
@@ -3712,7 +3806,10 @@ def _render_invoice_detail_view(lang: str, realm_id: str) -> None:
     _render_view_header(lang, "history_title")
 
     inv_id = (_query_param_value("invoice_id") or str(st.session_state.get("shop_invoice_id") or "")).strip()
-    return_part_id = str(st.session_state.get("shop_invoice_return_part_id") or "").strip()
+    return_part_id = (
+        _query_param_value("return_part_id")
+        or str(st.session_state.get("shop_invoice_return_part_id") or "")
+    ).strip()
     back_label = "Part detail" if return_part_id else _t(lang, "card_history")
     if not realm_id or not inv_id:
         st.info(_t(lang, "detail_error"))
