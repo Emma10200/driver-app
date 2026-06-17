@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any
+from pathlib import Path
 from urllib.parse import quote_plus
 
 import streamlit as st
@@ -84,6 +85,34 @@ from submission_storage import get_runtime_secret
 
 logger = logging.getLogger(__name__)
 
+_KEYUP_STYLE_PATCHED = False
+_KEYUP_SEARCH_CSS = """
+/* Prestige shop: make live filter boxes obvious and touch-friendly. */
+body { margin: 0 !important; }
+.input {
+    min-height: 3.2rem !important;
+    top: 0 !important;
+    bottom: 0 !important;
+    border: 2px solid #2563eb !important;
+    border-radius: 14px !important;
+    background: #ffffff !important;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12), 0 2px 6px rgba(16, 24, 40, 0.08) !important;
+}
+.input:focus-within {
+    border-color: #1d4ed8 !important;
+    box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.22), 0 3px 8px rgba(16, 24, 40, 0.12) !important;
+}
+input {
+    min-height: 3.05rem !important;
+    font-size: 1.15rem !important;
+    font-weight: 650 !important;
+    color: #111827 !important;
+    padding: 0.65rem 0.95rem !important;
+}
+input::placeholder { color: #64748b !important; opacity: 1 !important; }
+.label-collapsed .input, .label-hidden .input { top: 0 !important; }
+"""
+
 _PAGE_SIZE = 250  # how many cards on first load and per "Show more"
 _INVENTORY_PAGE = 60  # inventory shows fewer per page since each row has an Add button
 _MAX_RESULTS = 6000  # hard ceiling so a runaway list can't lock up the phone
@@ -93,7 +122,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-17.08 (live keyup filters fixed: st_keyup import)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-17.09 (bold blue bordered live search boxes)"
 
 # How many cached transactions part history scans per type. Big enough to cover
 # a multi-year shop's full Bill/Purchase/Invoice/Adjustment history (reads are
@@ -526,9 +555,15 @@ _MOBILE_CSS = """
       padding: 0.8rem 0.95rem !important;
       height: 3.2rem !important;
       border-radius: 12px !important;
-      border: 1px solid #d4dae0 !important;
+      border: 2px solid #2563eb !important;
       background: #ffffff !important;
       color: #1f2933 !important;
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12), 0 2px 6px rgba(16, 24, 40, 0.08) !important;
+      font-weight: 650 !important;
+  }
+  div[data-testid="stTextInput"] input:focus {
+      border-color: #1d4ed8 !important;
+      box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.22), 0 3px 8px rgba(16, 24, 40, 0.12) !important;
   }
   div[data-testid="stTextInput"] input::placeholder { color: #9aa5b1 !important; }
 
@@ -1047,6 +1082,29 @@ def _t(lang: str, key: str) -> str:
     return table.get(key) or _STRINGS["en"].get(key, key)
 
 
+def _patch_keyup_search_css() -> None:
+    """Patch streamlit-keyup's iframe CSS so live search boxes have a clear border.
+
+    The component renders inside an iframe, so normal page CSS cannot reach the
+    internal input. This best-effort patch appends CSS to the installed package's
+    frontend/style.css once per process. If the package is read-only, the app
+    still works and the native fallback CSS remains in place.
+    """
+    global _KEYUP_STYLE_PATCHED
+    if _KEYUP_STYLE_PATCHED or _st_keyup is None:
+        return
+    _KEYUP_STYLE_PATCHED = True
+    try:
+        import st_keyup as _keyup_module
+
+        css_path = Path(_keyup_module.__file__).resolve().parent / "frontend" / "style.css"
+        current = css_path.read_text(encoding="utf-8")
+        if "Prestige shop: make live filter boxes obvious" not in current:
+            css_path.write_text(current.rstrip() + "\n\n" + _KEYUP_SEARCH_CSS + "\n", encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 - styling patch only; never break search
+        logger.info("streamlit-keyup CSS patch skipped: %s", exc)
+
+
 def _live_filter_input(
     label: str,
     *,
@@ -1061,6 +1119,7 @@ def _live_filter_input(
     The fallback keeps the app functional if the component is temporarily absent.
     """
     if _st_keyup is not None:
+        _patch_keyup_search_css()
         current = str(st.session_state.get(key) or "")
         try:
             value = _st_keyup(
