@@ -19,7 +19,7 @@ from urllib.parse import quote_plus
 
 import streamlit as st
 try:
-    from streamlit_keyup import st_keyup as _st_keyup
+    from st_keyup import st_keyup as _st_keyup
 except Exception:  # pragma: no cover - dependency fallback for local/dev deploys
     _st_keyup = None
 
@@ -93,7 +93,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-17.07 (live keyup inventory/history filters)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-17.08 (live keyup filters fixed: st_keyup import)"
 
 # How many cached transactions part history scans per type. Big enough to cover
 # a multi-year shop's full Bill/Purchase/Invoice/Adjustment history (reads are
@@ -1069,6 +1069,7 @@ def _live_filter_input(
                 debounce=250,
                 key=key,
                 placeholder=placeholder,
+                label_visibility=label_visibility,
             )
         except TypeError:
             try:
