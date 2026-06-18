@@ -122,7 +122,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-18.01 (collapsible inventory tools + live-search diagnostic)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-18.02 (uv.lock includes streamlit-keyup + keystroke logging)"
 
 # How many cached transactions part history scans per type. Big enough to cover
 # a multi-year shop's full Bill/Purchase/Invoice/Adjustment history (reads are
@@ -1132,7 +1132,12 @@ def _live_filter_input(
                 placeholder=placeholder,
                 label_visibility=label_visibility,
             )
-            return str(value if value is not None else current).strip()
+            resolved = str(value if value is not None else current).strip()
+            # Per-keystroke log: each keyup reruns the script, so this line fires
+            # with the latest term whenever the live component sends a new value.
+            if resolved != current.strip():
+                logger.info("Live search keystroke [%s]: %r", key, resolved)
+            return resolved
         except TypeError:
             try:
                 value = _st_keyup(label, value=current, debounce=250, key=key)
@@ -1141,6 +1146,8 @@ def _live_filter_input(
                 logger.warning("Live keyup search failed (%s); using text_input.", exc)
         except Exception as exc:  # noqa: BLE001 - never break the page over search
             logger.warning("Live keyup search failed (%s); using text_input.", exc)
+    else:
+        logger.warning("Live search component (st_keyup) not loaded; using plain text_input for %s.", key)
     return st.text_input(
         label,
         key=key,
