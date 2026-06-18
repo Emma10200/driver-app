@@ -122,7 +122,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-18.02 (uv.lock includes streamlit-keyup + keystroke logging)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-18.03 (direct doc download + multi-scan merge, inventory start date)"
 
 # How many cached transactions part history scans per type. Big enough to cover
 # a multi-year shop's full Bill/Purchase/Invoice/Adjustment history (reads are
@@ -162,6 +162,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "full_resync_btn": "Re-pull all parts from QuickBooks",
         "full_resync_short": "Re-pull",
         "inventory_tools": "Tools",
+        "inv_start_date": "Inventory tracking started",
         "negatives_short": "Negatives",
         "negatives_short_on": "Negatives ✓",
         "too_many_results": "Showing the maximum number of parts. Type to narrow the list.",
@@ -355,6 +356,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "full_resync_btn": "Изтегли всички части от QuickBooks",
         "full_resync_short": "Обнови",
         "inventory_tools": "Инструменти",
+        "inv_start_date": "Следенето на наличността започна",
         "negatives_short": "Отриц.",
         "negatives_short_on": "Отриц. ✓",
         "too_many_results": "Показан е максималният брой части. Пишете, за да стесните списъка.",
@@ -2157,6 +2159,9 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
         return
 
     st.markdown(_card_html(part, lang), unsafe_allow_html=True)
+    inv_start = _cached_part_inv_start_date(realm_id, part_id)
+    if inv_start:
+        st.caption(f"📦 {_t(lang, 'inv_start_date')}: {_fmt_user_date(inv_start)}")
     st.markdown("<div class='shop-title'>Part history</div>", unsafe_allow_html=True)
 
     with st.spinner("Loading part history…"):
@@ -2214,7 +2219,7 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
             with docs_col:
                 atts = doc_index.get(index_key("Invoice", invoice_id), []) if doc_index else None
                 _render_doc_indicator(
-                    lang, "Invoice", invoice_id, atts, key=f"part_sale_docs_{invoice_id}_{idx}"
+                    lang, "Invoice", invoice_id, atts, key=f"part_sale_docs_{invoice_id}_{idx}", realm_id=realm_id
                 )
         elif kind == "bought" and purchase_id:
             doc = str(ev.get("doc") or purchase_id).strip()
@@ -2235,7 +2240,7 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
             with docs_col:
                 atts = doc_index.get(index_key(etype, purchase_id), []) if doc_index else None
                 _render_doc_indicator(
-                    lang, etype, purchase_id, atts, key=f"part_buy_docs_{purchase_id}_{idx}"
+                    lang, etype, purchase_id, atts, key=f"part_buy_docs_{purchase_id}_{idx}", realm_id=realm_id
                 )
     if len(events) > len(visible_events):
         if st.button("Show more history", key=f"part_history_show_more_{current_part_id}", use_container_width=True):
@@ -2276,6 +2281,32 @@ def _find_active_part(realm_id: str, part_id: str) -> dict[str, Any] | None:
         if str(part.get("qbo_item_id") or "") == str(part_id or ""):
             return part
     return None
+
+
+@st.cache_data(ttl=_INVOICE_CACHE_TTL, show_spinner=False)
+def _cached_part_inv_start_date(realm_id: str, part_id: str) -> str:
+    """Read the QBO inventory tracking start date (Item.InvStartDate) for a part.
+
+    Pulled from the already-cached ``raw`` QBO item JSON, so it needs no new
+    column, migration, or resync. Returns ``""`` when not available.
+    """
+    if not realm_id or not part_id:
+        return ""
+    try:
+        supabase = SupabaseRestClient()
+        rows = supabase.select(
+            "shop_inventory",
+            select="raw",
+            filters={"realm_id": f"eq.{realm_id}", "qbo_item_id": f"eq.{part_id}"},
+            limit=1,
+        )
+    except Exception as exc:  # noqa: BLE001 - optional detail, never block the page
+        logger.info("Inventory start date lookup failed: %s", exc)
+        return ""
+    if not rows:
+        return ""
+    raw = rows[0].get("raw") if isinstance(rows[0].get("raw"), dict) else {}
+    return str(raw.get("InvStartDate") or "").strip()
 
 
 def _part_match_names(part: dict[str, Any]) -> set[str]:
@@ -3327,7 +3358,7 @@ def _render_history_view(lang: str, realm_id: str) -> None:
         atts = doc_index.get(index_key("Invoice", inv_id), []) if doc_index else None
         docs_col, view_col = st.columns(2)
         with docs_col:
-            _render_doc_indicator(lang, "Invoice", inv_id, atts, key=f"inv_docs_{inv_id}")
+            _render_doc_indicator(lang, "Invoice", inv_id, atts, key=f"inv_docs_{inv_id}", realm_id=realm_id)
         with view_col:
             if st.button(
                 f"🔍 {_t(lang, 'view_details')}",
@@ -3337,6 +3368,133 @@ def _render_history_view(lang: str, realm_id: str) -> None:
                 _open_invoice_detail(inv_id)
 
 
+def _merge_documents_to_pdf(files: list[tuple[str, str, bytes]]) -> bytes | None:
+    """Merge PDFs + images into one PDF. Returns None if any file can't be merged."""
+    try:
+        import io
+
+        from pypdf import PdfReader, PdfWriter
+    except Exception:  # noqa: BLE001 - dependency missing; caller falls back to ZIP
+        logger.warning("pypdf unavailable; cannot merge documents to PDF.")
+        return None
+
+    writer = PdfWriter()
+    for file_name, content_type, data in files:
+        lower = str(file_name or "").lower()
+        is_pdf = content_type == "application/pdf" or lower.endswith(".pdf")
+        is_image = content_type.startswith("image/") or lower.endswith(
+            (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff")
+        )
+        try:
+            if is_pdf:
+                reader = PdfReader(io.BytesIO(data))
+                for page in reader.pages:
+                    writer.add_page(page)
+            elif is_image:
+                from PIL import Image
+
+                img = Image.open(io.BytesIO(data)).convert("RGB")
+                buf = io.BytesIO()
+                img.save(buf, format="PDF")
+                buf.seek(0)
+                reader = PdfReader(buf)
+                for page in reader.pages:
+                    writer.add_page(page)
+            else:
+                return None  # unsupported type -> ZIP fallback keeps originals intact
+        except Exception:  # noqa: BLE001 - any failure -> ZIP fallback
+            logger.exception("Merging document %s failed", file_name)
+            return None
+
+    try:
+        out = io.BytesIO()
+        writer.write(out)
+        return out.getvalue()
+    except Exception:  # noqa: BLE001
+        logger.exception("Writing merged PDF failed")
+        return None
+
+
+def _zip_documents(files: list[tuple[str, str, bytes]]) -> bytes:
+    """Bundle original files into a single ZIP (fallback when PDF merge isn't possible)."""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    used: dict[str, int] = {}
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file_name, _ct, data in files:
+            name = str(file_name or "document").strip() or "document"
+            if name in used:
+                used[name] += 1
+                stem, dot, ext = name.rpartition(".")
+                name = f"{stem}_{used[name]}.{ext}" if dot else f"{name}_{used[name]}"
+            else:
+                used[name] = 0
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def _prepare_entity_documents_download(
+    realm_id: str,
+    entity_type: str,
+    entity_id: str,
+    atts: list[dict[str, Any]] | None,
+) -> dict[str, Any] | None:
+    """Fetch (and if needed merge) all scans for an entity into one downloadable file."""
+    try:
+        if atts is None:
+            atts = _cached_entity_attachments(realm_id, entity_type, entity_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("Document list load failed for %s %s", entity_type, entity_id)
+        atts = []
+    if not atts:
+        return None
+
+    files: list[tuple[str, str, bytes]] = []
+    for att in atts:
+        attachable_id = str(att.get("attachable_id") or "")
+        if not attachable_id:
+            continue
+        try:
+            data = _cached_attachment_bytes(
+                realm_id, attachable_id, str(att.get("temp_download_uri") or "")
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Attachment fetch failed for %s", attachable_id)
+            data = b""
+        if data:
+            files.append(
+                (
+                    str(att.get("file_name") or f"document_{attachable_id}"),
+                    str(att.get("content_type") or "").lower(),
+                    data,
+                )
+            )
+    if not files:
+        return None
+
+    if len(files) == 1:
+        name, content_type, data = files[0]
+        return {
+            "data": data,
+            "file_name": name,
+            "mime": content_type or "application/octet-stream",
+            "count": 1,
+        }
+
+    base = f"{entity_type.lower()}_{entity_id}_documents"
+    merged = _merge_documents_to_pdf(files)
+    if merged:
+        return {"data": merged, "file_name": f"{base}.pdf", "mime": "application/pdf", "count": len(files)}
+    return {
+        "data": _zip_documents(files),
+        "file_name": f"{base}.zip",
+        "mime": "application/zip",
+        "count": len(files),
+    }
+
+
 def _render_doc_indicator(
     lang: str,
     entity_type: str,
@@ -3344,42 +3502,45 @@ def _render_doc_indicator(
     atts: list[dict[str, Any]] | None,
     *,
     key: str,
+    realm_id: str,
 ) -> None:
     """Inline document control for a history row.
 
-    ``atts`` is the attachment list from the cached index: a non-empty list means
-    documents exist; an empty list means none; ``None`` means the index was
-    unavailable (fall back to a button that fetches on demand).
+    Downloads the scan(s) directly - no navigation, no preview. Multiple scans
+    are merged into a single PDF (or zipped if they can't be merged). ``atts`` is
+    the cached-index attachment list: a non-empty list means documents exist, an
+    empty list means none, and ``None`` means the index was unavailable (we still
+    offer a fetch-on-demand button).
     """
-    if atts is None:
-        # Index unavailable - offer the on-demand documents view.
-        if st.button(f"📎 {_t(lang, 'view_docs')}", key=key, use_container_width=True):
-            if entity_type == "Invoice":
-                _open_invoice_documents(entity_id)
-            else:
-                _open_purchase_detail(entity_id)
-        return
-    if not atts:
+    if atts is not None and not atts:
         st.caption(f"📎 {_t(lang, 'docs_none_short')}")
         return
-    # One file with a live URL -> one-tap download. Otherwise open the docs view.
-    single_uri = str(atts[0].get("temp_download_uri") or "") if len(atts) == 1 else ""
-    if single_uri:
-        st.link_button(
-            f"⬇ {_t(lang, 'docs_download')}",
-            single_uri,
+
+    ready_key = f"{key}__doc_ready"
+    ready = st.session_state.get(ready_key)
+    if isinstance(ready, dict) and ready.get("entity_id") == entity_id:
+        count = int(ready.get("count") or 1)
+        dl_label = f"⬇ {_t(lang, 'docs_download')}" + (f" ({count})" if count > 1 else "")
+        st.download_button(
+            dl_label,
+            data=ready.get("data") or b"",
+            file_name=ready.get("file_name") or "document",
+            mime=ready.get("mime") or "application/octet-stream",
             use_container_width=True,
+            key=f"{key}__doc_dl",
         )
         return
-    if st.button(
-        f"📎 {_t(lang, 'view_docs')} ({len(atts)})",
-        key=key,
-        use_container_width=True,
-    ):
-        if entity_type == "Invoice":
-            _open_invoice_documents(entity_id)
+
+    count = len(atts) if atts else None
+    btn_label = f"📎 {_t(lang, 'docs_download')}" + (f" ({count})" if count and count > 1 else "")
+    if st.button(btn_label, key=key, use_container_width=True):
+        with st.spinner(_t(lang, "docs_loading")):
+            payload = _prepare_entity_documents_download(realm_id, entity_type, entity_id, atts)
+        if payload:
+            st.session_state[ready_key] = {"entity_id": entity_id, **payload}
+            st.rerun()
         else:
-            _open_purchase_detail(entity_id)
+            st.warning(_t(lang, "docs_error"))
 
 
 
@@ -3424,67 +3585,33 @@ def _render_invoice_documents_view(lang: str, realm_id: str) -> None:
 
 
 def _render_single_attachment(lang: str, realm_id: str, att: dict[str, Any]) -> None:
-    """Render one QBO attachment, download-first.
-
-    The download control renders immediately (a direct, pre-signed QuickBooks
-    URL when available) so the list never blocks on byte transfers. The inline
-    preview is lazy: bytes are only pulled when the user opens the preview,
-    showing a spinner while the backend fetches them.
-    """
+    """Render one QBO attachment as a direct download button (no preview)."""
     attachable_id = str(att.get("attachable_id") or "")
     file_name = str(att.get("file_name") or "document")
     content_type = str(att.get("content_type") or "").lower()
     note = str(att.get("note") or "").strip()
     temp_uri = str(att.get("temp_download_uri") or "").strip()
 
-    st.markdown(f"<div class='shop-title'>📎 {_escape(file_name)}</div>", unsafe_allow_html=True)
     if note:
-        st.caption(note)
+        st.caption(f"📎 {file_name} — {note}")
 
-    # Instant, zero-wait download straight from QuickBooks' pre-signed URL. The
-    # browser hits the QBO CDN directly, so this renders without any backend wait.
-    if temp_uri:
-        st.link_button(
-            f"⬇ {_t(lang, 'docs_download')} — {file_name}",
-            temp_uri,
-            use_container_width=True,
-        )
-
-    name_lower = file_name.lower()
-    is_image = content_type.startswith("image/") or name_lower.endswith(
-        (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+    with st.spinner(_t(lang, "docs_loading")):
+        try:
+            data = _cached_attachment_bytes(realm_id, attachable_id, temp_uri)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Attachment download failed: %s", exc)
+            data = b""
+    if not data:
+        st.warning(_t(lang, "docs_error"))
+        return
+    st.download_button(
+        f"⬇ {_t(lang, 'docs_download')} — {file_name}",
+        data=data,
+        file_name=file_name,
+        mime=content_type or "application/octet-stream",
+        use_container_width=True,
+        key=f"dl_att_{attachable_id}",
     )
-    is_pdf = content_type == "application/pdf" or name_lower.endswith(".pdf")
-    can_preview = is_image or is_pdf
-
-    # Lazy preview + reliable (app-routed) download. Bytes are only fetched when
-    # the user opens this expander, so the documents list paints instantly. If
-    # the pre-signed URL above has expired, this path requests a fresh one.
-    label = _t(lang, "docs_preview") if can_preview else _t(lang, "docs_download")
-    with st.expander(f"👁 {label}", expanded=False):
-        with st.spinner(_t(lang, "docs_loading")):
-            try:
-                data = _cached_attachment_bytes(realm_id, attachable_id, temp_uri)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Attachment download failed: %s", exc)
-                data = b""
-        if not data:
-            st.warning(_t(lang, "docs_error"))
-            return
-        if is_image:
-            st.image(data, use_container_width=True)
-        elif is_pdf:
-            _render_pdf_preview(data, file_name)
-        else:
-            st.info(_t(lang, "docs_unsupported"))
-        st.download_button(
-            f"⬇ {_t(lang, 'docs_download')} — {file_name}",
-            data=data,
-            file_name=file_name,
-            mime=content_type or "application/octet-stream",
-            use_container_width=True,
-            key=f"dl_att_{attachable_id}",
-        )
 
 
 def _render_pdf_preview(data: bytes, file_name: str = "document.pdf") -> None:
@@ -3637,7 +3764,7 @@ def _render_purchase_history_view(lang: str, realm_id: str) -> None:
         atts = doc_index.get(index_key(etype, txn_id), []) if doc_index else None
         docs_col, view_col = st.columns(2)
         with docs_col:
-            _render_doc_indicator(lang, etype, txn_id, atts, key=f"pur_docs_{txn_id}")
+            _render_doc_indicator(lang, etype, txn_id, atts, key=f"pur_docs_{txn_id}", realm_id=realm_id)
         with view_col:
             if st.button(
                 f"🔍 {_t(lang, 'view_details')}",
