@@ -122,7 +122,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-18.03 (direct doc download + multi-scan merge, inventory start date)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-18.04 (prominent unit on invoices + part-history before/after stock levels)"
 
 # How many cached transactions part history scans per type. Big enough to cover
 # a multi-year shop's full Bill/Purchase/Invoice/Adjustment history (reads are
@@ -1012,6 +1012,32 @@ _MOBILE_CSS = """
   .inv-customer { font-size: 1.02rem; color: #3a4652; margin-top: 0.25rem; }
   .inv-meta { font-size: 0.95rem; color: #6b7682; margin-top: 0.25rem; }
   .inv-amounts { margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.4rem; }
+
+  /* Prominent truck/unit chip on invoice + part-history cards. */
+  .inv-unit-row { margin-top: 0.4rem; }
+  .inv-unit {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      font-size: 1.15rem; font-weight: 800; letter-spacing: 0.01em;
+      color: #7a4f02; background: #fff3d6; border: 1px solid #f0d692;
+      border-radius: 10px; padding: 0.34rem 0.7rem;
+  }
+
+  /* On-hand before -> after reconstruction on each part-history transaction. */
+  .stock-flow {
+      margin-top: 0.55rem; display: flex; align-items: center;
+      flex-wrap: wrap; gap: 0.4rem;
+  }
+  .stock-flow-label {
+      font-size: 0.82rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.03em; color: #8793a1;
+  }
+  .stock-chip {
+      font-size: 1.02rem; font-weight: 750; color: #334155;
+      background: #eef2f7; border: 1px solid #dbe3ec;
+      border-radius: 8px; padding: 0.22rem 0.6rem;
+  }
+  .stock-chip.stock-after { color: #0b6b3a; background: #e7f6ee; border-color: #c6e7d4; }
+  .stock-arrow { color: #94a3b8; font-weight: 800; font-size: 1.1rem; }
 
   /* Invoice detail line items. */
   .li-card {
@@ -2170,6 +2196,8 @@ def _render_part_detail_view(lang: str, realm_id: str) -> None:
     if not events:
         st.info("No sales or purchase history found for this synced part yet.")
         return
+    # Reconstruct on-hand level before/after each transaction from current stock.
+    events = _annotate_part_stock_levels(events, part.get("qty_on_hand"))
     # Surface the most recent vendor this part was bought from.
     last_buy = next((e for e in events if str(e.get("kind") or "") == "bought"), None)
     if last_buy:
@@ -2584,6 +2612,35 @@ def _part_event_sort_key(ev: dict[str, Any]) -> tuple[int, str]:
     return (key, str(ev.get("doc") or ""))
 
 
+def _annotate_part_stock_levels(
+    events: list[dict[str, Any]], current_qty: Any
+) -> list[dict[str, Any]]:
+    """Return a copy of events (newest-first) with reconstructed on-hand levels.
+
+    Starts from the part's current QBO on-hand quantity and walks backwards,
+    reversing each transaction's effect (Sold lowers stock; Bought and Adjusted
+    raise/lower it by their quantity). Recent levels are exact; older ones become
+    approximate if some history is missing, so we stop annotating once a value
+    can't be reconstructed. Non-inventory parts (no on-hand) get no annotation.
+    """
+    out = [dict(ev) for ev in events]
+    try:
+        running = float(current_qty)
+    except (TypeError, ValueError):
+        return out
+    for item in out:
+        try:
+            qty = float(item.get("qty"))
+        except (TypeError, ValueError):
+            break  # unknown delta -> cannot reconstruct further back reliably
+        kind = str(item.get("kind") or "")
+        delta = -qty if kind == "sold" else qty  # bought/adjusted add, sold subtracts
+        item["_stock_after"] = running
+        item["_stock_before"] = running - delta
+        running -= delta
+    return out
+
+
 def _part_event_html(ev: dict[str, Any]) -> str:
     kind = str(ev.get("kind") or "")
     is_sale = kind == "sold"
@@ -2604,16 +2661,40 @@ def _part_event_html(ev: dict[str, Any]) -> str:
     doc = str(ev.get("doc") or "")
     date = str(ev.get("date") or "")
     memo = str(ev.get("memo") or "")
-    header_bits = [_short_history_date(date), who]
-    if unit:
-        header_bits.append(f"Unit {unit}")
-    header = " · ".join(bit for bit in header_bits if bit)
+    header = " · ".join(bit for bit in (_short_history_date(date), who) if bit)
+
+    # Prominent unit chip for invoice (sold) rows so the truck is easy to spot.
+    unit_html = (
+        f"<div class='inv-unit-row'><span class='inv-unit'>🚚 Unit {_escape(unit)}</span></div>"
+        if unit
+        else ""
+    )
+
+    # Before → after on-hand reconstruction (when available).
+    stock_html = ""
+    after_val = ev.get("_stock_after")
+    before_val = ev.get("_stock_before")
+    if after_val is not None and before_val is not None:
+        before_fmt = _fmt_qty(before_val)
+        after_fmt = _fmt_qty(after_val)
+        if before_fmt is not None and after_fmt is not None:
+            stock_html = (
+                f"<div class='stock-flow'>"
+                f"<span class='stock-flow-label'>On hand</span>"
+                f"<span class='stock-chip'>{_escape(before_fmt)}</span>"
+                f"<span class='stock-arrow'>→</span>"
+                f"<span class='stock-chip stock-after'>{_escape(after_fmt)}</span>"
+                f"</div>"
+            )
+
     return (
         f"<div class='inv-card'>"
         f"<div class='inv-top'><span class='inv-no'>{_escape(header or '—')}</span>"
         f"<span class='badge {badge_cls}'>{badge}</span></div>"
+        f"{unit_html}"
         f"<div class='inv-meta'>{' · '.join(_escape(bit) for bit in bits)}"
         f"{(' · Doc: ' + _escape(doc)) if doc else ''}</div>"
+        f"{stock_html}"
         f"{f'<div class=\'li-desc\'>{_escape(memo)}</div>' if memo else ''}"
         f"</div>"
     )
@@ -4000,6 +4081,13 @@ def _invoice_html(inv: dict[str, Any], lang: str) -> str:
     # from raw.CustomField so this works even if names are "Unit #" / "Mileage"
     # etc. Fallback to cache columns for already-synced older rows.
     raw_invoice = inv.get("raw") if isinstance(inv.get("raw"), dict) else inv
+    # Unit is the truck the work was done on - surface it prominently.
+    unit_value = str(custom_field_map(raw_invoice).get("unit") or inv.get("unit") or "").strip()
+    unit_html = (
+        f"<div class='inv-unit-row'><span class='inv-unit'>🚚 {_t(lang, 'unit')} {_escape(unit_value)}</span></div>"
+        if unit_value
+        else ""
+    )
     meta_bits = [
         f"{_escape(label)}: {_escape(value)}"
         for label, value in custom_field_items(raw_invoice)
@@ -4037,7 +4125,7 @@ def _invoice_html(inv: dict[str, Any], lang: str) -> str:
         f"<div class='inv-top'>"
         f"<span class='inv-no'>{_t(lang, 'invoice_no')} #{_escape(doc)}</span>"
         f"<span class='inv-date'>{_escape(txn_date)}</span>"
-        f"</div>{customer_html}{custom_html}"
+        f"</div>{unit_html}{customer_html}{custom_html}"
         f"<div class='inv-amounts'>{''.join(badges)}</div>"
         f"</div>"
     )

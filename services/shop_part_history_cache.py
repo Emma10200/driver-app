@@ -18,6 +18,12 @@ from services.shop_inventory_adjustment_cache import list_cached_inventory_adjus
 from services.shop_invoice_history_cache import list_cached_invoices
 from services.shop_purchase_history_cache import list_cached_purchases
 
+try:
+    from qbo.shop_invoices import custom_field_map
+except Exception:  # noqa: BLE001 - custom field parsing is best-effort
+    def custom_field_map(_raw: dict[str, Any]) -> dict[str, str]:  # type: ignore[misc]
+        return {}
+
 logger = logging.getLogger(__name__)
 
 _TABLE = "shop_part_history_index"
@@ -124,6 +130,12 @@ def _build_rows(realm_id: str, run_started: str) -> list[dict[str, Any]]:
 def _invoice_rows(realm_id: str, inv: dict[str, Any], run_started: str) -> list[dict[str, Any]]:
     invoice_id = str(inv.get("qbo_invoice_id") or inv.get("Id") or "")
     raw = inv.get("raw") if isinstance(inv.get("raw"), dict) else {}
+    # Unit/VIN/Miles live in QBO custom fields; fall back to the raw payload when
+    # the flattened cache columns are blank (older synced rows).
+    custom = custom_field_map(raw)
+    unit = str(inv.get("unit") or custom.get("unit") or "")
+    vin = str(inv.get("vin") or custom.get("vin") or "")
+    miles = str(inv.get("miles") or custom.get("miles") or "")
     lines = [
         line
         for line in (raw.get("Line") or [])
@@ -148,9 +160,9 @@ def _invoice_rows(realm_id: str, inv: dict[str, Any], run_started: str) -> list[
                 doc_number=str(inv.get("doc_number") or inv.get("DocNumber") or ""),
                 txn_date=str(inv.get("txn_date") or inv.get("TxnDate") or ""),
                 counterparty_name=str(inv.get("customer_name") or _ref_name(raw.get("CustomerRef")) or ""),
-                unit=str(inv.get("unit") or ""),
-                vin=str(inv.get("vin") or ""),
-                miles=str(inv.get("miles") or ""),
+                unit=unit,
+                vin=vin,
+                miles=miles,
                 qty=qty,
                 rate=rate,
                 amount=amount,
