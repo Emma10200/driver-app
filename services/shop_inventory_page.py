@@ -122,7 +122,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-17.09 (bold blue bordered live search boxes)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-18.01 (collapsible inventory tools + live-search diagnostic)"
 
 # How many cached transactions part history scans per type. Big enough to cover
 # a multi-year shop's full Bill/Purchase/Invoice/Adjustment history (reads are
@@ -161,6 +161,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "full_resync_help": "Re-pulls every active part from QuickBooks (not just recent changes). Use this if a part you expect is not showing up.",
         "full_resync_btn": "Re-pull all parts from QuickBooks",
         "full_resync_short": "Re-pull",
+        "inventory_tools": "Tools",
         "negatives_short": "Negatives",
         "negatives_short_on": "Negatives ✓",
         "too_many_results": "Showing the maximum number of parts. Type to narrow the list.",
@@ -353,6 +354,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "full_resync_help": "Изтегля отново всички активни части от QuickBooks (не само последните промени). Използвайте, ако липсва част.",
         "full_resync_btn": "Изтегли всички части от QuickBooks",
         "full_resync_short": "Обнови",
+        "inventory_tools": "Инструменти",
         "negatives_short": "Отриц.",
         "negatives_short_on": "Отриц. ✓",
         "too_many_results": "Показан е максималният брой части. Пишете, за да стесните списъка.",
@@ -1130,12 +1132,15 @@ def _live_filter_input(
                 placeholder=placeholder,
                 label_visibility=label_visibility,
             )
+            return str(value if value is not None else current).strip()
         except TypeError:
             try:
                 value = _st_keyup(label, value=current, debounce=250, key=key)
-            except TypeError:
-                value = _st_keyup(label, key=key)
-        return str(value if value is not None else current).strip()
+                return str(value if value is not None else current).strip()
+            except Exception as exc:  # noqa: BLE001 - fall back to a plain input
+                logger.warning("Live keyup search failed (%s); using text_input.", exc)
+        except Exception as exc:  # noqa: BLE001 - never break the page over search
+            logger.warning("Live keyup search failed (%s); using text_input.", exc)
     return st.text_input(
         label,
         key=key,
@@ -2030,30 +2035,31 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
         logger.warning("Could not load parts: %s", exc)
         parts = []
 
-    # Compact action buttons ABOVE the search bar (smaller, less awkward). The
-    # search bar itself stays pinned to the top as you scroll the list.
+    # Compact action buttons tucked into a collapsible "Tools" header so the
+    # search bar and parts list stay the focus. Collapsed by default.
     negatives_on = bool(st.session_state.get("shop_negatives_only"))
-    refresh_col, neg_col, resync_col = st.columns([1, 1.3, 1.1])
-    with refresh_col:
-        if st.button(
-            f"\U0001f504 {_t(lang, 'refresh')}",
-            use_container_width=True,
-            key="shop_refresh_btn",
-        ):
-            _run_refresh(realm_id, lang)
-    with neg_col:
-        neg_label = "⚠️ " + (_t(lang, "negatives_short_on") if negatives_on else _t(lang, "negatives_short"))
-        if st.button(neg_label, use_container_width=True, key="shop_neg_toggle"):
-            st.session_state["shop_negatives_only"] = not negatives_on
-            st.rerun()
-    with resync_col:
-        if st.button(
-            f"⟳ {_t(lang, 'full_resync_short')}",
-            use_container_width=True,
-            key="shop_full_resync",
-            help=_t(lang, "full_resync_help"),
-        ):
-            _run_refresh(realm_id, lang, force_full=True)
+    with st.expander(f"⚙️ {_t(lang, 'inventory_tools')}", expanded=False):
+        refresh_col, neg_col, resync_col = st.columns([1, 1.3, 1.1])
+        with refresh_col:
+            if st.button(
+                f"\U0001f504 {_t(lang, 'refresh')}",
+                use_container_width=True,
+                key="shop_refresh_btn",
+            ):
+                _run_refresh(realm_id, lang)
+        with neg_col:
+            neg_label = "⚠️ " + (_t(lang, "negatives_short_on") if negatives_on else _t(lang, "negatives_short"))
+            if st.button(neg_label, use_container_width=True, key="shop_neg_toggle"):
+                st.session_state["shop_negatives_only"] = not negatives_on
+                st.rerun()
+        with resync_col:
+            if st.button(
+                f"⟳ {_t(lang, 'full_resync_short')}",
+                use_container_width=True,
+                key="shop_full_resync",
+                help=_t(lang, "full_resync_help"),
+            ):
+                _run_refresh(realm_id, lang, force_full=True)
     negatives_on = bool(st.session_state.get("shop_negatives_only"))
 
     # Sticky search bar: rendered directly in the main column (NOT inside its own
@@ -2070,6 +2076,11 @@ def _render_inventory_view(lang: str, realm_id: str) -> None:
     last_run = _last_synced(realm_id)
     freshness = _fmt_user_datetime(last_run) if last_run else _t(lang, "never")
     st.caption(f"{_t(lang, 'updated')}: {freshness}")
+    if _st_keyup is None:
+        st.caption(
+            "⌨️ Instant search is not active on this deployment — type, then press "
+            "Enter. Reboot the app on Streamlit Cloud to install live search."
+        )
     if negatives_on:
         items = _negative_parts(parts)
         if not items:
