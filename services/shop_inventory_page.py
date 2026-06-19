@@ -122,7 +122,7 @@ _INVOICE_CACHE_TTL = 120  # seconds
 _LABOR_ITEM_NAME = "labor gts"
 _LABOR_MECHANICS = ("Alex", "Rafi", "Danko")
 _DEFAULT_SHOP_APP_URL = "https://driver-application.streamlit.app/?shop=1"
-_SHOP_BUILD_LABEL = "Shop app build 2026-06-18.04 (prominent unit on invoices + part-history before/after stock levels)"
+_SHOP_BUILD_LABEL = "Shop app build 2026-06-19.01 (invoice search excludes miles)"
 
 # How many cached transactions part history scans per type. Big enough to cover
 # a multi-year shop's full Bill/Purchase/Invoice/Adjustment history (reads are
@@ -3998,7 +3998,11 @@ def _invoice_is_unpaid(inv: dict[str, Any]) -> bool:
 
 
 def _invoice_history_search_blob(inv: dict[str, Any]) -> str:
-    """Searchable vehicle/customer text for the history filter."""
+    """Searchable vehicle/customer text for the history filter.
+
+    Miles is intentionally excluded: mileage numbers collided with unit/VIN
+    digits and surfaced unrelated invoices.
+    """
     vehicle = _invoice_vehicle_values(inv)
     raw = inv.get("raw") if isinstance(inv.get("raw"), dict) else inv
     customer = str(inv.get("customer_name") or "").strip()
@@ -4012,7 +4016,6 @@ def _invoice_history_search_blob(inv: dict[str, Any]) -> str:
             customer,
             vehicle.get("unit"),
             vehicle.get("vin"),
-            vehicle.get("miles"),
         )
     )
 
