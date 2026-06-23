@@ -77,6 +77,27 @@ def list_recent_drafts(realm_id: str, *, limit: int = 25) -> list[dict[str, Any]
         return []
 
 
+def list_submitted_invoices(realm_id: str, *, limit: int = 25) -> list[dict[str, Any]]:
+    """Return finished invoices the shop submitted but accounting has NOT yet posted.
+
+    These are still editable by the shop (status pending/approved/rejected). Once
+    accounting posts to QuickBooks the row becomes ``imported`` and is excluded
+    here (locked) because it now lives in the real QuickBooks invoice list.
+    """
+    try:
+        supabase = SupabaseRestClient()
+        return supabase.select(
+            _TABLE,
+            select="id,proposed_doc_number,status,customer_name,truck_unit,vin,miles,total,line_items,created_at,updated_at",
+            filters={"realm_id": f"eq.{realm_id}", "status": "in.(pending,approved,rejected)"},
+            order="created_at.desc",
+            limit=limit,
+        )
+    except Exception as exc:  # noqa: BLE001 - read-only convenience; never crash UI
+        logger.warning("Could not list submitted shop invoices: %s", exc)
+        return []
+
+
 def save_invoice_draft(
     *,
     draft_id: str | None,

@@ -78,6 +78,7 @@ from services.shop_invoice_queue import (
     get_draft,
     list_drafts,
     list_recent_drafts,
+    list_submitted_invoices,
     save_invoice_draft,
     submit_invoice_draft,
 )
@@ -305,6 +306,13 @@ _STRINGS: dict[str, dict[str, str]] = {
         "draft_autosaved": "📝 Draft — saved automatically (not in QuickBooks yet)",
         "drafts_title": "📝 Your drafts",
         "drafts_help": "Saved here only — NOT in QuickBooks yet",
+        "submitted_title": "📤 Submitted to accounting",
+        "submitted_help": "Saved and sent for review — still editable until posted to QuickBooks",
+        "no_submitted": "No invoices waiting on accounting.",
+        "edit_submitted": "Edit",
+        "status_pending": "Pending review",
+        "status_approved": "Approved",
+        "status_rejected": "Needs changes",
         "qbo_invoices_title": "✅ In QuickBooks",
         "edit_draft": "Edit",
         "delete_draft": "Delete",
@@ -499,6 +507,13 @@ _STRINGS: dict[str, dict[str, str]] = {
         "draft_autosaved": "📝 Чернова — автоматично запазена (още не е в QuickBooks)",
         "drafts_title": "📝 Вашите чернови",
         "drafts_help": "Само тук — ОЩЕ НЕ са в QuickBooks",
+        "submitted_title": "📤 Изпратени към счетоводството",
+        "submitted_help": "Запазени и изпратени за преглед — могат да се редактират, докато не са в QuickBooks",
+        "no_submitted": "Няма фактури, чакащи счетоводството.",
+        "edit_submitted": "Редактирай",
+        "status_pending": "За преглед",
+        "status_approved": "Одобрена",
+        "status_rejected": "Изисква промени",
         "qbo_invoices_title": "✅ В QuickBooks",
         "edit_draft": "Редактирай",
         "delete_draft": "Изтрий",
@@ -1072,6 +1087,23 @@ _MOBILE_CSS = """
   .draft-badge {
       font-size: 0.78rem; font-weight: 800; letter-spacing: 0.02em; text-transform: uppercase;
       color: #92400e; background: #fde68a; border-radius: 999px; padding: 0.15rem 0.5rem;
+  }
+  /* Submitted-to-accounting (finished but not yet posted to QuickBooks). Cool
+     blue treatment: saved + sent, still editable until accounting posts it. */
+  .sub-banner {
+      margin: 0.7rem 0 0.2rem; font-size: 1.2rem; font-weight: 800; color: #1e40af;
+  }
+  .sub-sub {
+      display: block; font-size: 0.95rem; font-weight: 600; color: #2563eb; margin-top: 0.1rem;
+  }
+  .sub-card {
+      border: 1px solid #bfdbfe; border-left: 6px solid #3b82f6; border-radius: 12px;
+      padding: 0.75rem 0.95rem; margin: 0.45rem 0; background: #eff6ff;
+  }
+  .sub-top { display: flex; justify-content: space-between; align-items: center; gap: 0.6rem; }
+  .sub-badge {
+      font-size: 0.78rem; font-weight: 800; letter-spacing: 0.02em; text-transform: uppercase;
+      color: #1e3a8a; background: #bfdbfe; border-radius: 999px; padding: 0.15rem 0.5rem;
   }
 </style>
 """
@@ -1869,28 +1901,43 @@ def _wire_shop_back_button(view: str) -> None:
     (text starting with "⬅") instead of letting the browser exit the app, so
     back naturally walks Detail -> History -> Home. On the home menu we do
     nothing, so back there exits the app normally.
+
+    Uses ``st.components.v1.html`` (srcdoc-based) instead of ``st.iframe``
+    (data:-based) because many mobile browsers block cross-origin parent access
+    from data: iframes, silently breaking the popstate handler.
     """
     if view == _VIEW_HOME:
         return
-    st.iframe(
+    import streamlit.components.v1 as stc
+
+    stc.html(
         f"""
         <script>
         (function() {{
-            const pw = window.parent;
-            const pd = pw.document;
-            const tag = "shop-{view}";
+            var pw = window.parent;
+            var pd = pw.document;
+            var tag = "shop-{view}";
+            // Push a history entry so the phone back button fires popstate instead
+            // of exiting the page/app entirely.
             if (!(pw.history.state && pw.history.state.shopView === tag)) {{
                 try {{ pw.history.pushState({{ shopView: tag }}, "", pw.location.href); }} catch (e) {{}}
             }}
-            if (pd.body && pd.body.dataset.shopBackBound !== '1') {{
-                pd.body.dataset.shopBackBound = '1';
-                pw.addEventListener('popstate', () => {{
-                    const buttons = pd.querySelectorAll('button');
-                    for (const btn of buttons) {{
-                        const text = (btn.innerText || '').trim();
-                        if (text.startsWith('⬅')) {{
-                            btn.click();
-                            try {{ pw.history.pushState({{ shopView: tag }}, "", pw.location.href); }} catch (e) {{}}
+            // Bind popstate handler ONCE to the parent window. On back-press, find
+            // and click the first "⬅" button (the in-app back button). Then push
+            // another state entry so consecutive backs keep working.
+            if (!pw.__shopBackBound) {{
+                pw.__shopBackBound = true;
+                pw.addEventListener('popstate', function(e) {{
+                    var buttons = pd.querySelectorAll('button');
+                    for (var i = 0; i < buttons.length; i++) {{
+                        var text = (buttons[i].innerText || '').trim();
+                        if (text.indexOf('\u2B05') === 0 || text.indexOf('Back') === 0) {{
+                            buttons[i].click();
+                            // Re-push so the NEXT back-press also works. Small delay
+                            // ensures the Streamlit rerun has a chance to update.
+                            setTimeout(function() {{
+                                try {{ pw.history.pushState({{ shopView: 'nav' }}, "", pw.location.href); }} catch(x) {{}}
+                            }}, 200);
                             return;
                         }}
                     }}
@@ -1899,7 +1946,7 @@ def _wire_shop_back_button(view: str) -> None:
         }})();
         </script>
         """,
-        height=1,
+        height=0,
     )
 
 
@@ -3380,6 +3427,9 @@ def _render_history_view(lang: str, realm_id: str) -> None:
     # --- Your drafts (in Supabase only, NOT in QuickBooks). Clear distinction. ---
     _render_drafts_section(lang, realm_id)
 
+    # --- Submitted to accounting: finished, still editable until posted to QBO. ---
+    _render_submitted_section(lang, realm_id)
+
     st.markdown(
         f"<div class='shop-title'>{_t(lang, 'qbo_invoices_title')}</div>",
         unsafe_allow_html=True,
@@ -3592,6 +3642,9 @@ def _render_doc_indicator(
     the cached-index attachment list: a non-empty list means documents exist, an
     empty list means none, and ``None`` means the index was unavailable (we still
     offer a fetch-on-demand button).
+
+    UX: a single click fetches + immediately presents the download button (no
+    intermediate rerun). The button stays cached so re-visits are instant.
     """
     if atts is not None and not atts:
         st.caption(f"📎 {_t(lang, 'docs_none_short')}")
@@ -3599,17 +3652,10 @@ def _render_doc_indicator(
 
     ready_key = f"{key}__doc_ready"
     ready = st.session_state.get(ready_key)
+
+    # If we already fetched, show the download button immediately (repeat visits).
     if isinstance(ready, dict) and ready.get("entity_id") == entity_id:
-        count = int(ready.get("count") or 1)
-        dl_label = f"⬇ {_t(lang, 'docs_download')}" + (f" ({count})" if count > 1 else "")
-        st.download_button(
-            dl_label,
-            data=ready.get("data") or b"",
-            file_name=ready.get("file_name") or "document",
-            mime=ready.get("mime") or "application/octet-stream",
-            use_container_width=True,
-            key=f"{key}__doc_dl",
-        )
+        _show_doc_download(lang, ready, key)
         return
 
     count = len(atts) if atts else None
@@ -3619,9 +3665,25 @@ def _render_doc_indicator(
             payload = _prepare_entity_documents_download(realm_id, entity_type, entity_id, atts)
         if payload:
             st.session_state[ready_key] = {"entity_id": entity_id, **payload}
-            st.rerun()
+            # Show the download button RIGHT NOW (same render pass) so the user
+            # does not need to wait for a rerun + second click.
+            _show_doc_download(lang, st.session_state[ready_key], key)
         else:
             st.warning(_t(lang, "docs_error"))
+
+
+def _show_doc_download(lang: str, ready: dict[str, Any], key: str) -> None:
+    """Render a ready-to-tap download button for a pre-fetched document."""
+    count = int(ready.get("count") or 1)
+    dl_label = f"⬇ {_t(lang, 'docs_download')}" + (f" ({count})" if count > 1 else "")
+    st.download_button(
+        dl_label,
+        data=ready.get("data") or b"",
+        file_name=ready.get("file_name") or "document",
+        mime=ready.get("mime") or "application/octet-stream",
+        use_container_width=True,
+        key=f"{key}__doc_dl",
+    )
 
 
 
@@ -3967,6 +4029,66 @@ def _render_drafts_section(lang: str, realm_id: str) -> None:
                 delete_draft(draft_id)
                 _clear_draft_derived_caches()
                 st.rerun()
+
+
+def _submitted_status_label(lang: str, status: str) -> str:
+    """Human label for a submitted (not-yet-posted) invoice status."""
+    key = {
+        "pending": "status_pending",
+        "approved": "status_approved",
+        "rejected": "status_rejected",
+    }.get(str(status or "").lower(), "status_pending")
+    return _t(lang, key)
+
+
+def _render_submitted_section(lang: str, realm_id: str) -> None:
+    """Show finished invoices sent to accounting that are still editable.
+
+    These are queue rows with status pending/approved/rejected (NOT yet posted to
+    QuickBooks). The shop can re-open and edit them; editing re-saves the same row
+    so accounting re-reviews. Once accounting posts to QuickBooks the row becomes
+    ``imported`` and drops out of this list (locked / now in the QuickBooks list).
+    """
+    try:
+        submitted = list_submitted_invoices(realm_id, limit=50)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not load submitted invoices: %s", exc)
+        submitted = []
+
+    st.markdown(
+        f"<div class='sub-banner'>{_t(lang, 'submitted_title')}"
+        f"<span class='sub-sub'>{_t(lang, 'submitted_help')}</span></div>",
+        unsafe_allow_html=True,
+    )
+    if not submitted:
+        st.caption(_t(lang, "no_submitted"))
+        return
+
+    for inv in submitted:
+        inv_id = str(inv.get("id") or "")
+        doc = str(inv.get("proposed_doc_number") or "—")
+        customer = str(inv.get("customer_name") or "")
+        unit = str(inv.get("truck_unit") or "")
+        total = _fmt_price(inv.get("total"))
+        n_lines = len(inv.get("line_items") or [])
+        status_label = _submitted_status_label(lang, inv.get("status"))
+        st.markdown(
+            f"<div class='sub-card'>"
+            f"<div class='sub-top'><span class='sub-badge'>{_escape(status_label)}</span>"
+            f"<span class='inv-no'>#{_escape(doc)}</span></div>"
+            f"<div class='inv-customer'>{_escape(customer)}</div>"
+            f"<div class='inv-meta'>{_t(lang, 'truck_unit')}: {_escape(unit) or '—'} · "
+            f"{n_lines} {_t(lang, 'results')} · {total}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        if st.button(
+            f"✏️ {_t(lang, 'edit_submitted')}",
+            key=f"submitted_edit_{inv_id}",
+            use_container_width=True,
+        ):
+            full = get_draft(inv_id) or inv
+            _load_draft_into_session(full)
 
 
 def _filter_history_invoices(
@@ -4927,6 +5049,11 @@ def _load_draft_into_session(draft: dict[str, Any], *, navigate: bool = True) ->
             }
         )
     st.session_state["shop_cart"] = cart
+    # Seed the autosave signature to the just-loaded state so simply opening an
+    # invoice does not immediately re-write it. This matters for SUBMITTED (pending)
+    # invoices: autosave saves with status='draft', so we only want that downgrade
+    # to happen once the shop actually edits something, not on open.
+    st.session_state["invoice_draft_sig"] = _invoice_state_signature(_invoice_line_items())
     if navigate:
         _go(_VIEW_NEW_INVOICE)
 
