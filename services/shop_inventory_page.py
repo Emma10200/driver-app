@@ -611,8 +611,7 @@ _MOBILE_CSS = """
   div[data-testid="stElementContainer"]:has(.sticky-search-anchor) {
       height: 0; min-height: 0; margin: 0; padding: 0;
   }
-  div[data-testid="stElementContainer"]:has(.sticky-search-anchor) + div[data-testid="stElementContainer"],
-  div[data-testid="stElementContainer"]:has(.sticky-search-anchor) + div[data-testid="stHorizontalBlock"] {
+  div[data-testid="stElementContainer"]:has(.sticky-search-anchor) + div[data-testid="stElementContainer"] {
       position: -webkit-sticky;
       position: sticky;
       top: 0;
@@ -626,34 +625,6 @@ _MOBILE_CSS = """
       height: 2.6rem !important;
       font-size: 1.05rem !important;
       padding: 0.5rem 0.85rem !important;
-  }
-
-  /* Search confirm button: blue circle with arrow, vertically aligned with the
-     search box. Tapping it dismisses the keyboard (blur) on mobile. */
-  .search-confirm-spacer { height: 0.15rem; }
-  button[kind="secondary"][data-testid="stBaseButton-secondary"]:has(+ div) {
-      /* fallback; real targeting below */
-  }
-  div[data-testid="stHorizontalBlock"] div[data-testid="stColumn"]:last-child button {
-      /* catch-all for the narrow confirm column */
-  }
-  /* Target the ➜ button specifically via its container: the narrow column's button */
-  [data-testid="stColumn"]:last-child .search-confirm-spacer ~ div button {
-      background: #2563eb !important;
-      color: #ffffff !important;
-      border: none !important;
-      border-radius: 50% !important;
-      width: 2.6rem !important;
-      height: 2.6rem !important;
-      min-width: 2.6rem !important;
-      min-height: 2.6rem !important;
-      padding: 0 !important;
-      font-size: 1.3rem !important;
-      line-height: 2.6rem !important;
-      display: flex !important;
-      align-items: center !important;
-      justify-content: center !important;
-      box-shadow: 0 2px 6px rgba(37, 99, 235, 0.35) !important;
   }
 
   /* Sticky sub-page navigation: keep Back + Menu visible while scrolling long
@@ -1210,29 +1181,65 @@ def _live_filter_input(
     that confuses the shop workflow, so we use streamlit-keyup when installed.
     The fallback keeps the app functional if the component is temporarily absent.
 
-    ``show_confirm_button`` adds a blue ➜ button to the right that dismisses the
-    keyboard (blurs the input) — a huge UX win on tablets where tapping "outside"
-    the field is hard while the keyboard covers the screen.
+    ``show_confirm_button`` injects a blue arrow inside the right end of the
+    search bar via HTML/JS. Tapping it blurs the input (dismisses the keyboard).
     """
+    value = _live_filter_raw(label, key=key, placeholder=placeholder, label_visibility=label_visibility)
+
     if show_confirm_button:
-        search_col, btn_col = st.columns([5, 1])
-    else:
-        search_col = st.container()
-        btn_col = None
+        import streamlit.components.v1 as stc
 
-    with search_col:
-        value = _live_filter_raw(label, key=key, placeholder=placeholder, label_visibility=label_visibility)
-
-    if btn_col is not None:
-        with btn_col:
-            # Render a confirm/dismiss button. On tap it fires JS to blur the
-            # active input (keyboard dismiss) and the Streamlit rerun syncs state.
-            st.markdown(
-                "<div class='search-confirm-spacer'></div>",
-                unsafe_allow_html=True,
-            )
-            if st.button("➜", key=f"{key}__confirm", help="Done / dismiss keyboard"):
-                _blur_active_input()
+        stc.html(
+            """
+            <style>
+            .search-go-wrap {
+                position: relative;
+                margin-top: -3.0rem;
+                height: 2.6rem;
+                pointer-events: none;
+                z-index: 50;
+            }
+            .search-go-btn {
+                position: absolute;
+                right: 4px;
+                top: 50%;
+                transform: translateY(-50%);
+                pointer-events: auto;
+                width: 20%;
+                max-width: 3.6rem;
+                height: 2.1rem;
+                background: #2563eb;
+                border: none;
+                border-radius: 10px;
+                color: #fff;
+                font-size: 1.2rem;
+                font-weight: 700;
+                cursor: pointer;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                box-shadow: 0 1px 4px rgba(37,99,235,0.3);
+                -webkit-tap-highlight-color: transparent;
+            }
+            .search-go-btn:active { background: #1d4ed8; }
+            </style>
+            <div class="search-go-wrap">
+                <button class="search-go-btn" onclick="
+                    var pw = window.parent;
+                    var pd = pw.document;
+                    if (pd.activeElement) pd.activeElement.blur();
+                    var iframes = pd.querySelectorAll('iframe');
+                    for (var i = 0; i < iframes.length; i++) {
+                        try {
+                            var idoc = iframes[i].contentDocument || iframes[i].contentWindow.document;
+                            if (idoc && idoc.activeElement) idoc.activeElement.blur();
+                        } catch(e) {}
+                    }
+                " aria-label="Done">➜</button>
+            </div>
+            """,
+            height=0,
+        )
 
     return value
 
@@ -1279,37 +1286,6 @@ def _live_filter_raw(
         placeholder=placeholder,
         label_visibility=label_visibility,
     ).strip()
-
-
-def _blur_active_input() -> None:
-    """Inject JS to blur/unfocus all inputs — dismisses the mobile keyboard.
-
-    Fired by the search confirm button. The Streamlit rerun that follows a
-    button click re-renders the page with the latest search term already applied,
-    so this purely handles the UX of hiding the keyboard.
-    """
-    import streamlit.components.v1 as stc
-
-    stc.html(
-        """
-        <script>
-        (function() {
-            var pw = window.parent;
-            var pd = pw.document;
-            // Blur any focused input/textarea in both the parent and any iframes
-            if (pd.activeElement) pd.activeElement.blur();
-            var iframes = pd.querySelectorAll('iframe');
-            for (var i = 0; i < iframes.length; i++) {
-                try {
-                    var idoc = iframes[i].contentDocument || iframes[i].contentWindow.document;
-                    if (idoc && idoc.activeElement) idoc.activeElement.blur();
-                } catch(e) {}
-            }
-        })();
-        </script>
-        """,
-        height=0,
-    )
 
 
 @st.cache_data(ttl=_REALM_CACHE_TTL, show_spinner=False)
