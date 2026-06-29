@@ -8,6 +8,7 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import quote
 
 from services.gps_matching import Asset
 
@@ -95,6 +96,54 @@ def load_assignments() -> dict[str, str]:
 
     rows = client.select("dispatch_assignments", select="truck_id,trailer_id")
     return {r["truck_id"]: r["trailer_id"] for r in rows if r.get("truck_id")}
+
+
+def load_match_reviews(match_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Load saved review decisions keyed by match_id."""
+    if not match_ids:
+        return {}
+    try:
+        client = _get_client()
+    except Exception:
+        return {}
+
+    safe_ids = [str(mid) for mid in match_ids if mid]
+    if not safe_ids:
+        return {}
+    # PostgREST in-filter; match IDs use only unit ids plus '__', no commas.
+    in_value = "in.(" + ",".join(quote(mid, safe="") for mid in safe_ids) + ")"
+    try:
+        rows = client.select("gps_match_reviews", filters={"match_id": in_value})
+    except Exception as e:
+        logger.info("GPS match reviews unavailable: %s", e)
+        return {}
+    return {str(row.get("match_id", "")): row for row in rows if row.get("match_id")}
+
+
+def save_match_reviews(rows: list[dict[str, Any]]) -> int:
+    """Upsert review decisions. Returns number of rows saved."""
+    if not rows:
+        return 0
+    client = _get_client()
+    client.upsert("gps_match_reviews", rows, on_conflict="match_id")
+    return len(rows)
+
+
+def load_recent_match_reviews(limit: int = 1000) -> list[dict[str, Any]]:
+    """Load recent saved reviews for export/debugging."""
+    try:
+        client = _get_client()
+    except Exception:
+        return []
+    try:
+        return client.select(
+            "gps_match_reviews",
+            order="reviewed_at.desc",
+            limit=max(1, min(int(limit), 5000)),
+        )
+    except Exception as e:
+        logger.info("GPS match review export unavailable: %s", e)
+        return []
 
 
 def _row_to_asset(row: dict[str, Any]) -> Asset:

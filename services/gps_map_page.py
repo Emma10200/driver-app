@@ -15,7 +15,15 @@ from urllib.parse import quote_plus
 import streamlit as st
 import streamlit.components.v1 as components
 
-from services.gps_data import load_current_assets, load_asset_history, load_asset_history_range, load_assignments
+from services.gps_data import (
+    load_assignments,
+    load_asset_history,
+    load_asset_history_range,
+    load_current_assets,
+    load_match_reviews,
+    load_recent_match_reviews,
+    save_match_reviews,
+)
 from services.gps_matching import (
     Asset,
     MatchResult,
@@ -546,13 +554,13 @@ def _render_match_review(matches: list[MatchResult], *, selected_div: str | None
     )
     _render_match_copy_grid(match_rows)
 
-    review_state = st.session_state.setdefault("gps_match_review_state", {})
+    saved_reviews = load_match_reviews([str(row["Match ID"]) for row in match_rows])
     editor_rows = []
     for row in match_rows:
-        existing = review_state.get(row["Match ID"], {})
+        existing = saved_reviews.get(str(row["Match ID"]), {})
         editor_rows.append({
-            "Decision": existing.get("Decision", "Pending"),
-            "Reviewer Note": existing.get("Reviewer Note", ""),
+            "Decision": existing.get("decision", "Pending"),
+            "Reviewer Note": existing.get("reviewer_note", ""),
             "Match ID": row["Match ID"],
             "Trailer": row["Trailer"],
             "Truck": row["Truck"],
@@ -567,48 +575,67 @@ def _render_match_review(matches: list[MatchResult], *, selected_div: str | None
             "Reasons": row["Reasons"],
         })
 
-    edited_rows = st.data_editor(
-        editor_rows,
-        use_container_width=True,
-        hide_index=True,
-        disabled=[
-            "Match ID",
-            "Trailer",
-            "Truck",
-            "Truck Coords",
-            "Trailer Coords",
-            "Distance (mi)",
-            "Confidence",
-            "History Hits",
-            "On Board",
-            "Trailer Yard",
-            "Truck Yard",
-            "Reasons",
-        ],
-        column_config={
-            "Decision": st.column_config.SelectboxColumn(
-                "Decision",
-                options=["Pending", "Confirmed", "Rejected"],
-                required=True,
-                help="Mark whether your Anytrek coordinate check agrees with the auto-match.",
-            ),
-            "Reviewer Note": st.column_config.TextColumn(
-                "Reviewer Note",
-                help="Optional note, especially useful for rejected matches.",
-            ),
-            "Distance (mi)": st.column_config.NumberColumn("Distance (mi)", format="%.3f"),
-            "History Hits": st.column_config.NumberColumn("History Hits", format="%d"),
-        },
-        key="gps_match_review_editor",
-    )
+    with st.form("gps_match_review_submit_form"):
+        edited_rows = st.data_editor(
+            editor_rows,
+            use_container_width=True,
+            hide_index=True,
+            disabled=[
+                "Match ID",
+                "Trailer",
+                "Truck",
+                "Truck Coords",
+                "Trailer Coords",
+                "Distance (mi)",
+                "Confidence",
+                "History Hits",
+                "On Board",
+                "Trailer Yard",
+                "Truck Yard",
+                "Reasons",
+            ],
+            column_config={
+                "Decision": st.column_config.SelectboxColumn(
+                    "Decision",
+                    options=["Pending", "Confirmed", "Rejected"],
+                    required=True,
+                    help="Mark whether your Anytrek coordinate check agrees with the auto-match.",
+                ),
+                "Reviewer Note": st.column_config.TextColumn(
+                    "Reviewer Note",
+                    help="Optional note, especially useful for rejected matches.",
+                ),
+                "Distance (mi)": st.column_config.NumberColumn("Distance (mi)", format="%.3f"),
+                "History Hits": st.column_config.NumberColumn("History Hits", format="%d"),
+            },
+            key="gps_match_review_editor",
+        )
+        submitted = st.form_submit_button("Save confirmed/rejected reviews to database", use_container_width=True)
 
-    for row in edited_rows:
-        review_state[row["Match ID"]] = {
+    edited_list = _table_to_records(edited_rows)
+    review_state = {
+        str(row["Match ID"]): {
             "Decision": row.get("Decision", "Pending"),
             "Reviewer Note": row.get("Reviewer Note", ""),
         }
+        for row in edited_list
+    }
 
     artifact_rows = _build_review_artifact_rows(match_rows, review_state, selected_div=selected_div)
+    save_rows = [row for row in artifact_rows if row["decision"] in {"Confirmed", "Rejected"}]
+    if submitted:
+        if not save_rows:
+            st.warning("Mark at least one row Confirmed or Rejected before saving.")
+        else:
+            try:
+                saved_count = save_match_reviews(save_rows)
+                st.success(f"Saved {saved_count} review decision(s) to Supabase.")
+            except Exception as exc:
+                st.error(
+                    "Could not save reviews. Run `supabase/migrations/0016_gps_match_reviews.sql` in Supabase first, "
+                    f"then try again. Error: {exc}"
+                )
+
     reviewed_count = sum(1 for row in artifact_rows if row["decision"] != "Pending")
     rejected_count = sum(1 for row in artifact_rows if row["decision"] == "Rejected")
     confirmed_count = sum(1 for row in artifact_rows if row["decision"] == "Confirmed")
@@ -641,6 +668,17 @@ def _render_match_review(matches: list[MatchResult], *, selected_div: str | None
         )
     else:
         st.info("Confirm or reject at least one auto-match to generate a downloadable review artifact.")
+
+    saved_export_rows = load_recent_match_reviews(limit=1000)
+    if saved_export_rows:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        st.download_button(
+            "Download saved review database export CSV",
+            data=_rows_to_csv(saved_export_rows),
+            file_name=f"gps_saved_match_reviews_{timestamp}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
 
 
 def _build_match_review_rows(matches: list[MatchResult]) -> list[dict[str, object]]:
@@ -739,14 +777,16 @@ def _build_review_artifact_rows(
     out = []
     for row in match_rows:
         state = review_state.get(str(row["Match ID"]), {})
+        decision = state.get("Decision", "Pending")
+        reviewer_note = state.get("Reviewer Note", "")
         out.append({
-            "reviewed_at_utc": reviewed_at,
-            "division_filter": selected_div or "All",
-            "decision": state.get("Decision", "Pending"),
-            "reviewer_note": state.get("Reviewer Note", ""),
             "match_id": row["Match ID"],
-            "trailer": row["Trailer"],
-            "truck": row["Truck"],
+            "decision": decision,
+            "reviewer_note": reviewer_note,
+            "reviewed_at": reviewed_at,
+            "division_filter": selected_div or "All",
+            "trailer_id": row["Trailer"],
+            "truck_id": row["Truck"],
             "truck_coords": row["Truck Coords"],
             "trailer_coords": row["Trailer Coords"],
             "distance_miles": row["Distance (mi)"],
@@ -762,8 +802,22 @@ def _build_review_artifact_rows(
             "trailer_address": row["Trailer Address"],
             "truck_division": row["Truck Division"],
             "trailer_division": row["Trailer Division"],
+            "raw": row,
         })
     return out
+
+
+def _table_to_records(data: object) -> list[dict[str, object]]:
+    if hasattr(data, "to_dict"):
+        try:
+            records = data.to_dict("records")
+            if isinstance(records, list):
+                return records
+        except TypeError:
+            pass
+    if isinstance(data, list):
+        return [dict(row) for row in data if isinstance(row, dict)]
+    return []
 
 
 def _rows_to_csv(rows: list[dict[str, object]]) -> str:
