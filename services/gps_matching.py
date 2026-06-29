@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Sequence
+from typing import Any, Sequence
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +48,7 @@ class Asset:
     address: str = ""
     zip: str = ""
     provider: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

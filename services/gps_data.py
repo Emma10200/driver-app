@@ -4,6 +4,7 @@ from Supabase. Uses the same SupabaseRestClient pattern as the rest of the app.
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -11,6 +12,17 @@ from typing import Any
 from services.gps_matching import Asset
 
 logger = logging.getLogger(__name__)
+
+_CARDINAL_TO_DEG = {
+    "N": 0,
+    "NE": 45,
+    "E": 90,
+    "SE": 135,
+    "S": 180,
+    "SW": 225,
+    "W": 270,
+    "NW": 315,
+}
 
 
 def _get_client():
@@ -55,6 +67,8 @@ def _row_to_asset(row: dict[str, Any]) -> Asset:
         except (ValueError, AttributeError):
             pass
 
+    raw = _parse_raw(row.get("raw"))
+
     return Asset(
         asset_type=row.get("asset_type", ""),
         asset_id=row.get("asset_id", ""),
@@ -62,9 +76,42 @@ def _row_to_asset(row: dict[str, Any]) -> Asset:
         lat=row.get("lat"),
         lon=row.get("lon"),
         speed=row.get("speed"),
-        heading_deg=row.get("heading_deg"),
+        heading_deg=_parse_heading(row),
         last_ping=last_ping,
         address=row.get("address", ""),
         zip=row.get("zip", ""),
         provider=row.get("provider", ""),
+        raw=raw,
     )
+
+
+def _parse_raw(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _parse_heading(row: dict[str, Any]) -> float | None:
+    numeric = _to_float(row.get("heading_deg"))
+    if numeric is not None:
+        return numeric
+
+    cardinal = str(row.get("heading_cardinal") or "").strip().upper()
+    if cardinal in _CARDINAL_TO_DEG:
+        return float(_CARDINAL_TO_DEG[cardinal])
+    return None
+
+
+def _to_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from config import (
     PHASE_LABELS,
@@ -516,7 +517,7 @@ def render_missing_fields_banner() -> None:
     bullet_list = "\n".join(f"- {label}" for label in labels)
     st.warning(f"{header}\n\n{bullet_list}")
 
-    st.iframe(
+    components.html(
         """
         <script>
         const parentWindow = window.parent;
@@ -534,7 +535,7 @@ def render_missing_fields_banner() -> None:
         });
         </script>
         """,
-        height=1,
+        height=0,
     )
 
 
@@ -572,7 +573,7 @@ def _wire_back_button_shim(current_page: int) -> None:
     """
     if current_page <= 1:
         return
-    st.iframe(
+    components.html(
         f"""
         <script>
         (function() {{
@@ -622,7 +623,7 @@ def _wire_back_button_shim(current_page: int) -> None:
 
 
 def _sync_browser_autofill_via_js() -> None:
-    st.iframe(
+    components.html(
         """
         <script>
         const parentWindow = window.parent;
@@ -738,7 +739,7 @@ def _render_save_draft_panel(panel_key: str) -> None:
 
     st.success("Draft saved. Use the link below to return later.")
 
-    st.iframe(
+    components.html(
         f"""
         <div style="font-family: sans-serif; margin-bottom: 0.6rem;">
           <div style="font-size: 0.78rem; color: #444; margin-bottom: 0.25rem;">
@@ -966,7 +967,7 @@ def scroll_to_top_on_page_change(page: int) -> None:
         st.session_state.last_rendered_page = page
         return
 
-    st.iframe(
+    components.html(
         """
         <script>
         const parentWindow = window.parent;
@@ -1011,6 +1012,6 @@ def scroll_to_top_on_page_change(page: int) -> None:
         });
         </script>
         """,
-        height=1,
+        height=0,
     )
     st.session_state.last_rendered_page = page
