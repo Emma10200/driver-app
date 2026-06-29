@@ -102,6 +102,15 @@ def _shop_inventory_requested() -> bool:
     )
 
 
+def _gps_map_requested() -> bool:
+    """Local route check for the GPS Fleet Map & Matching page."""
+    route = _query_param_value("route").strip().lower().replace("_", "-")
+    return (
+        _truthy_query_param(_query_param_value("gps"))
+        or route in {"gps", "gps-map", "fleet-map", "matching"}
+    )
+
+
 def _safety_upload_token() -> str:
     """Return a recipient-specific safety upload token, if present."""
     for key in ("safety_upload", "safety_token"):
@@ -175,6 +184,16 @@ if _shop_inventory_requested():
     from services.shop_inventory_page import render_shop_inventory_page
 
     render_shop_inventory_page()
+    render_version_footer()
+    st.stop()
+
+
+# GPS Fleet Map & Trailer-Truck Matching. Reachable via ?gps=1 or ?route=gps-map.
+# Reads from Supabase assets_current. No ELD API calls from this side.
+if _gps_map_requested():
+    from services.gps_map_page import render_gps_map_page
+
+    render_gps_map_page()
     render_version_footer()
     st.stop()
 
