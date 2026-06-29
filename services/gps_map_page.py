@@ -155,7 +155,7 @@ def render_gps_map_page() -> None:
         layers=layers,
         initial_view_state=view_state,
         tooltip={"text": "{id}\n{division}\n{provider}"},
-        map_style="mapbox://styles/mapbox/dark-v10",
+        map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
     )
 
     st.pydeck_chart(deck)
