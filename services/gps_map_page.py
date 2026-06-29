@@ -11,7 +11,7 @@ from urllib.parse import quote_plus
 import streamlit as st
 import streamlit.components.v1 as components
 
-from services.gps_data import load_current_assets, load_assignments
+from services.gps_data import load_current_assets, load_asset_history, load_assignments
 from services.gps_matching import (
     Asset,
     MatchResult,
@@ -44,28 +44,36 @@ def render_gps_map_page() -> None:
 
     max_dist = st.sidebar.slider("Match radius (miles)", 0.1, 5.0, 0.5, 0.1)
     max_stale = st.sidebar.slider("Max stale (minutes)", 15, 240, 60, 15)
+    history_hours = st.sidebar.slider("History lookback (hours)", 12, 96, 48, 12)
+    min_history_hits = st.sidebar.slider("Min route hits", 1, 6, 2, 1)
 
     show_trucks = st.sidebar.checkbox("Show trucks", True)
     show_trailers = st.sidebar.checkbox("Show trailers", True)
     show_matches = st.sidebar.checkbox("Show match lines", True)
     unit_search = st.sidebar.text_input("Search units", placeholder="Unit, provider, address, VIN...")
 
+    with st.spinner("Loading recent GPS history..."):
+        history = load_asset_history(hours=history_hours, division=selected_div)
+
     # --- Compute matches ---
     matches = compute_matches(
         trucks,
         trailers,
         assignments,
+        history,
         max_distance_miles=max_dist,
         max_stale_minutes=max_stale,
+        min_history_hits=min_history_hits,
         division_filter=selected_div,
     )
 
     # --- Metrics ---
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Trucks", len(trucks))
     col2.metric("Trailers", len(trailers))
     col3.metric("Auto-Matches", len(matches))
     col4.metric("Board Agrees", sum(1 for m in matches if m.on_board))
+    col5.metric("History Rows", len(history))
 
     # --- Map (pydeck) ---
     try:
@@ -195,6 +203,7 @@ def render_gps_map_page() -> None:
                 "Lat": st.column_config.NumberColumn("Lat", format="%.6f"),
                 "Lon": st.column_config.NumberColumn("Lon", format="%.6f"),
                 "Distance (mi)": st.column_config.NumberColumn("Distance (mi)", format="%.3f"),
+                "History Hits": st.column_config.NumberColumn("History Hits", format="%d"),
             },
         )
     else:
@@ -209,6 +218,9 @@ def render_gps_map_page() -> None:
                 "Truck": m.truck.asset_id,
                 "Distance (mi)": m.distance_miles,
                 "Confidence": f"{m.confidence:.0%}",
+                "History Hits": m.history_hits,
+                "Trailer Yard": m.trailer_yard,
+                "Truck Yard": m.truck_yard,
                 "On Board": "✓" if m.on_board else "",
                 "Notes": ", ".join(m.reasons),
             }
@@ -282,6 +294,10 @@ def _identifying_info(asset: Asset) -> str:
     return " | ".join(parts)
 
 
+def _vin(asset: Asset) -> str:
+    return _raw_value(asset, "vin", "VIN")
+
+
 def _last_ping_text(asset: Asset) -> str:
     if asset.last_ping is None:
         return ""
@@ -301,7 +317,7 @@ def _build_unit_rows(
     search_norm = (search or "").strip().lower()
 
     rows: list[dict[str, object]] = []
-    for asset in sorted(assets, key=lambda a: (a.asset_type, _unit_sort_key(a.asset_id))):
+    for asset in sorted(assets, key=lambda a: ((a.division or "~"), a.asset_type, _unit_sort_key(a.asset_id))):
         if selected_div and asset.division != selected_div:
             continue
 
@@ -311,11 +327,15 @@ def _build_unit_rows(
         match_status = "Unmatched"
         distance = None
         confidence = ""
+        history_hits = 0
+        history_score = ""
 
         if auto_match:
             matched_unit = auto_match.truck.asset_id if asset.asset_type == "trailer" else auto_match.trailer.asset_id
             distance = auto_match.distance_miles
             confidence = f"{auto_match.confidence:.0%}"
+            history_hits = auto_match.history_hits
+            history_score = f"{auto_match.history_score:.0%}" if auto_match.history_score else ""
             match_status = "Auto + Board" if auto_match.on_board else "Auto"
         elif board_unit:
             matched_unit = board_unit
@@ -335,10 +355,13 @@ def _build_unit_rows(
             "Confidence": confidence,
             "Provider": asset.provider,
             "Division": asset.division,
+            "VIN": _vin(asset),
             "Last Ping": _last_ping_text(asset),
             "Speed": asset.speed,
             "Heading": asset.heading_deg,
             "Yard": in_yard(float(asset.lat), float(asset.lon)) if _has_coords(asset) else "",
+            "History Hits": history_hits,
+            "History Score": history_score,
             "Address": asset.address,
             "ZIP": asset.zip,
             "Identifying Info": _identifying_info(asset),
@@ -371,6 +394,10 @@ def _render_copy_grid(rows: list[dict[str, object]]) -> None:
         matched = escape(str(row.get("Matched Unit") or ""))
         status = escape(str(row.get("Match Status") or ""))
         provider = escape(str(row.get("Provider") or ""))
+        division = escape(str(row.get("Division") or ""))
+        vin = escape(str(row.get("VIN") or ""))
+        yard = escape(str(row.get("Yard") or ""))
+        history_hits = escape(str(row.get("History Hits") or ""))
         info = escape(str(row.get("Identifying Info") or ""))
         address = escape(str(row.get("Address") or ""))
         coords_escaped = escape(coords)
@@ -383,6 +410,10 @@ def _render_copy_grid(rows: list[dict[str, object]]) -> None:
             f"<td class='coords'>{coords_escaped}</td>"
             f"<td>{matched}</td>"
             f"<td>{status}</td>"
+            f"<td>{division}</td>"
+            f"<td>{vin}</td>"
+            f"<td>{yard}</td>"
+            f"<td>{history_hits}</td>"
             f"<td>{provider}</td>"
             f"<td title='{info}'>{info}</td>"
             f"<td title='{address}'>{address}</td>"
@@ -422,7 +453,8 @@ def _render_copy_grid(rows: list[dict[str, object]]) -> None:
         <thead>
           <tr>
             <th>Type</th><th>Unit</th><th>Copy</th><th>Coords</th><th>Matched</th>
-            <th>Status</th><th>Provider</th><th>Identifying Info</th><th>Address</th>
+            <th>Status</th><th>Division</th><th>VIN</th><th>Yard</th><th>History</th>
+            <th>Provider</th><th>Identifying Info</th><th>Address</th>
           </tr>
         </thead>
         <tbody>{''.join(table_rows)}</tbody>

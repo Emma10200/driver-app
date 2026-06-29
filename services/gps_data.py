@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from services.gps_matching import Asset
@@ -47,6 +47,29 @@ def load_current_assets(division: str | None = None) -> list[Asset]:
     return [_row_to_asset(r) for r in rows]
 
 
+def load_asset_history(hours: int = 48, division: str | None = None) -> list[Asset]:
+    """Load recent GPS history for evidence-based route/co-location matching."""
+    try:
+        client = _get_client()
+    except Exception as e:
+        logger.warning("GPS history unavailable (Supabase not configured): %s", e)
+        return []
+
+    since = datetime.now(timezone.utc) - timedelta(hours=max(1, int(hours)))
+    filters: dict[str, Any] = {"recorded_at": f"gte.{since.isoformat()}"}
+    if division:
+        filters["division"] = f"eq.{division}"
+
+    rows = client.select_all(
+        "assets_history",
+        filters=filters,
+        order="recorded_at.asc",
+        page_size=1000,
+        hard_cap=20000,
+    )
+    return [_history_row_to_asset(r) for r in rows]
+
+
 def load_assignments() -> dict[str, str]:
     """Load dispatch_assignments as a dict of truck_id -> trailer_id."""
     try:
@@ -77,6 +100,32 @@ def _row_to_asset(row: dict[str, Any]) -> Asset:
         lon=row.get("lon"),
         speed=row.get("speed"),
         heading_deg=_parse_heading(row),
+        last_ping=last_ping,
+        address=row.get("address", ""),
+        zip=row.get("zip", ""),
+        provider=row.get("provider", ""),
+        raw=raw,
+    )
+
+
+def _history_row_to_asset(row: dict[str, Any]) -> Asset:
+    last_ping = None
+    raw_ping = row.get("recorded_at")
+    if raw_ping:
+        try:
+            last_ping = datetime.fromisoformat(str(raw_ping).replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            pass
+
+    raw = _parse_raw(row.get("raw"))
+    return Asset(
+        asset_type=row.get("asset_type", ""),
+        asset_id=row.get("asset_id", ""),
+        division=row.get("division", ""),
+        lat=row.get("lat"),
+        lon=row.get("lon"),
+        speed=row.get("speed"),
+        heading_deg=_to_float(row.get("heading_deg")),
         last_ping=last_ping,
         address=row.get("address", ""),
         zip=row.get("zip", ""),

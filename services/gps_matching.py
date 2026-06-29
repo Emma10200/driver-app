@@ -14,22 +14,18 @@ from typing import Any, Sequence
 
 
 # ---------------------------------------------------------------------------
-# Yard bounding boxes (from dispatch-board GpsDashboard.js)
+# Yard geofences.
+# Existing dispatch-board code used bounding boxes; these circular fences use the
+# requested yard centers with an approximate two-block radius.
 # ---------------------------------------------------------------------------
-YARD_BOXES = {
-    "IL_Melrose": {
-        "min_lat": 41.895866,
-        "max_lat": 41.898397,
-        "min_lon": -87.871693,
-        "max_lon": -87.868356,
-    },
-    "CA_Fontana": {
-        "min_lat": 34.095885,
-        "max_lat": 34.098320,
-        "min_lon": -117.479931,
-        "max_lon": -117.475650,
-    },
+YARD_RADIUS_MILES = 0.25
+YARD_GEOFENCES = {
+    "California Yard": {"lat": 34.09686, "lon": -117.47642, "radius_miles": YARD_RADIUS_MILES},
+    "Illinois Yard": {"lat": 41.896873, "lon": -87.86982, "radius_miles": YARD_RADIUS_MILES},
 }
+
+# Backwards-compatible alias for imports/UI that referenced the previous name.
+YARD_BOXES = YARD_GEOFENCES
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +55,10 @@ class MatchResult:
     confidence: float  # 0.0 – 1.0
     reasons: list[str] = field(default_factory=list)
     on_board: bool = False  # True if this pairing matches dispatch_assignments
+    history_hits: int = 0
+    history_score: float = 0.0
+    trailer_yard: str = ""
+    truck_yard: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -81,11 +81,22 @@ def haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float
 
 
 def in_yard(lat: float, lon: float) -> str | None:
-    """Return yard name if coordinates fall within a known yard, else None."""
-    for name, box in YARD_BOXES.items():
-        if box["min_lat"] <= lat <= box["max_lat"] and box["min_lon"] <= lon <= box["max_lon"]:
+    """Return yard name if coordinates fall within a known yard geofence."""
+    for name, fence in YARD_GEOFENCES.items():
+        if haversine_miles(lat, lon, fence["lat"], fence["lon"]) <= fence["radius_miles"]:
             return name
     return None
+
+
+def _valid_coords(asset: Asset) -> bool:
+    if asset.lat is None or asset.lon is None:
+        return False
+    try:
+        lat = float(asset.lat)
+        lon = float(asset.lon)
+    except (TypeError, ValueError):
+        return False
+    return not (lat == 0 and lon == 0)
 
 
 # ---------------------------------------------------------------------------
@@ -134,9 +145,12 @@ def compute_matches(
     trucks: Sequence[Asset],
     trailers: Sequence[Asset],
     assignments: dict[str, str] | None = None,
+    history: Sequence[Asset] | None = None,
     *,
     max_distance_miles: float = 0.5,
     max_stale_minutes: float = 60,
+    min_history_hits: int = 2,
+    history_time_window_minutes: float = 45,
     division_filter: str | None = None,
     now: datetime | None = None,
 ) -> list[MatchResult]:
@@ -150,6 +164,8 @@ def compute_matches(
     assignments : optional dict of truck_id -> trailer_id (board pairings)
     max_distance_miles : max radius for pairing consideration
     max_stale_minutes : pings older than this get freshness=0
+    min_history_hits : historical co-location hits needed for full history confidence
+    history_time_window_minutes : max time delta between truck/trailer history pings
     division_filter : if set, only consider assets with this division
     now : reference time (defaults to utcnow)
 
@@ -160,23 +176,22 @@ def compute_matches(
     if now is None:
         now = datetime.now(timezone.utc)
     assignments = assignments or {}
+    history_by_asset = _group_history(history or [], division_filter)
 
     # Filter and prepare trucks
     valid_trucks = [
         t for t in trucks
-        if t.lat is not None
-        and t.lon is not None
+        if _valid_coords(t)
         and (division_filter is None or t.division == division_filter)
     ]
 
-    # Filter trailers: exclude those in yards, require valid coords
+    # Filter trailers: require valid coords, but do not exclude yards. Yard
+    # matches are downweighted unless historical route evidence supports them.
     valid_trailers = []
     for tr in trailers:
-        if tr.lat is None or tr.lon is None:
+        if not _valid_coords(tr):
             continue
         if division_filter and tr.division != division_filter:
-            continue
-        if in_yard(tr.lat, tr.lon):
             continue
         valid_trailers.append(tr)
 
@@ -184,17 +199,41 @@ def compute_matches(
     # Track which trucks have already been matched (1:1 greedy)
     matched_trucks: set[str] = set()
 
-    # For each trailer, find nearest truck within radius and score
-    scored_pairs: list[tuple[float, int, int]] = []  # (neg_confidence, trailer_idx, truck_idx)
+    # For each trailer, find nearest truck within radius and score. Historical
+    # route evidence can create a candidate even when current positions are no
+    # longer close, especially when the trailer is parked in a yard.
+    scored_pairs: list[tuple[float, int, int, float, int, float]] = []
+    # (neg_confidence, trailer_idx, truck_idx, current_dist, history_hits, history_score)
 
     for ti, trailer in enumerate(valid_trailers):
+        trailer_yard = in_yard(float(trailer.lat), float(trailer.lon)) or ""
         for ui, truck in enumerate(valid_trucks):
-            dist = haversine_miles(trailer.lat, trailer.lon, truck.lat, truck.lon)
-            if dist > max_distance_miles:
+            truck_yard = in_yard(float(truck.lat), float(truck.lon)) or ""
+            dist = haversine_miles(float(trailer.lat), float(trailer.lon), float(truck.lat), float(truck.lon))
+
+            history_hits, history_score = _history_agreement(
+                trailer,
+                truck,
+                history_by_asset,
+                max_distance_miles=max_distance_miles,
+                min_history_hits=min_history_hits,
+                time_window_minutes=history_time_window_minutes,
+            )
+
+            board_trailer = assignments.get(truck.asset_id, "")
+            board_agrees = board_trailer == trailer.asset_id
+
+            if dist > max_distance_miles and history_hits == 0 and not board_agrees:
                 continue
 
             # Distance score: closer = higher (linear within radius)
-            dist_score = 1.0 - (dist / max_distance_miles)
+            dist_score = max(0.0, 1.0 - (dist / max_distance_miles))
+
+            # Current yard co-location is weak evidence: dozens of assets can be
+            # parked inside the same small area. Historical movement evidence is
+            # much stronger and remains fully counted below.
+            if trailer_yard or truck_yard:
+                dist_score *= 0.25
 
             # Freshness: both truck and trailer should be fresh
             truck_fresh = _freshness_score(truck.last_ping, now, max_stale_minutes)
@@ -205,30 +244,42 @@ def compute_matches(
             heading_score = _heading_agreement(trailer.heading_deg, truck.heading_deg)
             speed_score = _speed_agreement(trailer.speed, truck.speed)
             co_movement = (heading_score + speed_score) / 2.0
+            board_score = 1.0 if board_agrees else 0.0
 
             # Weighted confidence
             confidence = (
-                0.40 * dist_score
-                + 0.25 * freshness
-                + 0.35 * co_movement
+                0.25 * dist_score
+                + 0.20 * freshness
+                + 0.20 * co_movement
+                + 0.30 * history_score
+                + 0.05 * board_score
             )
 
-            scored_pairs.append((-confidence, ti, ui))
+            scored_pairs.append((-confidence, ti, ui, round(dist, 3), history_hits, history_score))
 
     # Greedy assignment: sort by descending confidence, assign 1:1
     scored_pairs.sort()
     matched_trailers: set[str] = set()
 
-    for neg_conf, ti, ui in scored_pairs:
+    for neg_conf, ti, ui, dist, history_hits, history_score in scored_pairs:
         trailer = valid_trailers[ti]
         truck = valid_trucks[ui]
         if trailer.asset_id in matched_trailers or truck.asset_id in matched_trucks:
             continue
 
         confidence = -neg_conf
-        dist = haversine_miles(trailer.lat, trailer.lon, truck.lat, truck.lon)
+        trailer_yard = in_yard(float(trailer.lat), float(trailer.lon)) or ""
+        truck_yard = in_yard(float(truck.lat), float(truck.lon)) or ""
 
         reasons = []
+        if history_hits >= min_history_hits:
+            reasons.append(f"{history_hits} historical co-location hits")
+        elif history_hits:
+            reasons.append(f"{history_hits} historical hit")
+        if trailer_yard:
+            reasons.append(f"trailer currently in {trailer_yard}")
+        if truck_yard and truck_yard != trailer_yard:
+            reasons.append(f"truck currently in {truck_yard}")
         if confidence >= 0.7:
             reasons.append("strong proximity + co-movement")
         elif confidence >= 0.4:
@@ -250,9 +301,70 @@ def compute_matches(
             confidence=round(confidence, 3),
             reasons=reasons,
             on_board=on_board,
+            history_hits=history_hits,
+            history_score=round(history_score, 3),
+            trailer_yard=trailer_yard,
+            truck_yard=truck_yard,
         ))
         matched_trucks.add(truck.asset_id)
         matched_trailers.add(trailer.asset_id)
 
     results.sort(key=lambda r: r.confidence, reverse=True)
     return results
+
+
+def _group_history(history: Sequence[Asset], division_filter: str | None) -> dict[tuple[str, str], list[Asset]]:
+    grouped: dict[tuple[str, str], list[Asset]] = {}
+    for point in history:
+        if division_filter and point.division and point.division != division_filter:
+            continue
+        if not _valid_coords(point) or point.last_ping is None:
+            continue
+        grouped.setdefault((point.asset_type, point.asset_id), []).append(point)
+    for points in grouped.values():
+        points.sort(key=lambda p: p.last_ping or datetime.min.replace(tzinfo=timezone.utc))
+    return grouped
+
+
+def _history_agreement(
+    trailer: Asset,
+    truck: Asset,
+    history_by_asset: dict[tuple[str, str], list[Asset]],
+    *,
+    max_distance_miles: float,
+    min_history_hits: int,
+    time_window_minutes: float,
+) -> tuple[int, float]:
+    trailer_points = history_by_asset.get(("trailer", trailer.asset_id), [])
+    truck_points = history_by_asset.get(("truck", truck.asset_id), [])
+    if not trailer_points or not truck_points:
+        return 0, 0.0
+
+    hits = 0
+    bucket_hits: set[str] = set()
+    max_delta_seconds = time_window_minutes * 60
+    for tp in trailer_points:
+        if tp.last_ping is None:
+            continue
+        if in_yard(float(tp.lat), float(tp.lon)):
+            continue
+        best_dist = None
+        for up in truck_points:
+            if up.last_ping is None:
+                continue
+            if in_yard(float(up.lat), float(up.lon)):
+                continue
+            delta = abs((tp.last_ping - up.last_ping).total_seconds())
+            if delta > max_delta_seconds:
+                continue
+            dist = haversine_miles(float(tp.lat), float(tp.lon), float(up.lat), float(up.lon))
+            if dist <= max_distance_miles and (best_dist is None or dist < best_dist):
+                best_dist = dist
+        if best_dist is not None:
+            hits += 1
+            bucket_hits.add(tp.last_ping.strftime("%Y-%m-%d %H"))
+
+    unique_hits = len(bucket_hits)
+    if unique_hits == 0:
+        return 0, 0.0
+    return unique_hits, min(1.0, unique_hits / max(1, min_history_hits))
