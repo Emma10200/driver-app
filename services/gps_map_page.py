@@ -5,16 +5,18 @@ and draws connection lines with confidence scores.
 """
 from __future__ import annotations
 
+from datetime import date, datetime, time, timedelta, timezone
 from html import escape
 from urllib.parse import quote_plus
 
 import streamlit as st
 import streamlit.components.v1 as components
 
-from services.gps_data import load_current_assets, load_asset_history, load_assignments
+from services.gps_data import load_current_assets, load_asset_history, load_asset_history_range, load_assignments
 from services.gps_matching import (
     Asset,
     MatchResult,
+    compute_historical_usage,
     compute_matches,
     in_yard,
     YARD_BOXES,
@@ -46,6 +48,11 @@ def render_gps_map_page() -> None:
     max_stale = st.sidebar.slider("Max stale (minutes)", 15, 240, 60, 15)
     history_hours = st.sidebar.slider("History lookback (hours)", 12, 96, 48, 12)
     min_history_hits = st.sidebar.slider("Min route hits", 1, 6, 2, 1)
+    st.sidebar.subheader("Historical Usage")
+    today = date.today()
+    usage_start = st.sidebar.date_input("Usage from", value=today - timedelta(days=7))
+    usage_end = st.sidebar.date_input("Usage to", value=today - timedelta(days=1))
+    usage_min_hits = st.sidebar.slider("Usage min hits", 1, 10, 2, 1)
 
     show_trucks = st.sidebar.checkbox("Show trucks", True)
     show_trailers = st.sidebar.checkbox("Show trailers", True)
@@ -54,6 +61,14 @@ def render_gps_map_page() -> None:
 
     with st.spinner("Loading recent GPS history..."):
         history = load_asset_history(hours=history_hours, division=selected_div)
+
+    usage_start_dt = datetime.combine(usage_start, time.min, tzinfo=timezone.utc)
+    usage_end_dt = datetime.combine(usage_end, time.max, tzinfo=timezone.utc)
+    if usage_end_dt < usage_start_dt:
+        usage_start_dt, usage_end_dt = usage_end_dt, usage_start_dt
+
+    with st.spinner("Loading historical usage range..."):
+        usage_history = load_asset_history_range(usage_start_dt, usage_end_dt, division=selected_div)
 
     # --- Compute matches ---
     matches = compute_matches(
@@ -229,6 +244,32 @@ def render_gps_map_page() -> None:
         st.dataframe(table_data, use_container_width=True)
     else:
         st.info("No trailer-truck matches found with current filters.")
+
+    # --- Historical many-to-many usage table ---
+    st.subheader("Historical Trailer Usage")
+    st.caption(
+        "Many-to-many historical co-location outside yards. This is for week/day analysis, "
+        "so a truck can appear with multiple trailers if it had multiple route hits."
+    )
+    usage_rows = _build_historical_usage_rows(
+        usage_history,
+        selected_div=selected_div,
+        max_distance_miles=max_dist,
+        min_hits=usage_min_hits,
+    )
+    if usage_rows:
+        st.dataframe(
+            usage_rows,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Hits": st.column_config.NumberColumn("Hits", format="%d"),
+                "Min Distance (mi)": st.column_config.NumberColumn("Min Distance (mi)", format="%.3f"),
+                "Avg Distance (mi)": st.column_config.NumberColumn("Avg Distance (mi)", format="%.3f"),
+            },
+        )
+    else:
+        st.info("No historical truck/trailer co-location found for the selected date range and filters.")
 
 
 def _has_coords(asset: Asset) -> bool:
@@ -462,3 +503,32 @@ def _render_copy_grid(rows: list[dict[str, object]]) -> None:
     </div>
     """
     components.html(html, height=470, scrolling=False)
+
+
+def _build_historical_usage_rows(
+    history: list[Asset],
+    *,
+    selected_div: str | None,
+    max_distance_miles: float,
+    min_hits: int,
+) -> list[dict[str, object]]:
+    usage = compute_historical_usage(
+        history,
+        max_distance_miles=max_distance_miles,
+        min_hits=min_hits,
+        division_filter=selected_div,
+    )
+    rows: list[dict[str, object]] = []
+    for item in usage:
+        rows.append({
+            "Truck": item.truck_id,
+            "Trailer": item.trailer_id,
+            "Hits": item.hits,
+            "Days": ", ".join(item.days),
+            "First Seen": item.first_seen.strftime("%Y-%m-%d %H:%M UTC") if item.first_seen else "",
+            "Last Seen": item.last_seen.strftime("%Y-%m-%d %H:%M UTC") if item.last_seen else "",
+            "Min Distance (mi)": item.min_distance_miles,
+            "Avg Distance (mi)": item.avg_distance_miles,
+            "Confidence": f"{item.confidence:.0%}",
+        })
+    return rows

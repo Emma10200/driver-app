@@ -49,16 +49,29 @@ def load_current_assets(division: str | None = None) -> list[Asset]:
 
 def load_asset_history(hours: int = 48, division: str | None = None) -> list[Asset]:
     """Load recent GPS history for evidence-based route/co-location matching."""
+    since = datetime.now(timezone.utc) - timedelta(hours=max(1, int(hours)))
+    return load_asset_history_range(since, datetime.now(timezone.utc), division=division)
+
+
+def load_asset_history_range(
+    start: datetime,
+    end: datetime,
+    division: str | None = None,
+) -> list[Asset]:
+    """Load GPS history in an explicit time range.
+
+    Division filtering is intentionally done after loading so older backfilled
+    GPS_HISTORY rows with blank division can still contribute evidence.
+    """
     try:
         client = _get_client()
     except Exception as e:
         logger.warning("GPS history unavailable (Supabase not configured): %s", e)
         return []
 
-    since = datetime.now(timezone.utc) - timedelta(hours=max(1, int(hours)))
-    filters: dict[str, Any] = {"recorded_at": f"gte.{since.isoformat()}"}
-    if division:
-        filters["division"] = f"eq.{division}"
+    start = _ensure_aware(start)
+    end = _ensure_aware(end)
+    filters: dict[str, Any] = {"recorded_at": f"gte.{start.isoformat()}"}
 
     rows = client.select_all(
         "assets_history",
@@ -67,7 +80,10 @@ def load_asset_history(hours: int = 48, division: str | None = None) -> list[Ass
         page_size=1000,
         hard_cap=20000,
     )
-    return [_history_row_to_asset(r) for r in rows]
+    history = [point for point in (_history_row_to_asset(r) for r in rows) if point.last_ping and point.last_ping <= end]
+    if division:
+        history = [point for point in history if not point.division or point.division == division]
+    return history
 
 
 def load_assignments() -> dict[str, str]:
@@ -164,3 +180,9 @@ def _to_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _ensure_aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)

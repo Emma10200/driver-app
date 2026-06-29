@@ -61,6 +61,19 @@ class MatchResult:
     truck_yard: str = ""
 
 
+@dataclass
+class HistoricalUsageResult:
+    truck_id: str
+    trailer_id: str
+    hits: int
+    days: list[str]
+    first_seen: datetime | None
+    last_seen: datetime | None
+    min_distance_miles: float
+    avg_distance_miles: float
+    confidence: float
+
+
 # ---------------------------------------------------------------------------
 # Geometry helpers
 # ---------------------------------------------------------------------------
@@ -368,3 +381,101 @@ def _history_agreement(
     if unique_hits == 0:
         return 0, 0.0
     return unique_hits, min(1.0, unique_hits / max(1, min_history_hits))
+
+
+def compute_historical_usage(
+    history: Sequence[Asset],
+    *,
+    max_distance_miles: float = 0.5,
+    time_window_minutes: float = 45,
+    min_hits: int = 1,
+    division_filter: str | None = None,
+) -> list[HistoricalUsageResult]:
+    """Find truck/trailer usage candidates over a historical date range.
+
+    This is intentionally many-to-many. A single truck can show multiple
+    trailers in the same day/week, which reflects real drop/hook behavior.
+    Yard-only history points are excluded so parking-lot co-location doesn't
+    create fake pairings.
+    """
+    grouped = _group_history(history, division_filter)
+    truck_keys = [key for key in grouped if key[0] == "truck"]
+    trailer_keys = [key for key in grouped if key[0] == "trailer"]
+    pair_stats: dict[tuple[str, str], dict[str, Any]] = {}
+    max_delta_seconds = time_window_minutes * 60
+
+    for _, trailer_id in trailer_keys:
+        trailer_points = [p for p in grouped[("trailer", trailer_id)] if not in_yard(float(p.lat), float(p.lon))]
+        if not trailer_points:
+            continue
+        for _, truck_id in truck_keys:
+            truck_points = [p for p in grouped[("truck", truck_id)] if not in_yard(float(p.lat), float(p.lon))]
+            if not truck_points:
+                continue
+
+            buckets: set[str] = set()
+            days: set[str] = set()
+            distances: list[float] = []
+            first_seen: datetime | None = None
+            last_seen: datetime | None = None
+
+            for tp in trailer_points:
+                if tp.last_ping is None:
+                    continue
+                best_dist = None
+                best_time = None
+                for up in truck_points:
+                    if up.last_ping is None:
+                        continue
+                    delta = abs((tp.last_ping - up.last_ping).total_seconds())
+                    if delta > max_delta_seconds:
+                        continue
+                    dist = haversine_miles(float(tp.lat), float(tp.lon), float(up.lat), float(up.lon))
+                    if dist <= max_distance_miles and (best_dist is None or dist < best_dist):
+                        best_dist = dist
+                        best_time = max(tp.last_ping, up.last_ping)
+                if best_dist is None or best_time is None:
+                    continue
+                bucket = best_time.strftime("%Y-%m-%d %H")
+                if bucket in buckets:
+                    continue
+                buckets.add(bucket)
+                days.add(best_time.strftime("%Y-%m-%d"))
+                distances.append(best_dist)
+                if first_seen is None or best_time < first_seen:
+                    first_seen = best_time
+                if last_seen is None or best_time > last_seen:
+                    last_seen = best_time
+
+            if len(buckets) < min_hits or not distances:
+                continue
+            pair_stats[(truck_id, trailer_id)] = {
+                "hits": len(buckets),
+                "days": sorted(days),
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "min_distance": min(distances),
+                "avg_distance": sum(distances) / len(distances),
+            }
+
+    out: list[HistoricalUsageResult] = []
+    for (truck_id, trailer_id), stat in pair_stats.items():
+        hits = int(stat["hits"])
+        avg_dist = float(stat["avg_distance"])
+        hit_score = min(1.0, hits / max(1, min_hits * 2))
+        distance_score = max(0.0, 1.0 - (avg_dist / max_distance_miles))
+        confidence = 0.70 * hit_score + 0.30 * distance_score
+        out.append(HistoricalUsageResult(
+            truck_id=truck_id,
+            trailer_id=trailer_id,
+            hits=hits,
+            days=list(stat["days"]),
+            first_seen=stat["first_seen"],
+            last_seen=stat["last_seen"],
+            min_distance_miles=round(float(stat["min_distance"]), 3),
+            avg_distance_miles=round(avg_dist, 3),
+            confidence=round(confidence, 3),
+        ))
+
+    out.sort(key=lambda r: (-r.confidence, -r.hits, r.truck_id, r.trailer_id))
+    return out
