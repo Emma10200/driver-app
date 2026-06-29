@@ -98,6 +98,7 @@ def render_gps_map_page() -> None:
         return
 
     layers = []
+    division_colors = _division_color_map(divisions)
 
     # Truck layer
     if show_trucks:
@@ -110,6 +111,8 @@ def render_gps_map_page() -> None:
                 "provider": t.provider,
                 "address": t.address,
                 "coords": _coords(t),
+                "color": _truck_color(t.division, division_colors),
+                "asset_type": "Truck",
             }
             for t in trucks
             if _has_coords(t) and (selected_div is None or t.division == selected_div)
@@ -119,8 +122,13 @@ def render_gps_map_page() -> None:
                 "ScatterplotLayer",
                 data=truck_data,
                 get_position=["lon", "lat"],
-                get_radius=120,
-                get_fill_color=[30, 144, 255, 200],  # dodgerblue
+                get_radius=450,
+                radius_min_pixels=8,
+                radius_max_pixels=26,
+                get_fill_color="color",
+                stroked=True,
+                get_line_color=[255, 255, 255, 220],
+                get_line_width=2,
                 pickable=True,
                 auto_highlight=True,
             ))
@@ -137,6 +145,8 @@ def render_gps_map_page() -> None:
                 "address": t.address,
                 "coords": _coords(t),
                 "in_yard": in_yard(t.lat, t.lon) or "",
+                "color": [255, 140, 0, 230],
+                "asset_type": "Trailer",
             }
             for t in trailers
             if _has_coords(t) and (selected_div is None or t.division == selected_div)
@@ -146,8 +156,13 @@ def render_gps_map_page() -> None:
                 "ScatterplotLayer",
                 data=trailer_data,
                 get_position=["lon", "lat"],
-                get_radius=100,
-                get_fill_color=[255, 140, 0, 200],  # orange
+                get_radius=400,
+                radius_min_pixels=7,
+                radius_max_pixels=24,
+                get_fill_color="color",
+                stroked=True,
+                get_line_color=[255, 255, 255, 220],
+                get_line_width=2,
                 pickable=True,
                 auto_highlight=True,
             ))
@@ -163,6 +178,12 @@ def render_gps_map_page() -> None:
                 "confidence": m.confidence,
                 "trailer": m.trailer.asset_id,
                 "truck": m.truck.asset_id,
+                "id": f"Trailer {m.trailer.asset_id} ↔ Truck {m.truck.asset_id}",
+                "coords": f"{_coords(m.trailer)} → {_coords(m.truck)}",
+                "address": f"{m.distance_miles:.3f} mi | {m.confidence:.0%} confidence",
+                "division": m.truck.division or m.trailer.division,
+                "provider": "Auto-match line",
+                "asset_type": "Match",
             }
             for m in matches
             if _has_coords(m.trailer) and _has_coords(m.truck)
@@ -193,11 +214,15 @@ def render_gps_map_page() -> None:
     deck = pdk.Deck(
         layers=layers,
         initial_view_state=view_state,
-        tooltip={"text": "{id}\n{coords}\n{address}\n{division}\n{provider}"},
+        tooltip={
+            "html": "<b>{asset_type}: {id}</b><br/>{coords}<br/>{address}<br/>{division}<br/>{provider}",
+            "style": {"backgroundColor": "#1f2937", "color": "#e5e7eb"},
+        },
         map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
     )
 
     st.pydeck_chart(deck)
+    _render_map_legend(division_colors)
 
     # --- All units table + coordinate copy controls ---
     unit_rows = _build_unit_rows(assets, matches, assignments, selected_div, unit_search)
@@ -281,6 +306,38 @@ def _has_coords(asset: Asset) -> bool:
     except (TypeError, ValueError):
         return False
     return not (lat == 0 and lon == 0)
+
+
+def _division_color_map(divisions: list[str]) -> dict[str, list[int]]:
+    palette = [
+        [30, 144, 255, 235],   # blue
+        [34, 197, 94, 235],    # green
+        [168, 85, 247, 235],   # purple
+        [236, 72, 153, 235],   # pink
+        [20, 184, 166, 235],   # teal
+        [250, 204, 21, 235],   # yellow
+        [99, 102, 241, 235],   # indigo
+        [244, 63, 94, 235],    # rose
+    ]
+    return {division: palette[index % len(palette)] for index, division in enumerate(sorted(divisions))}
+
+
+def _truck_color(division: str, division_colors: dict[str, list[int]]) -> list[int]:
+    return division_colors.get(division or "", [96, 165, 250, 235])
+
+
+def _render_map_legend(division_colors: dict[str, list[int]]) -> None:
+    legend_items = ["<span style='display:inline-block;width:12px;height:12px;border-radius:50%;background:rgb(255,140,0);border:1px solid #fff;margin-right:4px;'></span>Trailers"]
+    for division, color in division_colors.items():
+        legend_items.append(
+            f"<span style='display:inline-block;width:12px;height:12px;border-radius:50%;background:rgba({color[0]},{color[1]},{color[2]},{color[3] / 255:.2f});border:1px solid #fff;margin-right:4px;'></span>Truck: {escape(division)}"
+        )
+    st.markdown(
+        "<div style='font-size:0.85rem;margin-top:-0.5rem;margin-bottom:0.75rem;'>"
+        + " &nbsp; ".join(legend_items)
+        + "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _coords(asset: Asset) -> str:
