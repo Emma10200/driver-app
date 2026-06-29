@@ -5,8 +5,11 @@ and draws connection lines with confidence scores.
 """
 from __future__ import annotations
 
+import csv
+import json
 from datetime import date, datetime, time, timedelta, timezone
 from html import escape
+from io import StringIO
 from urllib.parse import quote_plus
 
 import streamlit as st
@@ -234,67 +237,41 @@ def render_gps_map_page() -> None:
 
     if unit_rows:
         _render_copy_grid(unit_rows)
-        st.dataframe(
-            unit_rows,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Map": st.column_config.LinkColumn("Map", display_text="Open"),
-                "Lat": st.column_config.NumberColumn("Lat", format="%.6f"),
-                "Lon": st.column_config.NumberColumn("Lon", format="%.6f"),
-                "Distance (mi)": st.column_config.NumberColumn("Distance (mi)", format="%.3f"),
-                "History Hits": st.column_config.NumberColumn("History Hits", format="%d"),
-            },
-        )
     else:
         st.info("No units match the current filters/search.")
 
     # --- Match table ---
     if matches:
         st.subheader("Auto-Match Results")
-        table_data = [
-            {
-                "Trailer": m.trailer.asset_id,
-                "Truck": m.truck.asset_id,
-                "Distance (mi)": m.distance_miles,
-                "Confidence": f"{m.confidence:.0%}",
-                "History Hits": m.history_hits,
-                "Trailer Yard": m.trailer_yard,
-                "Truck Yard": m.truck_yard,
-                "On Board": "✓" if m.on_board else "",
-                "Notes": ", ".join(m.reasons),
-            }
-            for m in matches
-        ]
-        st.dataframe(table_data, use_container_width=True)
+        _render_match_review(matches, selected_div=selected_div)
     else:
         st.info("No trailer-truck matches found with current filters.")
 
     # --- Historical many-to-many usage table ---
-    st.subheader("Historical Trailer Usage")
-    st.caption(
-        "Many-to-many historical co-location outside yards. This is for week/day analysis, "
-        "so a truck can appear with multiple trailers if it had multiple route hits."
-    )
-    usage_rows = _build_historical_usage_rows(
-        usage_history,
-        selected_div=selected_div,
-        max_distance_miles=max_dist,
-        min_hits=usage_min_hits,
-    )
-    if usage_rows:
-        st.dataframe(
-            usage_rows,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Hits": st.column_config.NumberColumn("Hits", format="%d"),
-                "Min Distance (mi)": st.column_config.NumberColumn("Min Distance (mi)", format="%.3f"),
-                "Avg Distance (mi)": st.column_config.NumberColumn("Avg Distance (mi)", format="%.3f"),
-            },
+    with st.expander("Historical Trailer Usage", expanded=False):
+        st.caption(
+            "Many-to-many historical co-location outside yards. This is for week/day analysis, "
+            "so a truck can appear with multiple trailers if it had multiple route hits."
         )
-    else:
-        st.info("No historical truck/trailer co-location found for the selected date range and filters.")
+        usage_rows = _build_historical_usage_rows(
+            usage_history,
+            selected_div=selected_div,
+            max_distance_miles=max_dist,
+            min_hits=usage_min_hits,
+        )
+        if usage_rows:
+            st.dataframe(
+                usage_rows,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Hits": st.column_config.NumberColumn("Hits", format="%d"),
+                    "Min Distance (mi)": st.column_config.NumberColumn("Min Distance (mi)", format="%.3f"),
+                    "Avg Distance (mi)": st.column_config.NumberColumn("Avg Distance (mi)", format="%.3f"),
+                },
+            )
+        else:
+            st.info("No historical truck/trailer co-location found for the selected date range and filters.")
 
 
 def _has_coords(asset: Asset) -> bool:
@@ -560,6 +537,243 @@ def _render_copy_grid(rows: list[dict[str, object]]) -> None:
     </div>
     """
     components.html(html, height=470, scrolling=False)
+
+
+def _render_match_review(matches: list[MatchResult], *, selected_div: str | None) -> None:
+    match_rows = _build_match_review_rows(matches)
+    st.caption(
+        "Use the copy buttons to paste truck coordinates into Anytrek. Then mark each auto-match as Confirmed, Rejected, or Pending."
+    )
+    _render_match_copy_grid(match_rows)
+
+    review_state = st.session_state.setdefault("gps_match_review_state", {})
+    editor_rows = []
+    for row in match_rows:
+        existing = review_state.get(row["Match ID"], {})
+        editor_rows.append({
+            "Decision": existing.get("Decision", "Pending"),
+            "Reviewer Note": existing.get("Reviewer Note", ""),
+            "Match ID": row["Match ID"],
+            "Trailer": row["Trailer"],
+            "Truck": row["Truck"],
+            "Truck Coords": row["Truck Coords"],
+            "Trailer Coords": row["Trailer Coords"],
+            "Distance (mi)": row["Distance (mi)"],
+            "Confidence": row["Confidence"],
+            "History Hits": row["History Hits"],
+            "On Board": row["On Board"],
+            "Trailer Yard": row["Trailer Yard"],
+            "Truck Yard": row["Truck Yard"],
+            "Reasons": row["Reasons"],
+        })
+
+    edited_rows = st.data_editor(
+        editor_rows,
+        use_container_width=True,
+        hide_index=True,
+        disabled=[
+            "Match ID",
+            "Trailer",
+            "Truck",
+            "Truck Coords",
+            "Trailer Coords",
+            "Distance (mi)",
+            "Confidence",
+            "History Hits",
+            "On Board",
+            "Trailer Yard",
+            "Truck Yard",
+            "Reasons",
+        ],
+        column_config={
+            "Decision": st.column_config.SelectboxColumn(
+                "Decision",
+                options=["Pending", "Confirmed", "Rejected"],
+                required=True,
+                help="Mark whether your Anytrek coordinate check agrees with the auto-match.",
+            ),
+            "Reviewer Note": st.column_config.TextColumn(
+                "Reviewer Note",
+                help="Optional note, especially useful for rejected matches.",
+            ),
+            "Distance (mi)": st.column_config.NumberColumn("Distance (mi)", format="%.3f"),
+            "History Hits": st.column_config.NumberColumn("History Hits", format="%d"),
+        },
+        key="gps_match_review_editor",
+    )
+
+    for row in edited_rows:
+        review_state[row["Match ID"]] = {
+            "Decision": row.get("Decision", "Pending"),
+            "Reviewer Note": row.get("Reviewer Note", ""),
+        }
+
+    artifact_rows = _build_review_artifact_rows(match_rows, review_state, selected_div=selected_div)
+    reviewed_count = sum(1 for row in artifact_rows if row["decision"] != "Pending")
+    rejected_count = sum(1 for row in artifact_rows if row["decision"] == "Rejected")
+    confirmed_count = sum(1 for row in artifact_rows if row["decision"] == "Confirmed")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Reviewed", reviewed_count)
+    c2.metric("Confirmed", confirmed_count)
+    c3.metric("Rejected", rejected_count)
+    c4.metric("Pending", len(artifact_rows) - reviewed_count)
+
+    reviewed_artifact_rows = [row for row in artifact_rows if row["decision"] != "Pending"]
+    if reviewed_artifact_rows:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        csv_data = _rows_to_csv(reviewed_artifact_rows)
+        json_data = json.dumps(reviewed_artifact_rows, indent=2, default=str)
+        d1, d2 = st.columns(2)
+        d1.download_button(
+            "Download reviewed matches CSV",
+            data=csv_data,
+            file_name=f"gps_match_review_{timestamp}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+        d2.download_button(
+            "Download reviewed matches JSON",
+            data=json_data,
+            file_name=f"gps_match_review_{timestamp}.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+    else:
+        st.info("Confirm or reject at least one auto-match to generate a downloadable review artifact.")
+
+
+def _build_match_review_rows(matches: list[MatchResult]) -> list[dict[str, object]]:
+    rows = []
+    for m in matches:
+        rows.append({
+            "Match ID": f"{m.trailer.asset_id}__{m.truck.asset_id}",
+            "Trailer": m.trailer.asset_id,
+            "Truck": m.truck.asset_id,
+            "Truck Coords": _coords(m.truck),
+            "Trailer Coords": _coords(m.trailer),
+            "Distance (mi)": m.distance_miles,
+            "Confidence": f"{m.confidence:.0%}",
+            "History Hits": m.history_hits,
+            "On Board": "Yes" if m.on_board else "No",
+            "Trailer Yard": m.trailer_yard,
+            "Truck Yard": m.truck_yard,
+            "Reasons": ", ".join(m.reasons),
+            "Truck Provider": m.truck.provider,
+            "Trailer Provider": m.trailer.provider,
+            "Truck Address": m.truck.address,
+            "Trailer Address": m.trailer.address,
+            "Truck Division": m.truck.division,
+            "Trailer Division": m.trailer.division,
+        })
+    return rows
+
+
+def _render_match_copy_grid(rows: list[dict[str, object]]) -> None:
+    table_rows = []
+    for row in rows:
+        truck_coords = str(row.get("Truck Coords") or "")
+        trailer_coords = str(row.get("Trailer Coords") or "")
+        truck_coords_js = truck_coords.replace("\\", "\\\\").replace("'", "\\'")
+        trailer_coords_js = trailer_coords.replace("\\", "\\\\").replace("'", "\\'")
+        table_rows.append(
+            "<tr>"
+            f"<td>{escape(str(row.get('Trailer') or ''))}</td>"
+            f"<td>{escape(str(row.get('Truck') or ''))}</td>"
+            f"<td><button onclick=\"copyCoords('{truck_coords_js}', this)\">Copy truck</button></td>"
+            f"<td class='coords'>{escape(truck_coords)}</td>"
+            f"<td><button onclick=\"copyCoords('{trailer_coords_js}', this)\">Copy trailer</button></td>"
+            f"<td class='coords'>{escape(trailer_coords)}</td>"
+            f"<td>{escape(str(row.get('Distance (mi)') or ''))}</td>"
+            f"<td>{escape(str(row.get('Confidence') or ''))}</td>"
+            f"<td>{escape(str(row.get('History Hits') or ''))}</td>"
+            f"<td>{escape(str(row.get('On Board') or ''))}</td>"
+            f"<td title='{escape(str(row.get('Reasons') or ''))}'>{escape(str(row.get('Reasons') or ''))}</td>"
+            "</tr>"
+        )
+    html = f"""
+    <style>
+      body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; }}
+      .wrap {{ max-height: 320px; overflow: auto; border: 1px solid #2f3b4a; border-radius: 8px; }}
+      table {{ border-collapse: collapse; width: 100%; font-size: 13px; color: #f3f6fb; background: #0e1117; }}
+      th, td {{ border-bottom: 1px solid #283241; padding: 7px 8px; text-align: left; white-space: nowrap; }}
+      th {{ position: sticky; top: 0; background: #1f2937; z-index: 1; }}
+      tr:hover {{ background: #172033; }}
+      button {{ cursor: pointer; border: 0; border-radius: 6px; padding: 5px 9px; background: #2563eb; color: white; font-weight: 600; }}
+      .coords {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
+    </style>
+    <script>
+      async function copyCoords(coords, btn) {{
+        try {{
+          await navigator.clipboard.writeText(coords);
+          const old = btn.innerText;
+          btn.innerText = 'Copied';
+          setTimeout(() => btn.innerText = old, 1200);
+        }} catch (err) {{
+          btn.innerText = 'Select coords';
+        }}
+      }}
+    </script>
+    <div class="wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Trailer</th><th>Truck</th><th>Copy Truck</th><th>Truck Coords</th>
+            <th>Copy Trailer</th><th>Trailer Coords</th><th>Dist</th><th>Conf</th><th>Hist</th><th>Board</th><th>Reasons</th>
+          </tr>
+        </thead>
+        <tbody>{''.join(table_rows)}</tbody>
+      </table>
+    </div>
+    """
+    components.html(html, height=350, scrolling=False)
+
+
+def _build_review_artifact_rows(
+    match_rows: list[dict[str, object]],
+    review_state: dict[str, dict[str, str]],
+    *,
+    selected_div: str | None,
+) -> list[dict[str, object]]:
+    reviewed_at = datetime.now(timezone.utc).isoformat()
+    out = []
+    for row in match_rows:
+        state = review_state.get(str(row["Match ID"]), {})
+        out.append({
+            "reviewed_at_utc": reviewed_at,
+            "division_filter": selected_div or "All",
+            "decision": state.get("Decision", "Pending"),
+            "reviewer_note": state.get("Reviewer Note", ""),
+            "match_id": row["Match ID"],
+            "trailer": row["Trailer"],
+            "truck": row["Truck"],
+            "truck_coords": row["Truck Coords"],
+            "trailer_coords": row["Trailer Coords"],
+            "distance_miles": row["Distance (mi)"],
+            "confidence": row["Confidence"],
+            "history_hits": row["History Hits"],
+            "on_board": row["On Board"],
+            "trailer_yard": row["Trailer Yard"],
+            "truck_yard": row["Truck Yard"],
+            "reasons": row["Reasons"],
+            "truck_provider": row["Truck Provider"],
+            "trailer_provider": row["Trailer Provider"],
+            "truck_address": row["Truck Address"],
+            "trailer_address": row["Trailer Address"],
+            "truck_division": row["Truck Division"],
+            "trailer_division": row["Trailer Division"],
+        })
+    return out
+
+
+def _rows_to_csv(rows: list[dict[str, object]]) -> str:
+    if not rows:
+        return ""
+    buffer = StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=list(rows[0].keys()))
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue()
 
 
 def _build_historical_usage_rows(
