@@ -301,13 +301,120 @@ def _render_timeline_tab(assets: list[Asset], max_dist: float) -> None:
             return
 
         # Store in session for display
-        st.session_state["timeline_segments"] = segments
+        consolidated = _consolidate_timeline(segments)
+        st.session_state["timeline_segments"] = consolidated
         st.session_state["timeline_selected_unit"] = f"{unit_type}:{unit_id}"
 
     # Display timeline if available
     if "timeline_segments" in st.session_state:
         segments = st.session_state["timeline_segments"]
         _render_timeline_visual(segments)
+
+
+def _consolidate_timeline(segments: list[TimelineSegment], *, max_absorb_hours: int = 2) -> list[TimelineSegment]:
+    """Merge consecutive same-partner hours and absorb short interruptions.
+
+    Logic:
+    - Consecutive hours with the same partner merge into one segment.
+    - If partner A runs for N hours, then a *different* partner B appears for
+      ≤ max_absorb_hours, then A resumes — B is absorbed into A's run.
+    - Yard visits are NEVER absorbed; they act as hard streak-breakers.
+    - After absorption, consecutive same-partner runs are merged again.
+
+    This keeps the timeline clean without hiding real assignment changes.
+    """
+    if len(segments) <= 1:
+        return list(segments)
+
+    # --- Pass 1: absorb short interruptions ---
+    absorbed: list[TimelineSegment] = list(segments)
+    changed = True
+    while changed:
+        changed = False
+        new: list[TimelineSegment] = []
+        i = 0
+        while i < len(absorbed):
+            seg = absorbed[i]
+            # Look ahead: is this a short non-yard interruption between the same partner?
+            if (
+                seg.partner_type not in ("yard", "gap")
+                and i >= 1
+                and i + 1 < len(absorbed)
+            ):
+                prev = new[-1] if new else None
+                nxt = absorbed[i + 1]
+                interruption_hours = seg.duration_minutes / 60.0
+                if (
+                    prev is not None
+                    and prev.partner_type not in ("yard", "gap")
+                    and nxt.partner_type not in ("yard", "gap")
+                    and prev.partner_id == nxt.partner_id
+                    and prev.partner_id != seg.partner_id
+                    and interruption_hours <= max_absorb_hours
+                    and seg.partner_type != "yard"
+                ):
+                    # Absorb: replace this segment with the dominant partner
+                    absorbed_seg = TimelineSegment(
+                        unit_id=seg.unit_id,
+                        unit_type=seg.unit_type,
+                        partner_id=prev.partner_id,
+                        partner_type=prev.partner_type,
+                        start=seg.start,
+                        end=seg.end,
+                        duration_minutes=seg.duration_minutes,
+                        avg_distance_miles=seg.avg_distance_miles,
+                        bucket_count=seg.bucket_count,
+                        confidence=seg.confidence * 0.5,  # lower confidence for absorbed hours
+                    )
+                    new.append(absorbed_seg)
+                    changed = True
+                    i += 1
+                    continue
+            new.append(seg)
+            i += 1
+        absorbed = new
+
+    # --- Pass 2: merge consecutive same-partner segments ---
+    merged: list[TimelineSegment] = [absorbed[0]]
+    for seg in absorbed[1:]:
+        prev = merged[-1]
+        if (
+            prev.partner_id == seg.partner_id
+            and prev.partner_type == seg.partner_type
+            and prev.partner_type not in ("gap",)
+        ):
+            # Merge into previous
+            total_minutes = prev.duration_minutes + seg.duration_minutes
+            total_buckets = prev.bucket_count + seg.bucket_count
+            # Weighted average distance and confidence
+            if total_minutes > 0:
+                avg_dist = (
+                    prev.avg_distance_miles * prev.duration_minutes
+                    + seg.avg_distance_miles * seg.duration_minutes
+                ) / total_minutes
+                avg_conf = (
+                    prev.confidence * prev.duration_minutes
+                    + seg.confidence * seg.duration_minutes
+                ) / total_minutes
+            else:
+                avg_dist = seg.avg_distance_miles
+                avg_conf = seg.confidence
+            merged[-1] = TimelineSegment(
+                unit_id=prev.unit_id,
+                unit_type=prev.unit_type,
+                partner_id=prev.partner_id,
+                partner_type=prev.partner_type,
+                start=prev.start,
+                end=seg.end,
+                duration_minutes=round(total_minutes, 1),
+                avg_distance_miles=round(avg_dist, 3),
+                bucket_count=total_buckets,
+                confidence=round(avg_conf, 3),
+            )
+        else:
+            merged.append(seg)
+
+    return merged
 
 
 def _render_timeline_visual(segments: list[TimelineSegment]) -> None:
