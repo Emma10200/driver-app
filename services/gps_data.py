@@ -105,6 +105,59 @@ def load_assignments() -> dict[str, str]:
     return {r["truck_id"]: r["trailer_id"] for r in rows if r.get("truck_id")}
 
 
+def load_unit_timeline_history(
+    unit_id: str,
+    start: datetime,
+    end: datetime,
+) -> list[Asset]:
+    """Load history for a specific unit AND all potential partners in its time range.
+
+    This is optimized for the timeline view: we need the selected unit's full
+    trail plus all other assets in the same time window to determine pairings.
+    Uses server-side time filtering for speed.
+    """
+    try:
+        client = _get_client()
+    except Exception as e:
+        logger.warning("GPS history unavailable: %s", e)
+        return []
+
+    start = _ensure_aware(start)
+    end = _ensure_aware(end)
+    filters: dict[str, Any] = {
+        "and": f"(recorded_at.gte.{start.isoformat()},recorded_at.lte.{end.isoformat()})",
+    }
+
+    rows = client.select_all(
+        "assets_history",
+        filters=filters,
+        order="recorded_at.asc",
+        page_size=1000,
+        hard_cap=500000,
+    )
+    history = [_history_row_to_asset(r) for r in rows]
+    return [p for p in history if p.last_ping is not None]
+
+
+def load_all_unit_ids() -> dict[str, list[str]]:
+    """Return all known unit IDs grouped by type from assets_current."""
+    try:
+        client = _get_client()
+    except Exception:
+        return {"truck": [], "trailer": []}
+
+    rows = client.select("assets_current", select="asset_type,asset_id")
+    result: dict[str, list[str]] = {"truck": [], "trailer": []}
+    for r in rows:
+        atype = r.get("asset_type", "")
+        aid = r.get("asset_id", "")
+        if atype in result and aid:
+            result[atype].append(aid)
+    for v in result.values():
+        v.sort()
+    return result
+
+
 def load_match_reviews(match_ids: list[str]) -> dict[str, dict[str, Any]]:
     """Load saved review decisions keyed by match_id."""
     if not match_ids:

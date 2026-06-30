@@ -631,3 +631,154 @@ def compute_historical_usage(
 
     out.sort(key=lambda r: (-r.confidence, -r.hits, r.truck_id, r.trailer_id))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Unit timeline: assignment history for a single truck or trailer
+# ---------------------------------------------------------------------------
+@dataclass
+class TimelineSegment:
+    """One segment in a unit's assignment timeline."""
+    unit_id: str           # The selected unit
+    unit_type: str         # 'truck' or 'trailer'
+    partner_id: str        # Matched partner ID (or 'YARD' or 'UNMATCHED')
+    partner_type: str      # 'truck', 'trailer', 'yard', 'gap'
+    start: datetime
+    end: datetime
+    duration_minutes: float
+    avg_distance_miles: float
+    bucket_count: int
+    confidence: float
+
+
+def compute_unit_timeline(
+    unit_id: str,
+    unit_type: str,
+    history: Sequence[Asset],
+    *,
+    max_distance_miles: float = 0.5,
+    division_filter: str | None = None,
+) -> list[TimelineSegment]:
+    """Compute the assignment timeline for a single unit.
+
+    Returns a time-ordered list of segments showing which partner the unit
+    was paired with at each period, with yard visits as explicit breaks.
+
+    Logic:
+    - For each time bucket where the unit exists, find the closest opposite-type
+      asset within *max_distance_miles*.
+    - If the unit is in a yard, mark as 'YARD' (assignment boundary).
+    - Consecutive buckets with the same partner merge into one segment.
+    - Gaps (no nearby partner, not in yard) merge as 'UNMATCHED'.
+    """
+    time_index = _build_time_index(history, division_filter)
+    unit_key = f"{unit_type}:{unit_id}"
+    opposite_type = "truck" if unit_type == "trailer" else "trailer"
+    opposite_prefix = f"{opposite_type}:"
+
+    # Gather all buckets where this unit appears, sorted chronologically
+    unit_buckets: list[tuple[str, str, float]] = []
+    # (bucket_key, partner_id_or_YARD/UNMATCHED, distance)
+
+    for bucket_key in sorted(time_index.keys()):
+        assets = time_index[bucket_key]
+        if unit_key not in assets:
+            continue
+        u_lat, u_lon, _, _ = assets[unit_key]
+
+        # Check if unit is in a yard
+        yard = in_yard(u_lat, u_lon)
+        if yard:
+            unit_buckets.append((bucket_key, f"YARD:{yard}", 0.0))
+            continue
+
+        # Find closest opposite-type asset
+        best_partner: str | None = None
+        best_dist: float = max_distance_miles + 1
+
+        for asset_key, (a_lat, a_lon, _, _) in assets.items():
+            if not asset_key.startswith(opposite_prefix):
+                continue
+            # Skip partners that are also in a yard
+            if in_yard(a_lat, a_lon):
+                continue
+            dist = haversine_miles(u_lat, u_lon, a_lat, a_lon)
+            if dist <= max_distance_miles and dist < best_dist:
+                best_dist = dist
+                best_partner = asset_key.split(":", 1)[1]
+
+        if best_partner:
+            unit_buckets.append((bucket_key, best_partner, best_dist))
+        else:
+            unit_buckets.append((bucket_key, "UNMATCHED", 0.0))
+
+    if not unit_buckets:
+        return []
+
+    # Merge consecutive buckets with the same partner into segments
+    segments: list[TimelineSegment] = []
+    current_partner = unit_buckets[0][1]
+    current_start = unit_buckets[0][0]
+    current_dists: list[float] = [unit_buckets[0][2]]
+    current_count = 1
+
+    def _flush_segment(partner: str, start_key: str, end_key: str, dists: list[float], count: int) -> None:
+        start_dt = _bucket_to_datetime(start_key)
+        end_dt = _bucket_to_datetime(end_key) + timedelta(minutes=_BUCKET_MINUTES)
+        duration = (end_dt - start_dt).total_seconds() / 60
+
+        if partner.startswith("YARD:"):
+            p_type = "yard"
+            p_id = partner.split(":", 1)[1]
+        elif partner == "UNMATCHED":
+            p_type = "gap"
+            p_id = "UNMATCHED"
+        else:
+            p_type = opposite_type
+            p_id = partner
+
+        avg_dist = sum(dists) / len(dists) if dists else 0.0
+        # Confidence for partnered segments
+        if p_type in ("yard", "gap"):
+            conf = 0.0
+        else:
+            # More buckets + tighter distance = higher confidence
+            dist_quality = max(0.0, 1.0 - (avg_dist / max_distance_miles))
+            duration_quality = min(1.0, duration / 60.0)  # 1h+ = full credit
+            conf = 0.5 * duration_quality + 0.5 * dist_quality
+
+        segments.append(TimelineSegment(
+            unit_id=unit_id,
+            unit_type=unit_type,
+            partner_id=p_id,
+            partner_type=p_type,
+            start=start_dt,
+            end=end_dt,
+            duration_minutes=round(duration, 1),
+            avg_distance_miles=round(avg_dist, 3),
+            bucket_count=count,
+            confidence=round(conf, 3),
+        ))
+
+    for i in range(1, len(unit_buckets)):
+        bucket_key, partner, dist = unit_buckets[i]
+        prev_time = _bucket_to_datetime(unit_buckets[i - 1][0])
+        curr_time = _bucket_to_datetime(bucket_key)
+        gap_minutes = (curr_time - prev_time).total_seconds() / 60
+
+        # Same partner and no large time gap → extend current segment
+        if partner == current_partner and gap_minutes <= 30:
+            current_dists.append(dist)
+            current_count += 1
+        else:
+            # Close current segment
+            _flush_segment(current_partner, current_start, unit_buckets[i - 1][0], current_dists, current_count)
+            current_partner = partner
+            current_start = bucket_key
+            current_dists = [dist]
+            current_count = 1
+
+    # Close final segment
+    _flush_segment(current_partner, current_start, unit_buckets[-1][0], current_dists, current_count)
+
+    return segments

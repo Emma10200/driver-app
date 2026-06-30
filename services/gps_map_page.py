@@ -16,19 +16,23 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from services.gps_data import (
+    load_all_unit_ids,
     load_assignments,
     load_asset_history,
     load_asset_history_range,
     load_current_assets,
     load_match_reviews,
     load_recent_match_reviews,
+    load_unit_timeline_history,
     save_match_reviews,
 )
 from services.gps_matching import (
     Asset,
     MatchResult,
+    TimelineSegment,
     compute_historical_usage,
     compute_matches,
+    compute_unit_timeline,
     in_yard,
     YARD_BOXES,
 )
@@ -37,8 +41,8 @@ from services.gps_matching import (
 def render_gps_map_page() -> None:
     st.header("GPS Fleet Map & Trailer Matching")
 
-    # --- Load data ---
-    with st.spinner("Loading asset positions..."):
+    # --- Load FAST data first (current positions only) ---
+    with st.spinner("Loading positions..."):
         assets = load_current_assets()
         assignments = load_assignments()
 
@@ -49,59 +53,99 @@ def render_gps_map_page() -> None:
     trucks = [a for a in assets if a.asset_type == "truck"]
     trailers = [a for a in assets if a.asset_type == "trailer"]
 
-    # --- Sidebar filters ---
-    st.sidebar.subheader("Filters")
+    # --- Sidebar: toggles for companies + providers ---
+    st.sidebar.subheader("Visibility")
     divisions = sorted({a.division for a in assets if a.division})
-    div_filter = st.sidebar.selectbox("Division", ["All"] + divisions)
-    selected_div = None if div_filter == "All" else div_filter
+    providers = sorted({a.provider for a in assets if a.provider})
 
+    # Company toggles
+    st.sidebar.caption("**Companies**")
+    active_divs: set[str] = set()
+    for div in divisions:
+        if st.sidebar.checkbox(div, value=True, key=f"div_{div}"):
+            active_divs.add(div)
+    # Include assets with empty division if any company is checked
+    show_no_div = st.sidebar.checkbox("(No division)", value=True, key="div_none")
+
+    # Provider toggles
+    st.sidebar.caption("**GPS Providers**")
+    active_providers: set[str] = set()
+    for prov in providers:
+        short = prov.split("(")[0].strip() if "(" in prov else prov
+        if st.sidebar.checkbox(short, value=True, key=f"prov_{prov}"):
+            active_providers.add(prov)
+
+    st.sidebar.subheader("Matching")
     max_dist = st.sidebar.slider("Match radius (miles)", 0.1, 5.0, 0.5, 0.1)
     max_stale = st.sidebar.slider("Max stale (minutes)", 15, 240, 60, 15)
-    history_hours = st.sidebar.slider("History lookback (hours)", 12, 96, 48, 12)
+    history_hours = st.sidebar.slider("History lookback (hours)", 12, 168, 48, 12)
     min_history_hits = st.sidebar.slider("Min route hits", 1, 6, 2, 1)
-    st.sidebar.subheader("Historical Usage")
-    today = date.today()
-    usage_start = st.sidebar.date_input("Usage from", value=today - timedelta(days=7))
-    usage_end = st.sidebar.date_input("Usage to", value=today - timedelta(days=1))
-    usage_min_hits = st.sidebar.slider("Usage min hits", 1, 10, 2, 1)
-
-    show_trucks = st.sidebar.checkbox("Show trucks", True)
-    show_trailers = st.sidebar.checkbox("Show trailers", True)
-    show_matches = st.sidebar.checkbox("Show match lines", True)
     unit_search = st.sidebar.text_input("Search units", placeholder="Unit, provider, address, VIN...")
 
-    with st.spinner("Loading recent GPS history..."):
-        history = load_asset_history(hours=history_hours, division=selected_div)
+    # --- Filter assets by toggles ---
+    def _visible(a: Asset) -> bool:
+        if a.division:
+            if a.division not in active_divs:
+                return False
+        elif not show_no_div:
+            return False
+        if a.provider and a.provider not in active_providers:
+            return False
+        return True
 
-    usage_start_dt = datetime.combine(usage_start, time.min, tzinfo=timezone.utc)
-    usage_end_dt = datetime.combine(usage_end, time.max, tzinfo=timezone.utc)
-    if usage_end_dt < usage_start_dt:
-        usage_start_dt, usage_end_dt = usage_end_dt, usage_start_dt
+    visible_trucks = [t for t in trucks if _visible(t)]
+    visible_trailers = [t for t in trailers if _visible(t)]
+    visible_assets = [a for a in assets if _visible(a)]
 
-    with st.spinner("Loading historical usage range..."):
-        usage_history = load_asset_history_range(usage_start_dt, usage_end_dt, division=selected_div)
+    # --- Metrics (instant) ---
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Trucks", len(visible_trucks))
+    col2.metric("Trailers", len(visible_trailers))
+    col3.metric("Divisions", len(active_divs))
+    col4.metric("Providers", len(active_providers))
 
-    # --- Compute matches ---
-    matches = compute_matches(
-        trucks,
-        trailers,
-        assignments,
-        history,
-        max_distance_miles=max_dist,
-        max_stale_minutes=max_stale,
-        min_history_hits=min_history_hits,
-        division_filter=selected_div,
-    )
+    # --- Map (renders FIRST with just current positions) ---
+    _render_map(visible_trucks, visible_trailers, divisions, assignments)
 
-    # --- Metrics ---
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Trucks", len(trucks))
-    col2.metric("Trailers", len(trailers))
-    col3.metric("Auto-Matches", len(matches))
-    col4.metric("Board Agrees", sum(1 for m in matches if m.on_board))
-    col5.metric("History Rows", len(history))
+    # --- Tabs for heavy content ---
+    tab_fleet, tab_timeline, tab_matches, tab_history, tab_review = st.tabs([
+        "Fleet Overview", "Unit Timeline", "Auto-Matches", "Historical Usage", "Match Review",
+    ])
 
-    # --- Map (pydeck) ---
+    with tab_fleet:
+        with st.expander("All Found Units", expanded=True):
+            unit_rows = _build_unit_rows(visible_assets, [], assignments, None, unit_search)
+            if unit_rows:
+                _render_copy_grid(unit_rows)
+            else:
+                st.info("No units match the current filters.")
+
+    with tab_timeline:
+        _render_timeline_tab(visible_assets, max_dist)
+
+    with tab_matches:
+        _render_matches_tab(
+            visible_trucks, visible_trailers, assignments,
+            history_hours, min_history_hits, max_dist, max_stale, active_divs,
+        )
+
+    with tab_history:
+        _render_history_tab(max_dist, active_divs)
+
+    with tab_review:
+        _render_review_tab(
+            visible_trucks, visible_trailers, assignments,
+            history_hours, min_history_hits, max_dist, max_stale, active_divs,
+        )
+
+
+def _render_map(
+    trucks: list[Asset],
+    trailers: list[Asset],
+    divisions: list[str],
+    assignments: dict[str, str],
+) -> None:
+    """Render the pydeck map with current positions only (fast)."""
     try:
         import pydeck as pdk
     except ImportError:
@@ -111,175 +155,379 @@ def render_gps_map_page() -> None:
     layers = []
     division_colors = _division_color_map(divisions)
 
-    # Truck layer
-    if show_trucks:
-        truck_data = [
-            {
-                "lat": t.lat,
-                "lon": t.lon,
-                "id": t.asset_id,
-                "division": t.division,
-                "provider": t.provider,
-                "address": t.address,
-                "coords": _coords(t),
-                "color": _truck_color(t.division, division_colors),
-                "asset_type": "Truck",
-            }
-            for t in trucks
-            if _has_coords(t) and (selected_div is None or t.division == selected_div)
-        ]
-        if truck_data:
-            layers.append(pdk.Layer(
-                "ScatterplotLayer",
-                data=truck_data,
-                get_position=["lon", "lat"],
-                get_radius=450,
-                radius_min_pixels=8,
-                radius_max_pixels=26,
-                get_fill_color="color",
-                stroked=True,
-                get_line_color=[255, 255, 255, 220],
-                get_line_width=2,
-                pickable=True,
-                auto_highlight=True,
-            ))
+    truck_data = [
+        {
+            "lat": t.lat, "lon": t.lon, "id": t.asset_id,
+            "division": t.division, "provider": t.provider,
+            "address": t.address, "coords": _coords(t),
+            "color": _truck_color(t.division, division_colors),
+            "asset_type": "Truck",
+        }
+        for t in trucks if _has_coords(t)
+    ]
+    if truck_data:
+        layers.append(pdk.Layer(
+            "ScatterplotLayer", data=truck_data,
+            get_position=["lon", "lat"], get_radius=450,
+            radius_min_pixels=8, radius_max_pixels=26,
+            get_fill_color="color", stroked=True,
+            get_line_color=[255, 255, 255, 220], get_line_width=2,
+            pickable=True, auto_highlight=True,
+        ))
 
-    # Trailer layer
-    if show_trailers:
-        trailer_data = [
-            {
-                "lat": t.lat,
-                "lon": t.lon,
-                "id": t.asset_id,
-                "division": t.division,
-                "provider": t.provider,
-                "address": t.address,
-                "coords": _coords(t),
-                "in_yard": in_yard(t.lat, t.lon) or "",
-                "color": [255, 140, 0, 230],
-                "asset_type": "Trailer",
-            }
-            for t in trailers
-            if _has_coords(t) and (selected_div is None or t.division == selected_div)
-        ]
-        if trailer_data:
-            layers.append(pdk.Layer(
-                "ScatterplotLayer",
-                data=trailer_data,
-                get_position=["lon", "lat"],
-                get_radius=400,
-                radius_min_pixels=7,
-                radius_max_pixels=24,
-                get_fill_color="color",
-                stroked=True,
-                get_line_color=[255, 255, 255, 220],
-                get_line_width=2,
-                pickable=True,
-                auto_highlight=True,
-            ))
+    trailer_data = [
+        {
+            "lat": t.lat, "lon": t.lon, "id": t.asset_id,
+            "division": t.division, "provider": t.provider,
+            "address": t.address, "coords": _coords(t),
+            "in_yard": in_yard(t.lat, t.lon) or "",
+            "color": [255, 140, 0, 230], "asset_type": "Trailer",
+        }
+        for t in trailers if _has_coords(t)
+    ]
+    if trailer_data:
+        layers.append(pdk.Layer(
+            "ScatterplotLayer", data=trailer_data,
+            get_position=["lon", "lat"], get_radius=400,
+            radius_min_pixels=7, radius_max_pixels=24,
+            get_fill_color="color", stroked=True,
+            get_line_color=[255, 255, 255, 220], get_line_width=2,
+            pickable=True, auto_highlight=True,
+        ))
 
-    # Match lines
-    if show_matches and matches:
-        line_data = [
-            {
-                "from_lat": m.trailer.lat,
-                "from_lon": m.trailer.lon,
-                "to_lat": m.truck.lat,
-                "to_lon": m.truck.lon,
-                "confidence": m.confidence,
-                "trailer": m.trailer.asset_id,
-                "truck": m.truck.asset_id,
-                "id": f"Trailer {m.trailer.asset_id} ↔ Truck {m.truck.asset_id}",
-                "coords": f"{_coords(m.trailer)} → {_coords(m.truck)}",
-                "address": f"{m.distance_miles:.3f} mi | {m.confidence:.0%} confidence",
-                "division": m.truck.division or m.trailer.division,
-                "provider": "Auto-match line",
-                "asset_type": "Match",
-            }
-            for m in matches
-            if _has_coords(m.trailer) and _has_coords(m.truck)
-        ]
-        if line_data:
-            layers.append(pdk.Layer(
-                "LineLayer",
-                data=line_data,
-                get_source_position=["from_lon", "from_lat"],
-                get_target_position=["to_lon", "to_lat"],
-                get_color=[50, 205, 50, 180],  # limegreen
-                get_width=3,
-                pickable=True,
-            ))
-
-    # Compute map center
-    all_lats = [a.lat for a in assets if _has_coords(a) and (selected_div is None or a.division == selected_div)]
-    all_lons = [a.lon for a in assets if _has_coords(a) and (selected_div is None or a.division == selected_div)]
-
-    if all_lats and all_lons:
-        center_lat = sum(all_lats) / len(all_lats)
-        center_lon = sum(all_lons) / len(all_lons)
+    all_coords = truck_data + trailer_data
+    if all_coords:
+        center_lat = sum(d["lat"] for d in all_coords) / len(all_coords)
+        center_lon = sum(d["lon"] for d in all_coords) / len(all_coords)
     else:
-        center_lat, center_lon = 39.8, -89.6  # US center fallback
-
-    view_state = pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=5, pitch=0)
+        center_lat, center_lon = 39.8, -89.6
 
     deck = pdk.Deck(
         layers=layers,
-        initial_view_state=view_state,
+        initial_view_state=pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=5, pitch=0),
         tooltip={
             "html": "<b>{asset_type}: {id}</b><br/>{coords}<br/>{address}<br/>{division}<br/>{provider}",
             "style": {"backgroundColor": "#1f2937", "color": "#e5e7eb"},
         },
         map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
     )
-
     st.pydeck_chart(deck)
     _render_map_legend(division_colors)
 
-    # --- All units table + coordinate copy controls ---
-    unit_rows = _build_unit_rows(assets, matches, assignments, selected_div, unit_search)
-    st.subheader("All Found Units")
+
+def _render_timeline_tab(assets: list[Asset], max_dist: float) -> None:
+    """Unit timeline: select a unit and see who it was paired with over time."""
+    st.subheader("Unit Assignment Timeline")
     st.caption(
-        "Every truck and trailer currently in Supabase is listed here, even if no auto-match was found. "
-        "Use the copy buttons to paste coordinates into GPSTab/888/EROAD/Anytrek dashboards."
+        "Select a truck or trailer to see its historical pairings. "
+        "Yard visits act as assignment boundaries — entering the yard ends one pairing."
     )
 
-    if unit_rows:
-        _render_copy_grid(unit_rows)
-    else:
-        st.info("No units match the current filters/search.")
+    # Unit selector
+    all_ids = sorted(
+        [(a.asset_type, a.asset_id) for a in assets],
+        key=lambda x: (x[0], _unit_sort_key(x[1])),
+    )
+    unit_options = [f"{atype.title()}: {aid}" for atype, aid in all_ids]
 
-    # --- Match table ---
+    if not unit_options:
+        st.info("No units available.")
+        return
+
+    selected = st.selectbox("Select unit", unit_options, key="timeline_unit")
+    if not selected:
+        return
+
+    parts = selected.split(": ", 1)
+    unit_type = parts[0].lower()
+    unit_id = parts[1]
+
+    # Date range
+    today = date.today()
+    col1, col2 = st.columns(2)
+    with col1:
+        tl_start = st.date_input("From", value=today - timedelta(days=7), key="tl_start")
+    with col2:
+        tl_end = st.date_input("To", value=today, key="tl_end")
+
+    if st.button("Compute Timeline", type="primary", key="tl_compute"):
+        start_dt = datetime.combine(tl_start, time.min, tzinfo=timezone.utc)
+        end_dt = datetime.combine(tl_end, time.max, tzinfo=timezone.utc)
+        if end_dt < start_dt:
+            start_dt, end_dt = end_dt, start_dt
+
+        with st.spinner(f"Loading history for {unit_id} ({(end_dt - start_dt).days} days)..."):
+            history = load_unit_timeline_history(unit_id, start_dt, end_dt)
+
+        if not history:
+            st.warning("No history found for this unit in the selected range.")
+            return
+
+        st.info(f"Loaded {len(history)} history points. Computing timeline...")
+        segments = compute_unit_timeline(
+            unit_id, unit_type, history, max_distance_miles=max_dist,
+        )
+
+        if not segments:
+            st.warning("No timeline segments found (unit may have no GPS data in this range).")
+            return
+
+        # Store in session for display
+        st.session_state["timeline_segments"] = segments
+        st.session_state["timeline_unit"] = f"{unit_type}:{unit_id}"
+
+    # Display timeline if available
+    if "timeline_segments" in st.session_state:
+        segments = st.session_state["timeline_segments"]
+        _render_timeline_visual(segments)
+
+
+def _render_timeline_visual(segments: list[TimelineSegment]) -> None:
+    """Render the timeline as a visual HTML bar + summary table."""
+    if not segments:
+        return
+
+    # --- Summary stats ---
+    partner_segments = [s for s in segments if s.partner_type not in ("yard", "gap")]
+    yard_segments = [s for s in segments if s.partner_type == "yard"]
+    gap_segments = [s for s in segments if s.partner_type == "gap"]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Paired Segments", len(partner_segments))
+    c2.metric("Yard Visits", len(yard_segments))
+    c3.metric("Gaps", len(gap_segments))
+    total_paired_hrs = sum(s.duration_minutes for s in partner_segments) / 60
+    c4.metric("Total Paired", f"{total_paired_hrs:.1f}h")
+
+    # --- Visual timeline bar (HTML) ---
+    _COLORS = {
+        "yard": "#f59e0b",      # amber
+        "gap": "#6b7280",       # gray
+    }
+    _PARTNER_COLORS = [
+        "#3b82f6", "#10b981", "#8b5cf6", "#ec4899",
+        "#06b6d4", "#f97316", "#6366f1", "#14b8a6",
+    ]
+    # Assign colors to partners
+    unique_partners = list(dict.fromkeys(
+        s.partner_id for s in segments if s.partner_type not in ("yard", "gap")
+    ))
+    partner_color_map = {p: _PARTNER_COLORS[i % len(_PARTNER_COLORS)] for i, p in enumerate(unique_partners)}
+
+    total_minutes = sum(s.duration_minutes for s in segments)
+    if total_minutes <= 0:
+        total_minutes = 1
+
+    bar_items = []
+    for seg in segments:
+        pct = max(0.5, (seg.duration_minutes / total_minutes) * 100)
+        if seg.partner_type == "yard":
+            color = _COLORS["yard"]
+            label = f"🅿️ {seg.partner_id}"
+        elif seg.partner_type == "gap":
+            color = _COLORS["gap"]
+            label = "—"
+        else:
+            color = partner_color_map.get(seg.partner_id, "#3b82f6")
+            label = seg.partner_id
+
+        title = f"{seg.partner_id}: {seg.start.strftime('%m/%d %H:%M')}–{seg.end.strftime('%H:%M')} ({seg.duration_minutes:.0f}min)"
+        bar_items.append(
+            f"<div style='flex:{pct};background:{color};padding:2px 4px;overflow:hidden;"
+            f"white-space:nowrap;font-size:11px;color:#fff;border-right:1px solid #0e1117;'"
+            f" title='{escape(title)}'>{escape(label)}</div>"
+        )
+
+    bar_html = (
+        "<div style='display:flex;height:32px;border-radius:6px;overflow:hidden;"
+        "border:1px solid #374151;margin:8px 0 16px 0;'>"
+        + "".join(bar_items)
+        + "</div>"
+    )
+
+    # Legend
+    legend_items = []
+    for partner, color in partner_color_map.items():
+        legend_items.append(
+            f"<span style='display:inline-block;width:12px;height:12px;border-radius:3px;"
+            f"background:{color};margin-right:4px;'></span>{escape(partner)}"
+        )
+    legend_items.append(
+        "<span style='display:inline-block;width:12px;height:12px;border-radius:3px;"
+        "background:#f59e0b;margin-right:4px;'></span>Yard"
+    )
+    legend_items.append(
+        "<span style='display:inline-block;width:12px;height:12px;border-radius:3px;"
+        "background:#6b7280;margin-right:4px;'></span>Unmatched"
+    )
+    legend_html = "<div style='font-size:12px;margin-bottom:12px;'>" + " &nbsp;&nbsp; ".join(legend_items) + "</div>"
+
+    st.markdown(bar_html + legend_html, unsafe_allow_html=True)
+
+    # --- Detail table ---
+    table_rows = []
+    for seg in segments:
+        if seg.partner_type == "yard":
+            icon = "🅿️"
+            partner_label = f"Yard: {seg.partner_id}"
+        elif seg.partner_type == "gap":
+            icon = "⬜"
+            partner_label = "Unmatched / No signal"
+        else:
+            icon = "🚛" if seg.partner_type == "truck" else "📦"
+            partner_label = f"{seg.partner_type.title()} {seg.partner_id}"
+
+        table_rows.append({
+            "": icon,
+            "Partner": partner_label,
+            "Start": seg.start.strftime("%m/%d %H:%M"),
+            "End": seg.end.strftime("%m/%d %H:%M"),
+            "Duration": f"{seg.duration_minutes:.0f} min" if seg.duration_minutes < 120 else f"{seg.duration_minutes / 60:.1f} h",
+            "Avg Dist (mi)": f"{seg.avg_distance_miles:.3f}" if seg.avg_distance_miles > 0 else "—",
+            "Confidence": f"{seg.confidence:.0%}" if seg.confidence > 0 else "—",
+            "Buckets": seg.bucket_count,
+        })
+
+    st.dataframe(table_rows, use_container_width=True, hide_index=True)
+
+
+def _render_matches_tab(
+    trucks: list[Asset],
+    trailers: list[Asset],
+    assignments: dict[str, str],
+    history_hours: int,
+    min_history_hits: int,
+    max_dist: float,
+    max_stale: float,
+    active_divs: set[str],
+) -> None:
+    """Auto-match tab — only loads history when user clicks."""
+    st.subheader("Auto-Match Results")
+    st.caption("Computes trailer↔truck matches using current positions + GPS history evidence.")
+
+    if st.button("Compute Matches", type="primary", key="compute_matches_btn"):
+        with st.spinner(f"Loading {history_hours}h of GPS history..."):
+            history = load_asset_history(hours=history_hours)
+        st.session_state["match_history"] = history
+        st.session_state["match_computed"] = True
+
+    if not st.session_state.get("match_computed"):
+        st.info("Click **Compute Matches** to load history and run the matching engine.")
+        return
+
+    history = st.session_state.get("match_history", [])
+    matches = compute_matches(
+        trucks, trailers, assignments, history,
+        max_distance_miles=max_dist,
+        max_stale_minutes=max_stale,
+        min_history_hits=min_history_hits,
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Matches", len(matches))
+    c2.metric("Board Agrees", sum(1 for m in matches if m.on_board))
+    c3.metric("With Segments", sum(1 for m in matches if m.segment_count > 0))
+    c4.metric("History Rows", len(history))
+
     if matches:
-        st.subheader("Auto-Match Results")
-        _render_match_review(matches, selected_div=selected_div)
-    else:
-        st.info("No trailer-truck matches found with current filters.")
+        # Show match table inside expander
+        with st.expander("Match Details", expanded=True):
+            match_rows = _build_match_review_rows(matches)
+            _render_match_copy_grid(match_rows)
 
-    # --- Historical many-to-many usage table ---
-    with st.expander("Historical Trailer Usage", expanded=False):
-        st.caption(
-            "Many-to-many historical co-location outside yards. This is for week/day analysis, "
-            "so a truck can appear with multiple trailers if it had multiple route hits."
-        )
+        # Quick unit rows showing match results
+        with st.expander("Full Fleet Table (with matches)"):
+            unit_rows = _build_unit_rows(
+                [a for a in (trucks + trailers)], matches, assignments, None, "",
+            )
+            if unit_rows:
+                _render_copy_grid(unit_rows)
+    else:
+        st.info("No matches found with current settings.")
+
+
+def _render_history_tab(max_dist: float, active_divs: set[str]) -> None:
+    """Historical usage tab — only computes on button click."""
+    st.subheader("Historical Trailer Usage")
+    st.caption(
+        "Many-to-many co-location analysis. Shows which trucks used which trailers over a date range. "
+        "Only loads and computes when you click the button."
+    )
+
+    today = date.today()
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        usage_start = st.date_input("From", value=today - timedelta(days=7), key="hist_start")
+    with col2:
+        usage_end = st.date_input("To", value=today, key="hist_end")
+    with col3:
+        usage_min_hits = st.slider("Min hours co-located", 1, 10, 2, 1, key="hist_min_hits")
+
+    if st.button("Compute Historical Usage", type="primary", key="hist_compute_btn"):
+        usage_start_dt = datetime.combine(usage_start, time.min, tzinfo=timezone.utc)
+        usage_end_dt = datetime.combine(usage_end, time.max, tzinfo=timezone.utc)
+        if usage_end_dt < usage_start_dt:
+            usage_start_dt, usage_end_dt = usage_end_dt, usage_start_dt
+
+        with st.spinner(f"Loading {(usage_end_dt - usage_start_dt).days} days of history..."):
+            usage_history = load_asset_history_range(usage_start_dt, usage_end_dt)
+
+        if not usage_history:
+            st.warning("No history data in selected range.")
+            return
+
+        st.info(f"Loaded {len(usage_history)} points. Computing co-locations...")
         usage_rows = _build_historical_usage_rows(
-            usage_history,
-            selected_div=selected_div,
-            max_distance_miles=max_dist,
-            min_hits=usage_min_hits,
+            usage_history, selected_div=None, max_distance_miles=max_dist, min_hits=usage_min_hits,
         )
+        st.session_state["hist_usage_rows"] = usage_rows
+
+    if "hist_usage_rows" in st.session_state:
+        usage_rows = st.session_state["hist_usage_rows"]
         if usage_rows:
             st.dataframe(
-                usage_rows,
-                use_container_width=True,
-                hide_index=True,
+                usage_rows, use_container_width=True, hide_index=True,
                 column_config={
-                    "Hits": st.column_config.NumberColumn("Hits", format="%d"),
-                    "Min Distance (mi)": st.column_config.NumberColumn("Min Distance (mi)", format="%.3f"),
-                    "Avg Distance (mi)": st.column_config.NumberColumn("Avg Distance (mi)", format="%.3f"),
+                    "Hits": st.column_config.NumberColumn("Hours", format="%d"),
+                    "Min Distance (mi)": st.column_config.NumberColumn(format="%.3f"),
+                    "Avg Distance (mi)": st.column_config.NumberColumn(format="%.3f"),
                 },
             )
         else:
-            st.info("No historical truck/trailer co-location found for the selected date range and filters.")
+            st.info("No co-locations found for the selected range.")
+
+
+def _render_review_tab(
+    trucks: list[Asset],
+    trailers: list[Asset],
+    assignments: dict[str, str],
+    history_hours: int,
+    min_history_hits: int,
+    max_dist: float,
+    max_stale: float,
+    active_divs: set[str],
+) -> None:
+    """Match review (confirm/reject) tab — reuses match data if available."""
+    st.subheader("Match Review & Confirmation")
+
+    # Reuse matches from the Auto-Matches tab if already computed
+    history = st.session_state.get("match_history", [])
+    if not history:
+        st.info("Go to **Auto-Matches** tab and click Compute Matches first.")
+        return
+
+    matches = compute_matches(
+        trucks, trailers, assignments, history,
+        max_distance_miles=max_dist,
+        max_stale_minutes=max_stale,
+        min_history_hits=min_history_hits,
+    )
+
+    if not matches:
+        st.info("No matches to review.")
+        return
+
+    _render_match_review(matches, selected_div=None)
 
 
 def _has_coords(asset: Asset) -> bool:
