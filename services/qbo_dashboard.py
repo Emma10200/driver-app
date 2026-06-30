@@ -71,6 +71,7 @@ QBO_MISSING_CUSTOMERS_KEY = "qbo_missing_customers"
 QBO_MISSING_VENDORS_KEY = "qbo_missing_vendors"
 QBO_RETRY_FILTER_KEY = "qbo_retry_filter"
 QBO_INVOICE_AUDIT_KEY = "qbo_invoice_audit"
+QBO_INVOICE_TARGET_COMPANY_KEY = "qbo_invoice_target_company"
 _DATE_USE_ROW = "Use row dates (or most recent Friday)"
 _TEMPLATE_OPTIONS = {
     "invoices": "Invoices",
@@ -279,6 +280,33 @@ def _draft_amount(draft: dict[str, Any]) -> float:
         except (TypeError, ValueError):
             pass
     return total
+
+
+def _invoice_group_key(row: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        str(row.get("realm_id") or ""),
+        str(row.get("doc_number") or ""),
+        str(row.get("customer_name") or ""),
+        str(row.get("txn_date") or ""),
+        str(row.get("due_date") or ""),
+    )
+
+
+def _invoice_group_totals(rows: list[dict[str, Any]]) -> dict[tuple[str, str, str, str, str], float]:
+    totals: dict[tuple[str, str, str, str, str], float] = {}
+    for row in rows:
+        key = _invoice_group_key(row)
+        try:
+            amount = float(row.get("amount") or 0.0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        totals[key] = totals.get(key, 0.0) + amount
+    return totals
+
+
+def _inspect_invoice_upload(file_name: str, content: bytes) -> dict[str, Any]:
+    rows = FileLoader().load_rows_from_bytes(file_name, content)
+    return InvoiceParser.inspect_source(rows)
 
 
 def _realm_options(realms: list[ConnectedRealm]) -> dict[str, ConnectedRealm]:
@@ -618,6 +646,7 @@ def _render_importer(
     bank_account_name = ""
     override_date = ""
     selected_realm: ConnectedRealm | None = None
+    invoice_requires_company = False
     if template_key == "invoices":
         uploaded = st.file_uploader("Upload invoice file", type=["csv", "xlsx", "xlsm", "xls"])
     else:
@@ -666,8 +695,35 @@ def _render_importer(
         return
 
     content = uploaded.getvalue()
+    if template_key == "invoices":
+        try:
+            invoice_source_info = _inspect_invoice_upload(uploaded.name, content)
+        except Exception as exc:  # noqa: BLE001 - user-facing upload validation
+            logger.exception("Invoice source inspection failed")
+            st.error(f"Could not read this invoice file: {exc}")
+            return
+        invoice_requires_company = bool(invoice_source_info.get("requires_target_realm"))
+        if invoice_requires_company:
+            with st.container(border=True):
+                st.markdown("**Company required for this invoice file**")
+                st.caption(
+                    "Detected the QBO invoice import layout (`RefNumber`, `LineItem`, `LineAmount`) with no Division column. "
+                    "Choose the QuickBooks company/division that should receive every invoice in this file."
+                )
+                selected_realm_label = st.selectbox(
+                    "Company / division",
+                    list(options.keys()),
+                    index=None,
+                    placeholder="Select target company…",
+                    key=QBO_INVOICE_TARGET_COMPANY_KEY,
+                    help="Required because this source format does not contain a per-row Division column.",
+                )
+                selected_realm = options.get(selected_realm_label) if selected_realm_label else None
     upload_hash = source_file_hash(content)
-    if st.session_state.get(QBO_UPLOAD_HASH_KEY) != upload_hash:
+    preview_scope_hash = upload_hash
+    if template_key == "invoices" and invoice_requires_company:
+        preview_scope_hash = f"{upload_hash}:{selected_realm.realm_id if selected_realm else ''}"
+    if st.session_state.get(QBO_UPLOAD_HASH_KEY) != preview_scope_hash:
         st.session_state.pop(QBO_PREVIEW_KEY, None)
         st.session_state.pop(QBO_MISSING_CUSTOMERS_KEY, None)
         st.session_state.pop(QBO_MISSING_VENDORS_KEY, None)
@@ -677,7 +733,7 @@ def _render_importer(
         st.session_state.pop(QBO_DRIVER_RESET_KEY, None)
         st.session_state.pop(QBO_DRIVER_UNCHECK_KEY, None)
         st.session_state.pop(QBO_DRIVER_SELECTION_KEY, None)
-        st.session_state[QBO_UPLOAD_HASH_KEY] = upload_hash
+        st.session_state[QBO_UPLOAD_HASH_KEY] = preview_scope_hash
 
     preview = st.session_state.get(QBO_PREVIEW_KEY)
     preview_ready = isinstance(preview, PreviewResult)
@@ -686,6 +742,8 @@ def _render_importer(
     has_pending_driver_edits = bool(_driver_pending_for(preview))
     post_disabled = not preview_ready or bool(preview.errors) or not bool(preview.drafts) or has_pending_customer_prompt or has_pending_vendor_prompt or has_pending_driver_edits
     if template_key != "invoices" and selected_realm is None:
+        post_disabled = True
+    if template_key == "invoices" and invoice_requires_company and selected_realm is None:
         post_disabled = True
 
     if template_key == "invoices":
@@ -696,7 +754,8 @@ def _render_importer(
         preview_col, clear_col, post_col, hint_col = st.columns([0.16, 0.12, 0.16, 0.56])
         audit_col = None
     with preview_col:
-        if st.button("Preview", type="primary", use_container_width=True):
+        preview_disabled = template_key == "invoices" and invoice_requires_company and selected_realm is None
+        if st.button("Preview", type="primary", use_container_width=True, disabled=preview_disabled):
             try:
                 preview = _build_preview(
                     template_key=template_key,
@@ -751,7 +810,9 @@ def _render_importer(
                 ),
             )
     with hint_col:
-        if template_key == "invoices":
+        if template_key == "invoices" and invoice_requires_company and selected_realm is None:
+            st.caption("Select a target company/division to preview this no-division invoice file.")
+        elif template_key == "invoices":
             st.caption("Ready to post: customers are checked first; missing customers can be created before posting.")
         elif has_pending_driver_edits:
             st.caption("Lock in pending preview edits below before posting.")
@@ -1543,13 +1604,23 @@ def _build_preview(
     rows = FileLoader().load_rows_from_bytes(file_name, content)
     if template_key == "invoices":
         parser = InvoiceParser(CompanyDirectory(realms))
-        parsed = parser.parse(rows)
+        source_info = InvoiceParser.inspect_source(rows)
+        if source_info.get("requires_target_realm") and selected_realm is None:
+            raise ValueError("Choose a QuickBooks company / division for this no-division invoice file before previewing.")
+        parsed = parser.parse(
+            rows,
+            target_realm_id=selected_realm.realm_id if selected_realm else "",
+            target_division=selected_realm.company_name if selected_realm else "",
+        )
         drafts = parser.build_qbo_drafts(parsed)
         preview_rows: list[dict[str, Any]] = []
-        for row, draft in zip(parsed.get("rows") or [], drafts):
-            line = ((draft.get("Line") or [{}])[0] or {}) if isinstance(draft, dict) else {}
-            detail = (line.get("SalesItemLineDetail") or {}) if isinstance(line, dict) else {}
-            custom_field = ((draft.get("CustomField") or [{}])[0] or {}) if isinstance(draft, dict) else {}
+        parsed_rows = list(parsed.get("rows") or [])
+        invoice_totals = _invoice_group_totals(parsed_rows)
+        for row in parsed_rows:
+            line_amount = row.get("amount") or 0
+            line_qty = row.get("line_qty") or 1
+            line_unit_price = row.get("line_unit_price") or line_amount
+            broker_load_number = row.get("broker_load_number") or ""
             preview_rows.append(
                 {
                     "QBO Txn Type": "Invoice",
@@ -1560,17 +1631,17 @@ def _build_preview(
                     "Division": row["division_name"] or "(blank)",
                     "QBO Company": _realm_name_for_id(realms, row.get("realm_id") or "") or "(unmatched)",
                     "Realm ID": row.get("realm_id") or "",
-                    "PO / Broker Load #": row.get("broker_load_number") or "",
-                    "QBO Terms": draft.get("_tempTermName") or "",
-                    "QBO Item": line.get("_tempItemName") or "",
-                    "Line Qty": detail.get("Qty") or "",
-                    "Line Rate": detail.get("UnitPrice") or "",
-                    "Line Amount": line.get("Amount") or 0,
-                    "Invoice Amount": row["amount"],
-                    "Line Description": line.get("Description") or "",
-                    "Private Note": draft.get("PrivateNote") or "",
-                    "Custom Field #": custom_field.get("DefinitionId") or "",
-                    "Custom Field Value": custom_field.get("StringValue") or "",
+                    "PO / Broker Load #": broker_load_number,
+                    "QBO Terms": "Net 30",
+                    "QBO Item": row.get("line_item") or "Freight Income",
+                    "Line Qty": line_qty,
+                    "Line Rate": line_unit_price,
+                    "Line Amount": line_amount,
+                    "Invoice Amount": invoice_totals.get(_invoice_group_key(row), float(line_amount or 0)),
+                    "Line Description": row.get("line_description") or f"Load {row['doc_number']}",
+                    "Private Note": f"Load {row['doc_number']}",
+                    "Custom Field #": "1",
+                    "Custom Field Value": broker_load_number,
                     "QB Exported": row.get("qb_exported"),
                     "Invoice Last Sent": row.get("invoice_last_sent_date") or "",
                     "Invoice Remarks": row.get("invoice_remarks") or "",
@@ -1592,7 +1663,7 @@ def _build_preview(
             source_file=file_name,
             source_hash=source_file_hash(content),
             count=len(drafts),
-            source_count=max(len(rows) - 1, 0),
+            source_count=int(parsed.get("source_count") or max(len(rows) - 1, 0)),
             skipped_count=len(parsed.get("skipped_rows") or []),
             rows=preview_rows,
             errors=route_errors,

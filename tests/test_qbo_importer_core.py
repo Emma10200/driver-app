@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from qbo.duplicate_check import build_invoice_key, build_money_code_key
 from qbo.api_client import QboRateLimitError
 from qbo.file_loader import FileLoader
@@ -493,6 +495,66 @@ def test_invoice_preview_includes_full_qbo_ready_fields():
     assert row["Line Rate"] == 1250.50
     assert row["Custom Field Value"] == "PO-77"
     assert row["Invoice Remarks"] == "Customer asked for POD"
+
+
+def test_qbo_invoice_import_format_requires_selected_company():
+    content = (
+        "RefNumber,Customer,TxnDate,DueDate,BillAddrLine1,BillAddrLine2,BillAddrLineCity,"
+        "BillAddrLineState,BillAddrLinePostalCode,LineItem,LineQty,LineDesc,LineUnitPrice,LineAmount\n"
+        "159350,Kiswani Trucking Inc,2026-06-26 11:31:01,2026-07-26 11:31:01,555 W Taft Drive,,"
+        "South Holland,IL,60473,Freight Income,1,2570.09,2570.09,2570.09\n"
+    ).encode()
+
+    with pytest.raises(ValueError, match="Choose a QuickBooks company"):
+        _build_preview(
+            template_key="invoices",
+            file_name="qbo_invoice_import.csv",
+            content=content,
+            realms=[ConnectedRealm(realm_id="pt-realm", company_name="Prestige Transportation Inc")],
+            selected_realm=None,
+            bank_account_name="",
+            override_date="",
+        )
+
+
+def test_qbo_invoice_import_format_uses_selected_company_and_groups_lines():
+    realm = ConnectedRealm(realm_id="pt-realm", company_name="Prestige Transportation Inc")
+    content = (
+        "RefNumber,Customer,TxnDate,DueDate,BillAddrLine1,BillAddrLine2,BillAddrLineCity,"
+        "BillAddrLineState,BillAddrLinePostalCode,LineItem,LineQty,LineDesc,LineUnitPrice,LineAmount\n"
+        "159350,Kiswani Trucking Inc,2026-06-26 11:31:01,2026-07-26 11:31:01,555 W Taft Drive,,"
+        "South Holland,IL,60473,Freight Income,1,Freight line,2000,2000\n"
+        "159350,Kiswani Trucking Inc,2026-06-26 11:31:01,2026-07-26 11:31:01,555 W Taft Drive,,"
+        "South Holland,IL,60473,Accessorial Charges,1,Lumper,570.09,570.09\n"
+    ).encode()
+
+    preview = _build_preview(
+        template_key="invoices",
+        file_name="qbo_invoice_import.csv",
+        content=content,
+        realms=[realm],
+        selected_realm=realm,
+        bank_account_name="",
+        override_date="",
+    )
+
+    assert preview.errors == []
+    assert preview.count == 1
+    assert len(preview.drafts) == 1
+    draft = preview.drafts[0]
+    assert draft["DocNumber"] == "159350"
+    assert draft["TxnDate"] == "2026-06-26"
+    assert draft["DueDate"] == "2026-07-26"
+    assert draft["_realmId"] == "pt-realm"
+    assert draft["_division"] == "Prestige Transportation Inc"
+    assert draft["_tempCustomerName"] == "Kiswani Trucking Inc"
+    assert [line["_tempItemName"] for line in draft["Line"]] == ["Freight Income", "Accessorial Charges"]
+    assert sum(float(line["Amount"]) for line in draft["Line"]) == 2570.09
+    assert len(preview.rows) == 2
+    assert preview.rows[0]["QBO Company"] == "Prestige Transportation Inc"
+    assert preview.rows[0]["Division"] == "Prestige Transportation Inc"
+    assert preview.rows[0]["Invoice Amount"] == 2570.09
+    assert preview.rows[1]["QBO Item"] == "Accessorial Charges"
 
 
 def test_entity_lookup_create_customer_posts_display_name_and_primes_cache():
