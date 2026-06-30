@@ -20,5 +20,6 @@ submissions/
 .streamlit/secrets.toml
 *.log
 logs/
+gps_reports/
 .DS_Store
 Thumbs.db
