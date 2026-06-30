@@ -89,6 +89,12 @@ def _load_secrets() -> dict[str, str]:
         "ANYTREK_API_KEY",
         "SUPABASE_URL", "SUPABASE_SERVICE_KEY",
         "GPSTAB_PRESTIGE_KEY", "GPSTAB_PRESTIG_KEY", "GPSTAB_XPRESS_KEY",
+        "EROAD_PRESTIGE_KEY", "EROAD_XPRESS_KEY",
+        "TRACK888_USER", "TRACK888_PASSWORD",
+        "TRACK888_PRESTIGE_USER", "TRACK888_PRESTIGE_PASSWORD", "TRACK888_PRESTIGE_KEY",
+        "TRACK888_PRESTIGE_COMPANY",
+        "TRACK888_XPRESS_USER", "TRACK888_XPRESS_PASSWORD", "TRACK888_XPRESS_KEY",
+        "TRACK888_XPRESS_COMPANY",
     ]:
         env_val = os.environ.get(key)
         if env_val:
@@ -254,6 +260,283 @@ def backfill_gpstab(secrets: dict[str, str], days: int, supabase_url: str, supab
     return total_inserted
 
 
+# ---------------------------------------------------------------------------
+# 888 ELD (Track Mile Portal / HOSQL) history
+# ---------------------------------------------------------------------------
+TRACK888_AUTH_URL = "https://myportal.eldtrackmile.com/auth-service/auth/authentication"
+TRACK888_HOSQL_URL = "https://myportal.eldtrackmile.com/hosql/api"
+
+
+def _track888_companies(secrets: dict[str, str]) -> list[dict[str, str]]:
+    """Build company configs from secrets."""
+    companies = []
+    for label, company_key, user_keys, pass_keys in [
+        ("Prestige", "TRACK888_PRESTIGE_COMPANY",
+         ["TRACK888_PRESTIGE_USER", "TRACK888_USER"],
+         ["TRACK888_PRESTIGE_PASSWORD", "TRACK888_PRESTIGE_KEY", "TRACK888_PASSWORD"]),
+        ("Xpress", "TRACK888_XPRESS_COMPANY",
+         ["TRACK888_XPRESS_USER", "TRACK888_USER"],
+         ["TRACK888_XPRESS_PASSWORD", "TRACK888_XPRESS_KEY", "TRACK888_PASSWORD"]),
+    ]:
+        company_id = secrets.get(company_key, "").strip()
+        if not company_id:
+            continue
+        user = next((secrets.get(k, "").strip() for k in user_keys if secrets.get(k, "").strip()), "")
+        password = next((secrets.get(k, "").strip() for k in pass_keys if secrets.get(k, "").strip()), "")
+        if user and password:
+            companies.append({"name": label, "company_id": company_id, "user": user, "password": password})
+    return companies
+
+
+def _track888_authenticate(user: str, password: str) -> str | None:
+    """Authenticate to Track Mile portal, return access token."""
+    try:
+        resp = requests.post(
+            TRACK888_AUTH_URL,
+            json={"username": user, "password": password},
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+        if resp.status_code == 201:
+            data = resp.json()
+            return data.get("access_token") or data.get("accessToken")
+    except Exception as exc:
+        print(f"  888 ELD auth error: {exc}")
+    return None
+
+
+def _track888_fetch_collection(token: str, user: str, collection: str, company_id: str, limit: int = 5000) -> list[dict[str, Any]]:
+    """Fetch a HOSQL collection."""
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "user": user,
+        "Content-Type": "application/json",
+    }
+    params = f"?$limit={limit}"
+    if company_id:
+        params += f"&companyId={company_id}"
+    url = f"{TRACK888_HOSQL_URL}/{collection}{params}"
+    try:
+        resp = requests.get(url, headers=headers, timeout=60)
+        if not resp.ok:
+            return []
+        data = resp.json()
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in ("data", "items", "docs", "Data", "Items"):
+                if isinstance(data.get(key), list):
+                    return data[key]
+        return []
+    except Exception:
+        return []
+
+
+def backfill_track888(secrets: dict[str, str], days: int, supabase_url: str, supabase_key: str, dry_run: bool) -> int:
+    """Pull 888 ELD vehicle statuses (potentially historical) from Track Mile portal."""
+    companies = _track888_companies(secrets)
+    if not companies:
+        print("No 888 ELD company configs found. Skipping.")
+        return 0
+
+    total_inserted = 0
+    for company in companies:
+        print(f"\n[888 ELD] Company: {company['name']}")
+        token = _track888_authenticate(company["user"], company["password"])
+        if not token:
+            print("  Authentication failed. Skipping.")
+            continue
+        print("  Authenticated OK")
+
+        vehicles = _track888_fetch_collection(token, company["user"], "vehicles", company["company_id"])
+        print(f"  Found {len(vehicles)} vehicles")
+
+        # Try vehicle_statuses (historical) — HOSQL may return all statuses
+        statuses = _track888_fetch_collection(token, company["user"], "vehicle_statuses", company["company_id"], limit=10000)
+        if not statuses:
+            statuses = _track888_fetch_collection(token, company["user"], "latest_vehicle_statuses", company["company_id"], limit=5000)
+        print(f"  Fetched {len(statuses)} status records")
+
+        # Build vehicle name lookup
+        vehicle_names: dict[str, str] = {}
+        for v in vehicles:
+            vid = v.get("_id") or v.get("id") or ""
+            name = v.get("name") or v.get("vehicleName") or v.get("number") or v.get("unit") or ""
+            if vid and name:
+                vehicle_names[str(vid)] = str(name).strip()
+
+        rows: list[dict[str, Any]] = []
+        for status in statuses:
+            lat = status.get("lat") or status.get("latitude") or status.get("Latitude")
+            lon = status.get("lon") or status.get("lng") or status.get("longitude") or status.get("Longitude")
+            if not lat or not lon:
+                continue
+            try:
+                lat_f = float(lat)
+                lon_f = float(lon)
+            except (ValueError, TypeError):
+                continue
+            if lat_f == 0 and lon_f == 0:
+                continue
+
+            timestamp = (
+                status.get("timestamp") or status.get("time") or status.get("stime")
+                or status.get("updatedAt") or status.get("createdAt")
+            )
+            if not timestamp:
+                continue
+
+            # Resolve vehicle name
+            vehicle_ref = (
+                status.get("v") or status.get("vehicleId") or status.get("vehicle_id") or ""
+            )
+            truck_id = vehicle_names.get(str(vehicle_ref), "")
+            if not truck_id:
+                # Try VIN match
+                vin = status.get("vin") or ""
+                for v in vehicles:
+                    if v.get("vin") == vin and vin:
+                        truck_id = v.get("name") or v.get("number") or ""
+                        break
+            if not truck_id:
+                continue
+
+            # Convert epoch timestamps
+            recorded_at = timestamp
+            if isinstance(timestamp, (int, float)) and timestamp > 1000000000:
+                from datetime import datetime as dt_cls
+                if timestamp > 10000000000:
+                    timestamp = timestamp / 1000
+                recorded_at = dt_cls.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+
+            address = status.get("c") or status.get("address") or status.get("location") or ""
+            speed = status.get("speed") or status.get("speedKph")
+
+            rows.append({
+                "asset_type": "truck",
+                "asset_id": str(truck_id).strip(),
+                "division": company["name"],
+                "lat": lat_f,
+                "lon": lon_f,
+                "address": str(address),
+                "zip": "",
+                "speed": float(speed) if speed is not None else None,
+                "heading_deg": None,
+                "provider": f"888 ELD ({company['name']})",
+                "recorded_at": recorded_at,
+                "source": "track888_backfill",
+                "raw": {
+                    "vin": status.get("vin"),
+                    "vehicle_ref": vehicle_ref,
+                    "company": company["name"],
+                },
+            })
+
+        print(f"  → {len(rows)} valid truck pings")
+        if rows and not dry_run:
+            inserted = upsert_to_supabase(supabase_url, supabase_key, rows)
+            total_inserted += inserted
+            print(f"  → {inserted} rows inserted")
+        elif rows and dry_run:
+            print(f"  → DRY RUN: would insert {len(rows)} rows")
+
+    return total_inserted
+
+
+# ---------------------------------------------------------------------------
+# EROAD history (vehicleCurrentState — snapshot; no known bulk history endpoint)
+# ---------------------------------------------------------------------------
+EROAD_BASE = "https://api.na.eroad.com/v1"
+
+
+def backfill_eroad(secrets: dict[str, str], supabase_url: str, supabase_key: str, dry_run: bool) -> int:
+    """Pull EROAD current state for all vehicles. EROAD doesn't expose bulk history,
+    but each 10-min trigger cycle already appends to assets_history.
+    This function grabs the current snapshot as a single data point."""
+    total_inserted = 0
+    for label in ["EROAD_PRESTIGE_KEY", "EROAD_XPRESS_KEY"]:
+        api_key = secrets.get(label, "").strip()
+        if not api_key:
+            continue
+        print(f"\n[EROAD] Account: {label}")
+        headers = {"ApiKey": api_key, "Accept": "application/json"}
+
+        # Fetch current state (paginated)
+        all_results: list[dict[str, Any]] = []
+        first_result = 0
+        page_size = 200
+        for _ in range(50):
+            url = f"{EROAD_BASE}/vehicleCurrentState?firstResult={first_result}&maxResult={page_size}"
+            try:
+                resp = requests.get(url, headers=headers, timeout=30)
+                if not resp.ok:
+                    print(f"  HTTP {resp.status_code}: {resp.text[:200]}")
+                    break
+                data = resp.json()
+                results = data.get("results") or []
+                if not results:
+                    break
+                all_results.extend(results)
+                if len(results) < page_size:
+                    break
+                first_result += page_size
+                time.sleep(0.3)
+            except Exception as exc:
+                print(f"  Error: {exc}")
+                break
+
+        print(f"  Fetched {len(all_results)} vehicle states")
+        rows: list[dict[str, Any]] = []
+        for item in all_results:
+            gps_fix = item.get("gpsFix") or {}
+            coord = gps_fix.get("coordinate") or {}
+            lat = coord.get("latitude")
+            lon = coord.get("longitude")
+            if not lat or not lon:
+                continue
+
+            timestamp = gps_fix.get("timestamp") or gps_fix.get("time")
+            if not timestamp:
+                continue
+
+            # Try to get display name
+            display_name = item.get("readableLocation") or ""
+            speed = gps_fix.get("speedKph")
+            heading = gps_fix.get("courseOverGround")
+            vehicle_id = item.get("id") or ""
+
+            rows.append({
+                "asset_type": "truck",
+                "asset_id": str(vehicle_id),  # We'll use EROAD UUID; matching happens by coords
+                "division": "",
+                "lat": float(lat),
+                "lon": float(lon),
+                "address": display_name,
+                "zip": "",
+                "speed": float(speed) if speed is not None else None,
+                "heading_deg": float(heading) if heading is not None else None,
+                "provider": f"EROAD ({label})",
+                "recorded_at": timestamp,
+                "source": "eroad_backfill",
+                "raw": {
+                    "eroad_id": vehicle_id,
+                    "account": label,
+                    "status": item.get("status"),
+                    "engineHours": item.get("engineHours"),
+                },
+            })
+
+        print(f"  → {len(rows)} valid pings")
+        if rows and not dry_run:
+            inserted = upsert_to_supabase(supabase_url, supabase_key, rows)
+            total_inserted += inserted
+            print(f"  → {inserted} rows inserted")
+        elif rows and dry_run:
+            print(f"  → DRY RUN: would insert {len(rows)} rows")
+
+    return total_inserted
+
+
 def _format_anytrek_time(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S+0000")
 
@@ -393,7 +676,7 @@ def upsert_to_supabase(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backfill GPS history to Supabase (Anytrek trailers + GPSTab trucks)")
     parser.add_argument("--days", type=int, default=60, help="How many days back to pull (default: 60)")
-    parser.add_argument("--provider", choices=["all", "anytrek", "gpstab"], default="all", help="Which provider to backfill")
+    parser.add_argument("--provider", choices=["all", "anytrek", "gpstab", "track888", "eroad"], default="all", help="Which provider to backfill")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and transform but don't write to Supabase")
     args = parser.parse_args()
 
@@ -456,6 +739,26 @@ def main() -> None:
         print("=" * 60)
         inserted = backfill_gpstab(secrets, args.days, supabase_url, supabase_key, args.dry_run)
         print(f"\nGPSTab done: {inserted} rows inserted.")
+        grand_total += inserted
+
+    # --- 888 ELD (trucks via Track Mile portal) ---
+    if args.provider in ("all", "track888"):
+        print()
+        print("=" * 60)
+        print("888 ELD TRUCK BACKFILL (Track Mile Portal)")
+        print("=" * 60)
+        inserted = backfill_track888(secrets, args.days, supabase_url, supabase_key, args.dry_run)
+        print(f"\n888 ELD done: {inserted} rows inserted.")
+        grand_total += inserted
+
+    # --- EROAD (trucks) ---
+    if args.provider in ("all", "eroad"):
+        print()
+        print("=" * 60)
+        print("EROAD TRUCK BACKFILL")
+        print("=" * 60)
+        inserted = backfill_eroad(secrets, supabase_url, supabase_key, args.dry_run)
+        print(f"\nEROAD done: {inserted} rows inserted.")
         grand_total += inserted
 
     print()
