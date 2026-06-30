@@ -270,15 +270,17 @@ TRACK888_HOSQL_URL = "https://myportal.eldtrackmile.com/hosql/api"
 def _track888_companies(secrets: dict[str, str]) -> list[dict[str, str]]:
     """Build company configs from secrets."""
     companies = []
-    for label, company_key, user_keys, pass_keys in [
-        ("Prestige", "TRACK888_PRESTIGE_COMPANY",
+    for label, company_keys, user_keys, pass_keys in [
+        ("Prestige",
+         ["TRACK888_PRESTIGE_COMPANY", "TRACK888_COMPANY"],
          ["TRACK888_PRESTIGE_USER", "TRACK888_USER"],
          ["TRACK888_PRESTIGE_PASSWORD", "TRACK888_PRESTIGE_KEY", "TRACK888_PASSWORD"]),
-        ("Xpress", "TRACK888_XPRESS_COMPANY",
+        ("Xpress",
+         ["TRACK888_XPRESS_COMPANY"],
          ["TRACK888_XPRESS_USER", "TRACK888_USER"],
          ["TRACK888_XPRESS_PASSWORD", "TRACK888_XPRESS_KEY", "TRACK888_PASSWORD"]),
     ]:
-        company_id = secrets.get(company_key, "").strip()
+        company_id = next((secrets.get(k, "").strip() for k in company_keys if secrets.get(k, "").strip()), "")
         if not company_id:
             continue
         user = next((secrets.get(k, "").strip() for k in user_keys if secrets.get(k, "").strip()), "")
@@ -289,47 +291,84 @@ def _track888_companies(secrets: dict[str, str]) -> list[dict[str, str]]:
 
 
 def _track888_authenticate(user: str, password: str) -> str | None:
-    """Authenticate to Track Mile portal, return access token."""
-    try:
-        resp = requests.post(
-            TRACK888_AUTH_URL,
-            json={"username": user, "password": password},
-            headers={"Content-Type": "application/json"},
-            timeout=30,
-        )
-        if resp.status_code == 201:
-            data = resp.json()
-            return data.get("access_token") or data.get("accessToken")
-    except Exception as exc:
-        print(f"  888 ELD auth error: {exc}")
+    """Authenticate to Track Mile portal, return access token. Tries multiple endpoints."""
+    endpoints = [
+        ("portal", TRACK888_AUTH_URL),
+        ("portal-twofa", "https://myportal.eldtrackmile.com/auth-service/auth/twofa/authentication"),
+        ("hosconnect", "https://api.hosconnect.com/v1/authentication"),
+    ]
+    for label, url in endpoints:
+        try:
+            if "hosconnect" in url:
+                payload = {"user": user, "password": password, "company": ""}
+            else:
+                payload = {"username": user, "password": password}
+            resp = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=30)
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                token = data.get("access_token") or data.get("accessToken")
+                if token:
+                    print(f"  Authenticated via {label}")
+                    return token
+        except Exception as exc:
+            print(f"  Auth attempt ({label}) error: {exc}")
+    return None
+
+
+def _track888_auth_with_company(user: str, password: str, company_id: str) -> str | None:
+    """Try HOSconnect auth with company ID in payload (legacy flow)."""
+    # Try both raw company ID and normalized
+    for cid in [company_id, company_id.replace("Company:", "")]:
+        try:
+            resp = requests.post(
+                "https://api.hosconnect.com/v1/authentication",
+                json={"user": user, "password": password, "company": cid},
+                headers={"Content-Type": "application/json"},
+                timeout=30,
+            )
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                token = data.get("accessToken") or data.get("access_token")
+                if token:
+                    print(f"  Authenticated via HOSconnect (company={cid[:12]}...)")
+                    return token
+        except Exception:
+            continue
     return None
 
 
 def _track888_fetch_collection(token: str, user: str, collection: str, company_id: str, limit: int = 5000) -> list[dict[str, Any]]:
-    """Fetch a HOSQL collection."""
+    """Fetch a HOSQL collection. Tries with and without companyId filter."""
     headers = {
         "Authorization": f"Bearer {token}",
         "user": user,
         "Content-Type": "application/json",
     }
-    params = f"?$limit={limit}"
+    # Try with companyId first, then without (user context may be enough)
+    urls_to_try = []
     if company_id:
-        params += f"&companyId={company_id}"
-    url = f"{TRACK888_HOSQL_URL}/{collection}{params}"
-    try:
-        resp = requests.get(url, headers=headers, timeout=60)
-        if not resp.ok:
-            return []
-        data = resp.json()
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            for key in ("data", "items", "docs", "Data", "Items"):
-                if isinstance(data.get(key), list):
-                    return data[key]
-        return []
-    except Exception:
-        return []
+        urls_to_try.append(f"{TRACK888_HOSQL_URL}/{collection}?%24limit={limit}&companyId={company_id}")
+    urls_to_try.append(f"{TRACK888_HOSQL_URL}/{collection}?%24limit={limit}")
+
+    for url in urls_to_try:
+        try:
+            resp = requests.get(url, headers=headers, timeout=60)
+            if not resp.ok:
+                continue
+            data = resp.json()
+            items: list[dict[str, Any]] = []
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict):
+                for key in ("data", "items", "docs", "Data", "Items"):
+                    if isinstance(data.get(key), list):
+                        items = data[key]
+                        break
+            if items:
+                return items
+        except Exception:
+            continue
+    return []
 
 
 def backfill_track888(secrets: dict[str, str], days: int, supabase_url: str, supabase_key: str, dry_run: bool) -> int:
@@ -341,20 +380,23 @@ def backfill_track888(secrets: dict[str, str], days: int, supabase_url: str, sup
 
     total_inserted = 0
     for company in companies:
-        print(f"\n[888 ELD] Company: {company['name']}")
+        print(f"\n[888 ELD] Company: {company['name']} (company_id: {company['company_id'][:15]}...)")
         token = _track888_authenticate(company["user"], company["password"])
         if not token:
-            print("  Authentication failed. Skipping.")
+            # Also try with company in the payload (HOSconnect style)
+            token = _track888_auth_with_company(company["user"], company["password"], company["company_id"])
+        if not token:
+            print("  Authentication failed on all endpoints. Skipping.")
             continue
         print("  Authenticated OK")
 
-        vehicles = _track888_fetch_collection(token, company["user"], "vehicles", company["company_id"])
+        vehicles = _track888_fetch_collection(token, company["user"], "vehicles", company["company_id"], limit=1000)
         print(f"  Found {len(vehicles)} vehicles")
 
         # Try vehicle_statuses (historical) — HOSQL may return all statuses
-        statuses = _track888_fetch_collection(token, company["user"], "vehicle_statuses", company["company_id"], limit=10000)
+        statuses = _track888_fetch_collection(token, company["user"], "vehicle_statuses", company["company_id"], limit=1000)
         if not statuses:
-            statuses = _track888_fetch_collection(token, company["user"], "latest_vehicle_statuses", company["company_id"], limit=5000)
+            statuses = _track888_fetch_collection(token, company["user"], "latest_vehicle_statuses", company["company_id"], limit=1000)
         print(f"  Fetched {len(statuses)} status records")
 
         # Build vehicle name lookup
