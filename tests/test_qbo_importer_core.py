@@ -520,12 +520,12 @@ def test_qbo_invoice_import_format_requires_selected_company():
 def test_qbo_invoice_import_format_uses_selected_company_and_groups_lines():
     realm = ConnectedRealm(realm_id="pt-realm", company_name="Prestige Transportation Inc")
     content = (
-        "RefNumber,Customer,TxnDate,DueDate,BillAddrLine1,BillAddrLine2,BillAddrLineCity,"
+        "RefNumber,Customer,PONumber,TxnDate,DueDate,BillAddrLine1,BillAddrLine2,BillAddrLineCity,"
         "BillAddrLineState,BillAddrLinePostalCode,LineItem,LineQty,LineDesc,LineUnitPrice,LineAmount\n"
-        "159350,Kiswani Trucking Inc,2026-06-26 11:31:01,2026-07-26 11:31:01,555 W Taft Drive,,"
-        "South Holland,IL,60473,Freight Income,1,Freight line,2000,2000\n"
-        "159350,Kiswani Trucking Inc,2026-06-26 11:31:01,2026-07-26 11:31:01,555 W Taft Drive,,"
-        "South Holland,IL,60473,Accessorial Charges,1,Lumper,570.09,570.09\n"
+        "159350,Kiswani Trucking Inc,PO-77,2026-06-26 11:31:01,2026-07-26 11:31:01,555 W Taft Drive,,"
+        "South Holland,IL,60473,Freight Income,1,2000,2000,2000\n"
+        "159350,Kiswani Trucking Inc,PO-77,2026-06-26 11:31:01,2026-07-26 11:31:01,555 W Taft Drive,,"
+        "South Holland,IL,60473,Accessorial Charges,1,570.09,570.09,570.09\n"
     ).encode()
 
     preview = _build_preview(
@@ -548,11 +548,16 @@ def test_qbo_invoice_import_format_uses_selected_company_and_groups_lines():
     assert draft["_realmId"] == "pt-realm"
     assert draft["_division"] == "Prestige Transportation Inc"
     assert draft["_tempCustomerName"] == "Kiswani Trucking Inc"
+    assert draft["CustomField"][0]["StringValue"] == "PO-77"
     assert [line["_tempItemName"] for line in draft["Line"]] == ["Freight Income", "Accessorial Charges"]
+    assert [line["Description"] for line in draft["Line"]] == ["Load 159350", "Load 159350"]
     assert sum(float(line["Amount"]) for line in draft["Line"]) == 2570.09
     assert len(preview.rows) == 2
     assert preview.rows[0]["QBO Company"] == "Prestige Transportation Inc"
     assert preview.rows[0]["Division"] == "Prestige Transportation Inc"
+    assert preview.rows[0]["PO / Broker Load #"] == "PO-77"
+    assert preview.rows[0]["Custom Field Value"] == "PO-77"
+    assert preview.rows[0]["Line Description"] == "Load 159350"
     assert preview.rows[0]["Invoice Amount"] == 2570.09
     assert preview.rows[1]["QBO Item"] == "Accessorial Charges"
 

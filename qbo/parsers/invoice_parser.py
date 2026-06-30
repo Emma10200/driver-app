@@ -131,7 +131,8 @@ class InvoiceParser:
         status = self._cell_string(row, header_map["status"])
         line_item = self._cell_string(row, header_map["line_item"]) or "Freight Income"
         line_qty = self._parse_amount(self._cell_value(row, header_map["line_qty"])) or 1.0
-        line_description = self._cell_string(row, header_map["line_description"])
+        source_line_description = self._cell_string(row, header_map["line_description"])
+        line_description = f"Load {doc_number}" if source_format == _QBO_IMPORT_FORMAT else source_line_description
         line_unit_price = self._parse_amount(self._cell_value(row, header_map["line_unit_price"]))
 
         validation_error = self._validate_source_row(
@@ -166,6 +167,7 @@ class InvoiceParser:
             "line_qty": float(line_qty),
             "line_unit_price": float(line_unit_price if line_unit_price is not None else amount),
             "line_description": line_description or f"Load {doc_number}",
+            "source_line_description": source_line_description,
             "qb_exported": qb_exported,
             "invoice_last_sent_date": invoice_last_sent_date,
             "invoice_remarks": invoice_remarks,
