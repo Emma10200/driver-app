@@ -63,6 +63,9 @@ def load_asset_history_range(
 
     Division filtering is intentionally done after loading so older backfilled
     GPS_HISTORY rows with blank division can still contribute evidence.
+
+    With dense backfill data (~50K pings/day), this uses server-side time
+    range filtering and a 500K hard cap to avoid truncating the dataset.
     """
     try:
         client = _get_client()
@@ -72,18 +75,22 @@ def load_asset_history_range(
 
     start = _ensure_aware(start)
     end = _ensure_aware(end)
-    filters: dict[str, Any] = {"recorded_at": f"gte.{start.isoformat()}"}
+    # PostgREST range filter — single 'and' key avoids dict duplicate-key issues
+    filters: dict[str, Any] = {
+        "and": f"(recorded_at.gte.{start.isoformat()},recorded_at.lte.{end.isoformat()})",
+    }
 
     rows = client.select_all(
         "assets_history",
         filters=filters,
         order="recorded_at.asc",
         page_size=1000,
-        hard_cap=20000,
+        hard_cap=500000,
     )
-    history = [point for point in (_history_row_to_asset(r) for r in rows) if point.last_ping and point.last_ping <= end]
+    history = [_history_row_to_asset(r) for r in rows]
+    history = [p for p in history if p.last_ping is not None]
     if division:
-        history = [point for point in history if not point.division or point.division == division]
+        history = [p for p in history if not p.division or p.division == division]
     return history
 
 

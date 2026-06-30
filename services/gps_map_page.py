@@ -412,6 +412,7 @@ def _build_unit_rows(
         confidence = ""
         history_hits = 0
         history_score = ""
+        segment_info = ""
 
         if auto_match:
             matched_unit = auto_match.truck.asset_id if asset.asset_type == "trailer" else auto_match.trailer.asset_id
@@ -420,6 +421,8 @@ def _build_unit_rows(
             history_hits = auto_match.history_hits
             history_score = f"{auto_match.history_score:.0%}" if auto_match.history_score else ""
             match_status = "Auto + Board" if auto_match.on_board else "Auto"
+            if auto_match.segment_count:
+                segment_info = f"{auto_match.segment_count} trip{'s' if auto_match.segment_count > 1 else ''} ({auto_match.segment_hours:.1f}h)"
         elif board_unit:
             matched_unit = board_unit
             match_status = "Board only"
@@ -445,6 +448,7 @@ def _build_unit_rows(
             "Yard": in_yard(float(asset.lat), float(asset.lon)) if _has_coords(asset) else "",
             "History Hits": history_hits,
             "History Score": history_score,
+            "Trip Segments": segment_info,
             "Address": asset.address,
             "ZIP": asset.zip,
             "Identifying Info": _identifying_info(asset),
@@ -845,11 +849,15 @@ def _build_historical_usage_rows(
     )
     rows: list[dict[str, object]] = []
     for item in usage:
+        seg_info = ""
+        if item.segment_count:
+            seg_info = f"{item.segment_count} trip{'s' if item.segment_count > 1 else ''} ({item.segment_hours:.1f}h)"
         rows.append({
             "Truck": item.truck_id,
             "Trailer": item.trailer_id,
             "Hits": item.hits,
             "Days": ", ".join(item.days),
+            "Trip Segments": seg_info,
             "First Seen": item.first_seen.strftime("%Y-%m-%d %H:%M UTC") if item.first_seen else "",
             "Last Seen": item.last_seen.strftime("%Y-%m-%d %H:%M UTC") if item.last_seen else "",
             "Min Distance (mi)": item.min_distance_miles,
