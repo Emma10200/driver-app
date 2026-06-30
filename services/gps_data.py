@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
-from services.gps_matching import Asset
+from services.gps_matching import Asset, TimelineSegment
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +158,81 @@ def load_all_unit_ids() -> dict[str, list[str]]:
     return result
 
 
+def load_asset_pairing_timeline(
+    unit_id: str,
+    unit_type: str,
+    start: datetime,
+    end: datetime,
+) -> list[TimelineSegment]:
+    """Load a pre-computed timeline from asset_pairings for one unit.
+
+    This is the fast path for the Unit Timeline tab. It avoids loading hundreds
+    of thousands of raw GPS pings and instead reads the compact pairing table.
+    """
+    try:
+        client = _get_client()
+    except Exception as e:
+        logger.warning("Asset pairings unavailable: %s", e)
+        return []
+
+    start = _ensure_aware(start)
+    end = _ensure_aware(end)
+    unit_col = "truck_id" if unit_type == "truck" else "trailer_id"
+    filters: dict[str, Any] = {
+        unit_col: f"eq.{unit_id}",
+        "start_time": f"lte.{end.isoformat()}",
+        "or": f"(end_time.gte.{start.isoformat()},end_time.is.null)",
+    }
+
+    try:
+        rows = client.select_all(
+            "asset_pairings",
+            filters=filters,
+            order="start_time.asc",
+            page_size=1000,
+            hard_cap=10000,
+        )
+    except Exception as e:
+        logger.info("Asset pairings timeline unavailable: %s", e)
+        return []
+
+    segments: list[TimelineSegment] = []
+    for row in rows:
+        start_time = _parse_dt(row.get("start_time"))
+        end_time = _parse_dt(row.get("end_time")) or end
+        if start_time is None:
+            continue
+        # Clip display range to the selected window.
+        seg_start = max(start_time, start)
+        seg_end = min(end_time, end)
+        if seg_end <= seg_start:
+            continue
+
+        if unit_type == "truck":
+            partner_type = "trailer"
+            partner_id = str(row.get("trailer_id") or "")
+        else:
+            partner_type = "truck"
+            partner_id = str(row.get("truck_id") or "")
+        if not partner_id:
+            continue
+
+        duration = (seg_end - seg_start).total_seconds() / 60.0
+        segments.append(TimelineSegment(
+            unit_id=unit_id,
+            unit_type=unit_type,
+            partner_id=partner_id,
+            partner_type=partner_type,
+            start=seg_start,
+            end=seg_end,
+            duration_minutes=round(float(row.get("duration_minutes") or duration), 1),
+            avg_distance_miles=round(float(row.get("avg_distance_miles") or 0), 3),
+            bucket_count=int(row.get("bucket_count") or 0),
+            confidence=round(float(row.get("confidence") or 0), 3),
+        ))
+    return segments
+
+
 def load_match_reviews(match_ids: list[str]) -> dict[str, dict[str, Any]]:
     """Load saved review decisions keyed by match_id."""
     if not match_ids:
@@ -289,6 +364,16 @@ def _to_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return _ensure_aware(parsed)
 
 
 def _ensure_aware(value: datetime) -> datetime:

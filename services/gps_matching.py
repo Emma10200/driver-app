@@ -658,6 +658,7 @@ def compute_unit_timeline(
     *,
     max_distance_miles: float = 0.5,
     division_filter: str | None = None,
+    time_index: _TimeIndex | None = None,
 ) -> list[TimelineSegment]:
     """Compute the assignment timeline for a single unit.
 
@@ -671,7 +672,8 @@ def compute_unit_timeline(
     - Consecutive buckets with the same partner merge into one segment.
     - Gaps (no nearby partner, not in yard) merge as 'UNMATCHED'.
     """
-    time_index = _build_time_index(history, division_filter)
+    if time_index is None:
+        time_index = _build_time_index(history, division_filter)
     unit_key = f"{unit_type}:{unit_id}"
     opposite_type = "truck" if unit_type == "trailer" else "trailer"
     opposite_prefix = f"{opposite_type}:"

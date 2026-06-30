@@ -18,6 +18,7 @@ import streamlit.components.v1 as components
 from services.gps_data import (
     load_all_unit_ids,
     load_assignments,
+    load_asset_pairing_timeline,
     load_asset_history,
     load_asset_history_range,
     load_current_assets,
@@ -234,7 +235,7 @@ def _render_timeline_tab(assets: list[Asset], max_dist: float) -> None:
         st.info("No units available.")
         return
 
-    selected = st.selectbox("Select unit", unit_options, key="timeline_unit")
+    selected = st.selectbox("Select unit", unit_options, key="timeline_unit_select")
     if not selected:
         return
 
@@ -250,31 +251,50 @@ def _render_timeline_tab(assets: list[Asset], max_dist: float) -> None:
     with col2:
         tl_end = st.date_input("To", value=today, key="tl_end")
 
-    if st.button("Compute Timeline", type="primary", key="tl_compute"):
+    use_raw_fallback = st.checkbox(
+        "If no precomputed pairings are found, compute from raw GPS pings (slow)",
+        value=False,
+        key="tl_raw_fallback",
+        help="Normally leave this off. Raw computation can load hundreds of thousands of GPS points.",
+    )
+
+    if st.button("Load Timeline", type="primary", key="tl_compute"):
         start_dt = datetime.combine(tl_start, time.min, tzinfo=timezone.utc)
         end_dt = datetime.combine(tl_end, time.max, tzinfo=timezone.utc)
         if end_dt < start_dt:
             start_dt, end_dt = end_dt, start_dt
 
-        with st.spinner(f"Loading history for {unit_id} ({(end_dt - start_dt).days} days)..."):
-            history = load_unit_timeline_history(unit_id, start_dt, end_dt)
+        with st.spinner("Loading precomputed pairings..."):
+            segments = load_asset_pairing_timeline(unit_id, unit_type, start_dt, end_dt)
 
-        if not history:
-            st.warning("No history found for this unit in the selected range.")
-            return
-
-        st.info(f"Loaded {len(history)} history points. Computing timeline...")
-        segments = compute_unit_timeline(
-            unit_id, unit_type, history, max_distance_miles=max_dist,
-        )
+        if not segments and use_raw_fallback:
+            days = max(1, (end_dt - start_dt).days)
+            if days > 3:
+                st.warning(
+                    "Raw timeline fallback is intentionally limited to 3 days in the UI. "
+                    "For longer ranges, run `python scripts/compute_pairings.py --days 7` locally first."
+                )
+                return
+            with st.spinner(f"No precomputed rows found. Loading raw GPS history for {unit_id} ({days} days)..."):
+                history = load_unit_timeline_history(unit_id, start_dt, end_dt)
+            if not history:
+                st.warning("No raw history found for this unit in the selected range.")
+                return
+            st.info(f"Loaded {len(history):,} history points. Computing raw timeline...")
+            segments = compute_unit_timeline(
+                unit_id, unit_type, history, max_distance_miles=max_dist,
+            )
 
         if not segments:
-            st.warning("No timeline segments found (unit may have no GPS data in this range).")
+            st.info(
+                "No precomputed pairing segments found for this unit/range yet. "
+                "Run `python scripts/compute_pairings.py --days 7` locally to populate asset_pairings."
+            )
             return
 
         # Store in session for display
         st.session_state["timeline_segments"] = segments
-        st.session_state["timeline_unit"] = f"{unit_type}:{unit_id}"
+        st.session_state["timeline_selected_unit"] = f"{unit_type}:{unit_id}"
 
     # Display timeline if available
     if "timeline_segments" in st.session_state:
