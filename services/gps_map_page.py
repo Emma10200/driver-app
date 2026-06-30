@@ -22,6 +22,7 @@ from services.gps_data import (
     load_asset_history,
     load_asset_history_range,
     load_current_assets,
+    load_hourly_evidence_timeline,
     load_match_reviews,
     load_recent_match_reviews,
     load_unit_timeline_history,
@@ -264,15 +265,22 @@ def _render_timeline_tab(assets: list[Asset], max_dist: float) -> None:
         if end_dt < start_dt:
             start_dt, end_dt = end_dt, start_dt
 
-        with st.spinner("Loading precomputed pairings..."):
-            segments = load_asset_pairing_timeline(unit_id, unit_type, start_dt, end_dt)
+        # Primary: hourly evidence table (detailed hour-by-hour view)
+        with st.spinner("Loading hourly evidence..."):
+            segments = load_hourly_evidence_timeline(unit_id, unit_type, start_dt, end_dt)
 
+        # Fallback 1: old asset_pairings (strict continuous segments)
+        if not segments:
+            with st.spinner("No hourly evidence found. Checking legacy pairings..."):
+                segments = load_asset_pairing_timeline(unit_id, unit_type, start_dt, end_dt)
+
+        # Fallback 2: raw GPS computation (slow, limited to 3 days)
         if not segments and use_raw_fallback:
             days = max(1, (end_dt - start_dt).days)
             if days > 3:
                 st.warning(
                     "Raw timeline fallback is intentionally limited to 3 days in the UI. "
-                    "For longer ranges, run `python scripts/compute_pairings.py --days 7` locally first."
+                    "For longer ranges, run `python scripts/compute_pair_hourly_evidence.py --days 7` locally first."
                 )
                 return
             with st.spinner(f"No precomputed rows found. Loading raw GPS history for {unit_id} ({days} days)..."):
@@ -287,8 +295,8 @@ def _render_timeline_tab(assets: list[Asset], max_dist: float) -> None:
 
         if not segments:
             st.info(
-                "No precomputed pairing segments found for this unit/range yet. "
-                "Run `python scripts/compute_pairings.py --days 7` locally to populate asset_pairings."
+                "No pairing evidence found for this unit/range yet. "
+                "Run `python scripts/compute_pair_hourly_evidence.py --days 60` locally to populate hourly evidence."
             )
             return
 

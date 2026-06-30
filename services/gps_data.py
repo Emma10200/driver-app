@@ -233,6 +233,82 @@ def load_asset_pairing_timeline(
     return segments
 
 
+def load_hourly_evidence_timeline(
+    unit_id: str,
+    unit_type: str,
+    start: datetime,
+    end: datetime,
+) -> list[TimelineSegment]:
+    """Load hour-by-hour evidence from asset_pair_hourly_evidence for one unit.
+
+    This is the new detailed path for the Unit Timeline tab. Each hourly row
+    becomes a 1-hour TimelineSegment, giving a full 24-hour view per day.
+    """
+    try:
+        client = _get_client()
+    except Exception as e:
+        logger.warning("Hourly evidence unavailable: %s", e)
+        return []
+
+    start = _ensure_aware(start)
+    end = _ensure_aware(end)
+    unit_col = "truck_id" if unit_type == "truck" else "trailer_id"
+    filters: dict[str, Any] = {
+        unit_col: f"eq.{unit_id}",
+        "and": f"(hour_start.gte.{start.isoformat()},hour_start.lte.{end.isoformat()})",
+    }
+
+    try:
+        rows = client.select_all(
+            "asset_pair_hourly_evidence",
+            filters=filters,
+            order="hour_start.asc",
+            page_size=1000,
+            hard_cap=50000,
+        )
+    except Exception as e:
+        logger.info("Hourly evidence timeline unavailable: %s", e)
+        return []
+
+    from datetime import timedelta as _td
+
+    segments: list[TimelineSegment] = []
+    for row in rows:
+        hour_start = _parse_dt(row.get("hour_start"))
+        if hour_start is None:
+            continue
+        hour_end = hour_start + _td(hours=1)
+
+        status = str(row.get("status") or "")
+        if unit_type == "truck":
+            partner_type = "trailer" if status != "same_yard" else "yard"
+            partner_id = str(row.get("trailer_id") or "")
+        else:
+            partner_type = "truck" if status != "same_yard" else "yard"
+            partner_id = str(row.get("truck_id") or "")
+        if not partner_id:
+            continue
+
+        if status == "same_yard":
+            partner_type = "yard"
+            yard = str(row.get("truck_yard") or row.get("trailer_yard") or "Yard")
+            partner_id = yard
+
+        segments.append(TimelineSegment(
+            unit_id=unit_id,
+            unit_type=unit_type,
+            partner_id=partner_id,
+            partner_type=partner_type,
+            start=hour_start,
+            end=hour_end,
+            duration_minutes=60.0,
+            avg_distance_miles=round(float(row.get("best_distance_miles") or 0), 3),
+            bucket_count=int(row.get("truck_pings") or 0) + int(row.get("trailer_pings") or 0),
+            confidence=round(float(row.get("confidence") or 0), 3),
+        ))
+    return segments
+
+
 def load_match_reviews(match_ids: list[str]) -> dict[str, dict[str, Any]]:
     """Load saved review decisions keyed by match_id."""
     if not match_ids:
