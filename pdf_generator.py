@@ -86,7 +86,7 @@ class CompanyPDF(FPDF):
     def field_row(self, label: str, value: Any) -> None:
         label_w = 70
         line_h = 5
-        val_str = str(value) if value else ""
+        val_str = _latin1_safe(str(value)) if value else ""
 
         x_start = self.l_margin
         val_w = self.w - self.r_margin - (x_start + label_w)
@@ -130,7 +130,7 @@ class CompanyPDF(FPDF):
 
     def field_row_wide(self, label: str, value: Any) -> None:
         line_h = 5
-        val_str = str(value) if value else ""
+        val_str = _latin1_safe(str(value)) if value else ""
 
         self.set_font("Helvetica", "B", 9)
         self.set_text_color(60, 60, 60)
@@ -148,13 +148,27 @@ class CompanyPDF(FPDF):
         self.ln(1)
 
 
+def _latin1_safe(text: str) -> str:
+    """Replace common Unicode punctuation with Latin-1 safe equivalents."""
+    _MAP = {
+        "\u2018": "'", "\u2019": "'",   # smart single quotes
+        "\u201C": '"', "\u201D": '"',   # smart double quotes
+        "\u2013": "-", "\u2014": "-",   # en/em dash
+        "\u2026": "...",                # ellipsis
+        "\u00A0": " ",                  # non-breaking space
+    }
+    for orig, repl in _MAP.items():
+        text = text.replace(orig, repl)
+    return text
+
+
 def _safe(data, key, default=""):
     val = data.get(key, default)
     if val is None:
         return default
     if isinstance(val, date):
         return val.isoformat()
-    return str(val)
+    return _latin1_safe(str(val))
 
 
 def _company_from_form_data(form_data) -> CompanyProfile | None:

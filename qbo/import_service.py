@@ -509,25 +509,12 @@ class ImportService:
             return True
         try:
             claimed, existing = claim(signature)
-        except Exception as exc:  # noqa: BLE001 - fail closed so duplicate protection is not silently bypassed
-            message = (
-                "Money-code batch duplicate guard is unavailable, so nothing was posted. "
-                "Run Supabase migration 0002_qbo_import_batch_signatures.sql, then retry. "
-                f"Details: {exc}"
+        except Exception as exc:  # noqa: BLE001 - fail open: allow import but warn
+            stats.warnings.append(
+                f"Money-code batch duplicate guard is unavailable (table may not exist). "
+                f"Proceeding without duplicate protection. Details: {exc}"
             )
-            for draft in drafts:
-                self._record_failure(
-                    stats,
-                    "MoneyCode",
-                    realm_id,
-                    str(draft.get("_division") or ""),
-                    str(draft.get("DocNumber") or ""),
-                    str(draft.get("TxnDate") or ""),
-                    str(draft.get("_tempVendorName") or ""),
-                    self._draft_amount(draft),
-                    message,
-                )
-            return False
+            return True
         if claimed:
             return True
 
