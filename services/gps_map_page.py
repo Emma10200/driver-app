@@ -109,7 +109,7 @@ def render_gps_map_page() -> None:
 
     # --- Tabs for heavy content ---
     tab_usage, tab_timeline, tab_matches, tab_history, tab_review = st.tabs([
-        "Trailer Usage Dashboard", "Unit Timeline", "Auto-Matches", "Historical Usage", "Match Review",
+        "Trailer Usage Dashboard", "Unit Timeline", "Current Proximity Diagnostics", "Raw History Diagnostics", "Match Review",
     ])
 
     with tab_usage:
@@ -153,8 +153,9 @@ def _render_map(
     truck_data = [
         {
             "lat": t.lat, "lon": t.lon, "id": t.asset_id,
-            "division": t.division, "provider": t.provider,
+            "division": _division_display(t.division), "provider": _provider_display(t.provider),
             "address": t.address, "coords": _coords(t),
+            "last_ping": _last_ping_text(t), "ping_age": _ping_age_text(t),
             "color": _truck_color(t.division, division_colors),
             "asset_type": "Truck",
         }
@@ -163,18 +164,26 @@ def _render_map(
     if truck_data:
         layers.append(pdk.Layer(
             "ScatterplotLayer", data=truck_data,
-            get_position=["lon", "lat"], get_radius=450,
-            radius_min_pixels=8, radius_max_pixels=26,
+            get_position=["lon", "lat"], get_radius=700,
+            radius_min_pixels=14, radius_max_pixels=42,
             get_fill_color="color", stroked=True,
             get_line_color=[255, 255, 255, 220], get_line_width=2,
             pickable=True, auto_highlight=True,
+        ))
+        layers.append(pdk.Layer(
+            "TextLayer", data=truck_data,
+            get_position=["lon", "lat"], get_text="id",
+            get_size=13, get_color=[255, 255, 255, 235],
+            get_angle=0, get_text_anchor="middle", get_alignment_baseline="center",
+            pickable=False,
         ))
 
     trailer_data = [
         {
             "lat": t.lat, "lon": t.lon, "id": t.asset_id,
-            "division": t.division, "provider": t.provider,
+            "division": _division_display(t.division), "provider": _provider_display(t.provider),
             "address": t.address, "coords": _coords(t),
+            "last_ping": _last_ping_text(t), "ping_age": _ping_age_text(t),
             "in_yard": in_yard(t.lat, t.lon) or "",
             "color": [255, 140, 0, 230], "asset_type": "Trailer",
         }
@@ -183,11 +192,18 @@ def _render_map(
     if trailer_data:
         layers.append(pdk.Layer(
             "ScatterplotLayer", data=trailer_data,
-            get_position=["lon", "lat"], get_radius=400,
-            radius_min_pixels=7, radius_max_pixels=24,
+            get_position=["lon", "lat"], get_radius=650,
+            radius_min_pixels=13, radius_max_pixels=40,
             get_fill_color="color", stroked=True,
             get_line_color=[255, 255, 255, 220], get_line_width=2,
             pickable=True, auto_highlight=True,
+        ))
+        layers.append(pdk.Layer(
+            "TextLayer", data=trailer_data,
+            get_position=["lon", "lat"], get_text="id",
+            get_size=12, get_color=[20, 24, 31, 245],
+            get_angle=0, get_text_anchor="middle", get_alignment_baseline="center",
+            pickable=False,
         ))
 
     all_coords = truck_data + trailer_data
@@ -201,8 +217,18 @@ def _render_map(
         layers=layers,
         initial_view_state=pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=5, pitch=0),
         tooltip={
-            "html": "<b>{asset_type}: {id}</b><br/>{coords}<br/>{address}<br/>{division}<br/>{provider}",
-            "style": {"backgroundColor": "#1f2937", "color": "#e5e7eb"},
+            "html": (
+                "<div style='font-size:13px;line-height:1.35;'>"
+                "<b style='font-size:15px'>{asset_type}: {id}</b><br/>"
+                "<b>Ping:</b> {last_ping}<br/>"
+                "<b>Age:</b> {ping_age}<br/>"
+                "<b>Coords:</b> {coords}<br/>"
+                "<b>Division:</b> {division}<br/>"
+                "<b>GPS:</b> {provider}<br/>"
+                "<b>Address:</b> {address}"
+                "</div>"
+            ),
+            "style": {"backgroundColor": "#111827", "color": "#f9fafb", "border": "1px solid #374151"},
         },
         map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
     )
@@ -756,8 +782,11 @@ def _render_matches_tab(
     active_divs: set[str],
 ) -> None:
     """Auto-match tab — only loads history when user clicks."""
-    st.subheader("Auto-Match Results")
-    st.caption("Computes trailer↔truck matches using current positions + GPS history evidence.")
+    st.subheader("Current Proximity Diagnostics")
+    st.caption(
+        "Diagnostic-only view using current positions plus accepted historical GPS points. "
+        "For billing/usage decisions, use the dense Trailer Usage Dashboard and Unit Timeline."
+    )
 
     if st.button("Compute Matches", type="primary", key="compute_matches_btn"):
         with st.spinner(f"Loading {history_hours}h of GPS history..."):
@@ -766,7 +795,7 @@ def _render_matches_tab(
         st.session_state["match_computed"] = True
 
     if not st.session_state.get("match_computed"):
-        st.info("Click **Compute Matches** to load history and run the matching engine.")
+        st.info("Click **Compute Matches** only when you need a live proximity diagnostic. Dense usage evidence is already precomputed in the first two tabs.")
         return
 
     history = st.session_state.get("match_history", [])
@@ -802,10 +831,10 @@ def _render_matches_tab(
 
 def _render_history_tab(max_dist: float, active_divs: set[str]) -> None:
     """Historical usage tab — only computes on button click."""
-    st.subheader("Historical Trailer Usage")
+    st.subheader("Raw History Diagnostics")
     st.caption(
-        "Many-to-many co-location analysis. Shows which trucks used which trailers over a date range. "
-        "Only loads and computes when you click the button."
+        "Diagnostic-only raw GPS co-location analysis. This is slower and not the official usage view. "
+        "Use Trailer Usage Dashboard for precomputed dense timestamp-matched results."
     )
 
     today = date.today()
@@ -867,7 +896,7 @@ def _render_review_tab(
     # Reuse matches from the Auto-Matches tab if already computed
     history = st.session_state.get("match_history", [])
     if not history:
-        st.info("Go to **Auto-Matches** tab and click Compute Matches first.")
+        st.info("Go to **Current Proximity Diagnostics** and click Compute Matches first if you need manual review rows.")
         return
 
     matches = compute_matches(
@@ -913,11 +942,34 @@ def _truck_color(division: str, division_colors: dict[str, list[int]]) -> list[i
     return division_colors.get(division or "", [96, 165, 250, 235])
 
 
+def _division_display(division: str | None) -> str:
+    text = str(division or "").strip()
+    normalized = text.lower().replace(" ", "").replace("_", "").replace("-", "")
+    if normalized in ("prestige", "prestig", "prestigetransportation"):
+        return "Prestige Transportation"
+    if normalized in ("xpress", "express"):
+        return "Xpress"
+    return text or "No division"
+
+
+def _provider_display(provider: str | None) -> str:
+    text = str(provider or "").strip()
+    if not text:
+        return "Unknown GPS"
+    if "gpstab" in text.lower():
+        return text.replace("GPSTab", "GPS Tab")
+    if "888" in text or "eld" in text.lower():
+        return "888 ELD"
+    if "anytrek" in text.lower():
+        return "Anytrek"
+    return text
+
+
 def _render_map_legend(division_colors: dict[str, list[int]]) -> None:
     legend_items = ["<span style='display:inline-block;width:12px;height:12px;border-radius:50%;background:rgb(255,140,0);border:1px solid #fff;margin-right:4px;'></span>Trailers"]
     for division, color in division_colors.items():
         legend_items.append(
-            f"<span style='display:inline-block;width:12px;height:12px;border-radius:50%;background:rgba({color[0]},{color[1]},{color[2]},{color[3] / 255:.2f});border:1px solid #fff;margin-right:4px;'></span>Truck: {escape(division)}"
+            f"<span style='display:inline-block;width:12px;height:12px;border-radius:50%;background:rgba({color[0]},{color[1]},{color[2]},{color[3] / 255:.2f});border:1px solid #fff;margin-right:4px;'></span>Truck: {escape(_division_display(division))}"
         )
     st.markdown(
         "<div style='font-size:0.85rem;margin-top:-0.5rem;margin-bottom:0.75rem;'>"
@@ -986,7 +1038,26 @@ def _vin(asset: Asset) -> str:
 def _last_ping_text(asset: Asset) -> str:
     if asset.last_ping is None:
         return ""
-    return asset.last_ping.strftime("%Y-%m-%d %H:%M UTC")
+    return asset.last_ping.astimezone(timezone.utc).strftime("%m/%d/%Y %I:%M %p UTC")
+
+
+def _ping_age_text(asset: Asset) -> str:
+    if asset.last_ping is None:
+        return "Unknown"
+    now = datetime.now(timezone.utc)
+    ping = asset.last_ping.astimezone(timezone.utc)
+    delta_seconds = max(0, int((now - ping).total_seconds()))
+    if delta_seconds < 90:
+        return "Just now"
+    minutes = delta_seconds // 60
+    if minutes < 60:
+        return f"{minutes} min ago"
+    hours = minutes // 60
+    if hours < 48:
+        rem = minutes % 60
+        return f"{hours}h {rem}m ago" if rem else f"{hours}h ago"
+    days = hours // 24
+    return f"{days} days ago"
 
 
 def _build_unit_rows(
@@ -1041,10 +1112,11 @@ def _build_unit_rows(
             "Board Assigned": board_unit,
             "Distance (mi)": distance,
             "Confidence": confidence,
-            "Provider": asset.provider,
-            "Division": asset.division,
+            "Provider": _provider_display(asset.provider),
+            "Division": _division_display(asset.division),
             "VIN": _vin(asset),
             "Last Ping": _last_ping_text(asset),
+            "Ping Age": _ping_age_text(asset),
             "Speed": asset.speed,
             "Heading": asset.heading_deg,
             "Yard": in_yard(float(asset.lat), float(asset.lon)) if _has_coords(asset) else "",
@@ -1084,6 +1156,8 @@ def _render_copy_grid(rows: list[dict[str, object]]) -> None:
         status = escape(str(row.get("Match Status") or ""))
         provider = escape(str(row.get("Provider") or ""))
         division = escape(str(row.get("Division") or ""))
+        ping_age = escape(str(row.get("Ping Age") or ""))
+        last_ping = escape(str(row.get("Last Ping") or ""))
         vin = escape(str(row.get("VIN") or ""))
         yard = escape(str(row.get("Yard") or ""))
         history_hits = escape(str(row.get("History Hits") or ""))
@@ -1100,6 +1174,8 @@ def _render_copy_grid(rows: list[dict[str, object]]) -> None:
             f"<td>{matched}</td>"
             f"<td>{status}</td>"
             f"<td>{division}</td>"
+            f"<td>{last_ping}</td>"
+            f"<td>{ping_age}</td>"
             f"<td>{vin}</td>"
             f"<td>{yard}</td>"
             f"<td>{history_hits}</td>"
@@ -1142,7 +1218,7 @@ def _render_copy_grid(rows: list[dict[str, object]]) -> None:
         <thead>
           <tr>
             <th>Type</th><th>Unit</th><th>Copy</th><th>Coords</th><th>Matched</th>
-            <th>Status</th><th>Division</th><th>VIN</th><th>Yard</th><th>History</th>
+            <th>Status</th><th>Division</th><th>Last Ping</th><th>Age</th><th>VIN</th><th>Yard</th><th>History</th>
             <th>Provider</th><th>Identifying Info</th><th>Address</th>
           </tr>
         </thead>
