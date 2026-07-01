@@ -20,34 +20,27 @@ import streamlit.components.v1 as components
 from services.gps_data import (
     deactivate_manual_pair_assignment,
     load_assignments,
-    load_asset_history,
-    load_asset_history_range,
     load_current_assets_with_last_known,
     load_hourly_evidence_rows,
     load_hourly_evidence_timeline,
     load_latest_pairing_job,
     load_manual_pair_assignments,
-    load_match_reviews,
-    load_recent_match_reviews,
     load_trailer_activity_summary,
     load_trailer_gps_trail,
     load_usage_daily_summary,
     save_manual_pair_assignment,
-    save_match_reviews,
 )
 from services.gps_matching import (
     Asset,
     MatchResult,
     TimelineSegment,
-    compute_historical_usage,
-    compute_matches,
     in_yard,
     YARD_BOXES,
 )
 
 
 def render_gps_map_page() -> None:
-    st.header("GPS Fleet Map & Trailer Matching")
+    st.header("GPS Fleet Map")
 
     # --- Load FAST data first (current positions only) ---
     with st.spinner("Loading positions..."):
@@ -73,13 +66,6 @@ def render_gps_map_page() -> None:
         unit_search,
     ) = _render_map_controls(assets, divisions, providers)
 
-    with st.sidebar.expander("Advanced diagnostic tuning", expanded=False):
-        st.caption("Used only by the diagnostic tabs below — not by the dense usage dashboard.")
-        max_dist = st.slider("Match radius (miles)", 0.1, 5.0, 0.5, 0.1)
-        max_stale = st.slider("Max stale (minutes)", 15, 240, 60, 15)
-        history_hours = st.slider("History lookback (hours)", 12, 168, 48, 12)
-        min_history_hits = st.slider("Min route hits", 1, 6, 2, 1)
-
     # --- Filter assets by toggles ---
     def _visible(a: Asset) -> bool:
         if a.asset_type == "truck" and not show_trucks:
@@ -95,8 +81,6 @@ def render_gps_map_page() -> None:
             return False
         if a.provider and a.provider not in active_providers:
             return False
-        if unit_search and not _asset_matches_search(a, unit_search):
-            return False
         return True
 
     visible_trucks = [t for t in trucks if _visible(t)]
@@ -110,31 +94,19 @@ def render_gps_map_page() -> None:
     # --- Map (renders FIRST with just current positions) ---
     _render_map(visible_trucks, visible_trailers, divisions, assignments, focus_asset=focused_asset)
 
-    # --- Tabs for heavy content ---
-    tab_usage, tab_timeline, tab_matches, tab_history, tab_review = st.tabs([
-        "Trailer Usage Dashboard", "Unit Timeline", "Current Proximity Diagnostics", "Raw History Diagnostics", "Match Review",
+    # --- Tabs: dispatcher-friendly first, audit behind ---
+    tab_fleet, tab_timeline, tab_usage = st.tabs([
+        "🚛 Fleet Overview", "📍 Unit Timeline", "📊 Trailer Usage & Billing",
     ])
+
+    with tab_fleet:
+        _render_fleet_overview_tab(visible_assets, assignments, unit_search)
+
+    with tab_timeline:
+        _render_timeline_tab(visible_assets)
 
     with tab_usage:
         _render_usage_dashboard(visible_assets, assignments, unit_search)
-
-    with tab_timeline:
-        _render_timeline_tab(visible_assets, max_dist)
-
-    with tab_matches:
-        _render_matches_tab(
-            visible_trucks, visible_trailers, assignments,
-            history_hours, min_history_hits, max_dist, max_stale, active_divs,
-        )
-
-    with tab_history:
-        _render_history_tab(max_dist, active_divs)
-
-    with tab_review:
-        _render_review_tab(
-            visible_trucks, visible_trailers, assignments,
-            history_hours, min_history_hits, max_dist, max_stale, active_divs,
-        )
 
 
 def _render_map(
@@ -256,6 +228,120 @@ def _render_map(
     )
     st.pydeck_chart(deck)
     _render_map_legend(division_colors)
+
+
+def _render_fleet_overview_tab(assets: list[Asset], assignments: dict[str, str], unit_search: str) -> None:
+    """Clean dispatcher-friendly fleet table with search, sort, and action buttons."""
+    # Build reverse lookup: trailer → truck from dispatch board
+    board_by_trailer: dict[str, str] = {
+        trailer_id: truck_id for truck_id, trailer_id in assignments.items() if trailer_id
+    }
+
+    # Apply the same unit search that affects the map
+    search_norm = (unit_search or "").strip().lower()
+
+    # Build simple fleet rows
+    fleet_rows: list[dict[str, Any]] = []
+    for asset in sorted(assets, key=lambda a: (a.asset_type, _unit_sort_key(a.asset_id))):
+        board_partner = ""
+        if asset.asset_type == "trailer":
+            board_partner = board_by_trailer.get(asset.asset_id, "")
+        elif asset.asset_type == "truck":
+            board_partner = assignments.get(asset.asset_id, "")
+
+        coords = _coords(asset)
+        row: dict[str, Any] = {
+            "Type": asset.asset_type.title(),
+            "Unit": asset.asset_id,
+            "Dispatch Partner": board_partner,
+            "Division": _division_display(asset.division),
+            "Provider": _provider_display(asset.provider),
+            "Location": _location_status(asset),
+            "Last Ping": _last_ping_text(asset),
+            "Age": _ping_age_text(asset),
+            "Coords": coords,
+            "Yard": in_yard(float(asset.lat), float(asset.lon)) if _has_coords(asset) else "",
+            "Speed": asset.speed if asset.speed else "",
+            "Address": asset.address or "",
+        }
+
+        if search_norm:
+            haystack = " ".join(str(v).lower() for v in row.values() if v)
+            if search_norm not in haystack:
+                continue
+        fleet_rows.append(row)
+
+    # Summary metrics
+    n_trucks = sum(1 for r in fleet_rows if r["Type"] == "Truck")
+    n_trailers = sum(1 for r in fleet_rows if r["Type"] == "Trailer")
+    n_in_yard = sum(1 for r in fleet_rows if r["Yard"])
+    n_moving = sum(1 for r in fleet_rows if r["Speed"] and str(r["Speed"]) not in ("0", "0.0", ""))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Trucks", n_trucks)
+    c2.metric("Trailers", n_trailers)
+    c3.metric("In Yard", n_in_yard)
+    c4.metric("Moving", n_moving)
+
+    if not fleet_rows:
+        st.info("No units match the current filters." + (" Try clearing the search." if search_norm else ""))
+        return
+
+    # Sort options
+    sort_col = st.selectbox(
+        "Sort by",
+        ["Unit", "Type", "Division", "Provider", "Age", "Dispatch Partner", "Yard"],
+        key="fleet_overview_sort",
+    )
+    sort_map = {
+        "Unit": lambda r: _unit_sort_key(str(r["Unit"])),
+        "Type": lambda r: (r["Type"], _unit_sort_key(str(r["Unit"]))),
+        "Division": lambda r: (str(r["Division"] or "~"), _unit_sort_key(str(r["Unit"]))),
+        "Provider": lambda r: (str(r["Provider"] or "~"), _unit_sort_key(str(r["Unit"]))),
+        "Age": lambda r: (str(r["Age"] or "~"), _unit_sort_key(str(r["Unit"]))),
+        "Dispatch Partner": lambda r: (0 if r["Dispatch Partner"] else 1, _unit_sort_key(str(r["Unit"]))),
+        "Yard": lambda r: (0 if r["Yard"] else 1, _unit_sort_key(str(r["Unit"]))),
+    }
+    fleet_rows.sort(key=sort_map.get(sort_col, sort_map["Unit"]))
+
+    # Render clean dataframe with link column for coords
+    display_rows = []
+    for r in fleet_rows:
+        display_rows.append({
+            "Type": r["Type"],
+            "Unit": r["Unit"],
+            "Dispatch Partner": r["Dispatch Partner"],
+            "Division": r["Division"],
+            "Location": r["Location"],
+            "Last Ping": r["Last Ping"],
+            "Age": r["Age"],
+            "Yard": r["Yard"],
+            "Speed": r["Speed"],
+            "Coords": r["Coords"],
+            "Provider": r["Provider"],
+        })
+
+    st.dataframe(
+        display_rows,
+        use_container_width=True,
+        hide_index=True,
+        height=min(600, 40 + 35 * len(display_rows)),
+        column_config={
+            "Type": st.column_config.TextColumn(width="small"),
+            "Unit": st.column_config.TextColumn(width="small"),
+            "Dispatch Partner": st.column_config.TextColumn(width="small"),
+            "Speed": st.column_config.TextColumn(width="small"),
+        },
+    )
+
+    # Downloadable CSV
+    csv_data = _rows_to_csv(display_rows)
+    st.download_button(
+        "⬇️ Download fleet CSV",
+        data=csv_data,
+        file_name="fleet_overview.csv",
+        mime="text/csv",
+        key="fleet_overview_download",
+    )
 
 
 def _render_usage_dashboard(assets: list[Asset], assignments: dict[str, str], unit_search: str) -> None:
@@ -1207,7 +1293,7 @@ def _evidence_review_flag(row: dict[str, Any]) -> str:
     return "Review"
 
 
-def _render_timeline_tab(assets: list[Asset], max_dist: float) -> None:
+def _render_timeline_tab(assets: list[Asset]) -> None:
     """Unit timeline: select a unit and see who it was paired with over time."""
     st.subheader("Unit Assignment Timeline")
     st.caption(
@@ -1482,147 +1568,6 @@ def _render_timeline_visual(segments: list[TimelineSegment]) -> None:
         })
 
     st.dataframe(table_rows, use_container_width=True, hide_index=True)
-
-
-def _render_matches_tab(
-    trucks: list[Asset],
-    trailers: list[Asset],
-    assignments: dict[str, str],
-    history_hours: int,
-    min_history_hits: int,
-    max_dist: float,
-    max_stale: float,
-    active_divs: set[str],
-) -> None:
-    """Auto-match tab — only loads history when user clicks."""
-    st.subheader("Current Proximity Diagnostics")
-    st.caption(
-        "Diagnostic-only view using current positions plus accepted historical GPS points. "
-        "For billing/usage decisions, use the dense Trailer Usage Dashboard and Unit Timeline."
-    )
-
-    if st.button("Compute Matches", type="primary", key="compute_matches_btn"):
-        with st.spinner(f"Loading {history_hours}h of GPS history..."):
-            history = load_asset_history(hours=history_hours)
-        st.session_state["match_history"] = history
-        st.session_state["match_computed"] = True
-
-    if not st.session_state.get("match_computed"):
-        st.info("Click **Compute Matches** only when you need a live proximity diagnostic. Dense usage evidence is already precomputed in the first two tabs.")
-        return
-
-    history = st.session_state.get("match_history", [])
-    matches = compute_matches(
-        trucks, trailers, assignments, history,
-        max_distance_miles=max_dist,
-        max_stale_minutes=max_stale,
-        min_history_hits=min_history_hits,
-    )
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Matches", len(matches))
-    c2.metric("Board Agrees", sum(1 for m in matches if m.on_board))
-    c3.metric("With Segments", sum(1 for m in matches if m.segment_count > 0))
-    c4.metric("History Rows", len(history))
-
-    if matches:
-        # Show match table inside expander
-        with st.expander("Match Details", expanded=True):
-            match_rows = _build_match_review_rows(matches)
-            _render_match_copy_grid(match_rows)
-
-        # Quick unit rows showing match results
-        with st.expander("Full Fleet Table (with matches)"):
-            unit_rows = _build_unit_rows(
-                [a for a in (trucks + trailers)], matches, assignments, None, "",
-            )
-            if unit_rows:
-                _render_copy_grid(unit_rows)
-    else:
-        st.info("No matches found with current settings.")
-
-
-def _render_history_tab(max_dist: float, active_divs: set[str]) -> None:
-    """Historical usage tab — only computes on button click."""
-    st.subheader("Raw History Diagnostics")
-    st.caption(
-        "Diagnostic-only raw GPS co-location analysis. This is slower and not the official usage view. "
-        "Use Trailer Usage Dashboard for precomputed dense timestamp-matched results."
-    )
-
-    today = date.today()
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        usage_start = st.date_input("From", value=today - timedelta(days=7), key="hist_start")
-    with col2:
-        usage_end = st.date_input("To", value=today, key="hist_end")
-    with col3:
-        usage_min_hits = st.slider("Min hours co-located", 1, 10, 2, 1, key="hist_min_hits")
-
-    if st.button("Compute Historical Usage", type="primary", key="hist_compute_btn"):
-        usage_start_dt, usage_end_dt = _local_date_range_to_utc(usage_start, usage_end)
-        if usage_end_dt < usage_start_dt:
-            usage_start_dt, usage_end_dt = usage_end_dt, usage_start_dt
-
-        with st.spinner(f"Loading {(usage_end_dt - usage_start_dt).days} days of history..."):
-            usage_history = load_asset_history_range(usage_start_dt, usage_end_dt)
-
-        if not usage_history:
-            st.warning("No history data in selected range.")
-            return
-
-        st.info(f"Loaded {len(usage_history)} points. Computing co-locations...")
-        usage_rows = _build_historical_usage_rows(
-            usage_history, selected_div=None, max_distance_miles=max_dist, min_hits=usage_min_hits,
-        )
-        st.session_state["hist_usage_rows"] = usage_rows
-
-    if "hist_usage_rows" in st.session_state:
-        usage_rows = st.session_state["hist_usage_rows"]
-        if usage_rows:
-            st.dataframe(
-                usage_rows, use_container_width=True, hide_index=True,
-                column_config={
-                    "Hits": st.column_config.NumberColumn("Hours", format="%d"),
-                    "Min Distance (mi)": st.column_config.NumberColumn(format="%.3f"),
-                    "Avg Distance (mi)": st.column_config.NumberColumn(format="%.3f"),
-                },
-            )
-        else:
-            st.info("No co-locations found for the selected range.")
-
-
-def _render_review_tab(
-    trucks: list[Asset],
-    trailers: list[Asset],
-    assignments: dict[str, str],
-    history_hours: int,
-    min_history_hits: int,
-    max_dist: float,
-    max_stale: float,
-    active_divs: set[str],
-) -> None:
-    """Match review (confirm/reject) tab — reuses match data if available."""
-    st.subheader("Match Review & Confirmation")
-
-    # Reuse matches from the Auto-Matches tab if already computed
-    history = st.session_state.get("match_history", [])
-    if not history:
-        st.info("Go to **Current Proximity Diagnostics** and click Compute Matches first if you need manual review rows.")
-        return
-
-    matches = compute_matches(
-        trucks, trailers, assignments, history,
-        max_distance_miles=max_dist,
-        max_stale_minutes=max_stale,
-        min_history_hits=min_history_hits,
-    )
-
-    if not matches:
-        st.info("No matches to review.")
-        return
-
-    _render_match_review(matches, selected_div=None)
 
 
 def _render_map_controls(
@@ -2168,279 +2113,6 @@ def _render_copy_grid(rows: list[dict[str, object]]) -> None:
     components.html(html, height=470, scrolling=False)
 
 
-def _render_match_review(matches: list[MatchResult], *, selected_div: str | None) -> None:
-    match_rows = _build_match_review_rows(matches)
-    st.caption(
-        "Use the copy buttons to paste truck coordinates into Anytrek. Then mark each auto-match as Confirmed, Rejected, or Pending."
-    )
-    _render_match_copy_grid(match_rows)
-
-    saved_reviews = load_match_reviews([str(row["Match ID"]) for row in match_rows])
-    editor_rows = []
-    for row in match_rows:
-        existing = saved_reviews.get(str(row["Match ID"]), {})
-        editor_rows.append({
-            "Decision": existing.get("decision", "Pending"),
-            "Reviewer Note": existing.get("reviewer_note", ""),
-            "Match ID": row["Match ID"],
-            "Trailer": row["Trailer"],
-            "Truck": row["Truck"],
-            "Truck Coords": row["Truck Coords"],
-            "Trailer Coords": row["Trailer Coords"],
-            "Distance (mi)": row["Distance (mi)"],
-            "Confidence": row["Confidence"],
-            "History Hits": row["History Hits"],
-            "On Board": row["On Board"],
-            "Trailer Yard": row["Trailer Yard"],
-            "Truck Yard": row["Truck Yard"],
-            "Reasons": row["Reasons"],
-        })
-
-    with st.form("gps_match_review_submit_form"):
-        edited_rows = st.data_editor(
-            editor_rows,
-            use_container_width=True,
-            hide_index=True,
-            disabled=[
-                "Match ID",
-                "Trailer",
-                "Truck",
-                "Truck Coords",
-                "Trailer Coords",
-                "Distance (mi)",
-                "Confidence",
-                "History Hits",
-                "On Board",
-                "Trailer Yard",
-                "Truck Yard",
-                "Reasons",
-            ],
-            column_config={
-                "Decision": st.column_config.SelectboxColumn(
-                    "Decision",
-                    options=["Pending", "Confirmed", "Rejected"],
-                    required=True,
-                    help="Mark whether your Anytrek coordinate check agrees with the auto-match.",
-                ),
-                "Reviewer Note": st.column_config.TextColumn(
-                    "Reviewer Note",
-                    help="Optional note, especially useful for rejected matches.",
-                ),
-                "Distance (mi)": st.column_config.NumberColumn("Distance (mi)", format="%.3f"),
-                "History Hits": st.column_config.NumberColumn("History Hits", format="%d"),
-            },
-            key="gps_match_review_editor",
-        )
-        submitted = st.form_submit_button("Save confirmed/rejected reviews to database", use_container_width=True)
-
-    edited_list = _table_to_records(edited_rows)
-    review_state = {
-        str(row["Match ID"]): {
-            "Decision": row.get("Decision", "Pending"),
-            "Reviewer Note": row.get("Reviewer Note", ""),
-        }
-        for row in edited_list
-    }
-
-    artifact_rows = _build_review_artifact_rows(match_rows, review_state, selected_div=selected_div)
-    save_rows = [row for row in artifact_rows if row["decision"] in {"Confirmed", "Rejected"}]
-    if submitted:
-        if not save_rows:
-            st.warning("Mark at least one row Confirmed or Rejected before saving.")
-        else:
-            try:
-                saved_count = save_match_reviews(save_rows)
-                st.success(f"Saved {saved_count} review decision(s) to Supabase.")
-            except Exception as exc:
-                st.error(
-                    "Could not save reviews. Run `supabase/migrations/0016_gps_match_reviews.sql` in Supabase first, "
-                    f"then try again. Error: {exc}"
-                )
-
-    reviewed_count = sum(1 for row in artifact_rows if row["decision"] != "Pending")
-    rejected_count = sum(1 for row in artifact_rows if row["decision"] == "Rejected")
-    confirmed_count = sum(1 for row in artifact_rows if row["decision"] == "Confirmed")
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Reviewed", reviewed_count)
-    c2.metric("Confirmed", confirmed_count)
-    c3.metric("Rejected", rejected_count)
-    c4.metric("Pending", len(artifact_rows) - reviewed_count)
-
-    reviewed_artifact_rows = [row for row in artifact_rows if row["decision"] != "Pending"]
-    if reviewed_artifact_rows:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        csv_data = _rows_to_csv(reviewed_artifact_rows)
-        json_data = json.dumps(reviewed_artifact_rows, indent=2, default=str)
-        d1, d2 = st.columns(2)
-        d1.download_button(
-            "Download reviewed matches CSV",
-            data=csv_data,
-            file_name=f"gps_match_review_{timestamp}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-        d2.download_button(
-            "Download reviewed matches JSON",
-            data=json_data,
-            file_name=f"gps_match_review_{timestamp}.json",
-            mime="application/json",
-            use_container_width=True,
-        )
-    else:
-        st.info("Confirm or reject at least one auto-match to generate a downloadable review artifact.")
-
-    saved_export_rows = load_recent_match_reviews(limit=1000)
-    if saved_export_rows:
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        st.download_button(
-            "Download saved review database export CSV",
-            data=_rows_to_csv(saved_export_rows),
-            file_name=f"gps_saved_match_reviews_{timestamp}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-
-
-def _build_match_review_rows(matches: list[MatchResult]) -> list[dict[str, object]]:
-    rows = []
-    for m in matches:
-        rows.append({
-            "Match ID": f"{m.trailer.asset_id}__{m.truck.asset_id}",
-            "Trailer": m.trailer.asset_id,
-            "Truck": m.truck.asset_id,
-            "Truck Coords": _coords(m.truck),
-            "Trailer Coords": _coords(m.trailer),
-            "Distance (mi)": m.distance_miles,
-            "Confidence": f"{m.confidence:.0%}",
-            "History Hits": m.history_hits,
-            "On Board": "Yes" if m.on_board else "No",
-            "Trailer Yard": m.trailer_yard,
-            "Truck Yard": m.truck_yard,
-            "Reasons": ", ".join(m.reasons),
-            "Truck Provider": m.truck.provider,
-            "Trailer Provider": m.trailer.provider,
-            "Truck Address": m.truck.address,
-            "Trailer Address": m.trailer.address,
-            "Truck Division": m.truck.division,
-            "Trailer Division": m.trailer.division,
-        })
-    return rows
-
-
-def _render_match_copy_grid(rows: list[dict[str, object]]) -> None:
-    table_rows = []
-    for row in rows:
-        truck_coords = str(row.get("Truck Coords") or "")
-        trailer_coords = str(row.get("Trailer Coords") or "")
-        truck_coords_js = truck_coords.replace("\\", "\\\\").replace("'", "\\'")
-        trailer_coords_js = trailer_coords.replace("\\", "\\\\").replace("'", "\\'")
-        table_rows.append(
-            "<tr>"
-            f"<td>{escape(str(row.get('Trailer') or ''))}</td>"
-            f"<td>{escape(str(row.get('Truck') or ''))}</td>"
-            f"<td><button onclick=\"copyCoords('{truck_coords_js}', this)\">Copy truck</button></td>"
-            f"<td class='coords'>{escape(truck_coords)}</td>"
-            f"<td><button onclick=\"copyCoords('{trailer_coords_js}', this)\">Copy trailer</button></td>"
-            f"<td class='coords'>{escape(trailer_coords)}</td>"
-            f"<td>{escape(str(row.get('Distance (mi)') or ''))}</td>"
-            f"<td>{escape(str(row.get('Confidence') or ''))}</td>"
-            f"<td>{escape(str(row.get('History Hits') or ''))}</td>"
-            f"<td>{escape(str(row.get('On Board') or ''))}</td>"
-            f"<td title='{escape(str(row.get('Reasons') or ''))}'>{escape(str(row.get('Reasons') or ''))}</td>"
-            "</tr>"
-        )
-    html = f"""
-    <style>
-      body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; }}
-      .wrap {{ max-height: 320px; overflow: auto; border: 1px solid #2f3b4a; border-radius: 8px; }}
-      table {{ border-collapse: collapse; width: 100%; font-size: 13px; color: #f3f6fb; background: #0e1117; }}
-      th, td {{ border-bottom: 1px solid #283241; padding: 7px 8px; text-align: left; white-space: nowrap; }}
-      th {{ position: sticky; top: 0; background: #1f2937; z-index: 1; }}
-      tr:hover {{ background: #172033; }}
-      button {{ cursor: pointer; border: 0; border-radius: 6px; padding: 5px 9px; background: #2563eb; color: white; font-weight: 600; }}
-      .coords {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
-    </style>
-    <script>
-      async function copyCoords(coords, btn) {{
-        try {{
-          await navigator.clipboard.writeText(coords);
-          const old = btn.innerText;
-          btn.innerText = 'Copied';
-          setTimeout(() => btn.innerText = old, 1200);
-        }} catch (err) {{
-          btn.innerText = 'Select coords';
-        }}
-      }}
-    </script>
-    <div class="wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Trailer</th><th>Truck</th><th>Copy Truck</th><th>Truck Coords</th>
-            <th>Copy Trailer</th><th>Trailer Coords</th><th>Dist</th><th>Conf</th><th>Hist</th><th>Board</th><th>Reasons</th>
-          </tr>
-        </thead>
-        <tbody>{''.join(table_rows)}</tbody>
-      </table>
-    </div>
-    """
-    components.html(html, height=350, scrolling=False)
-
-
-def _build_review_artifact_rows(
-    match_rows: list[dict[str, object]],
-    review_state: dict[str, dict[str, str]],
-    *,
-    selected_div: str | None,
-) -> list[dict[str, object]]:
-    reviewed_at = datetime.now(timezone.utc).isoformat()
-    out = []
-    for row in match_rows:
-        state = review_state.get(str(row["Match ID"]), {})
-        decision = state.get("Decision", "Pending")
-        reviewer_note = state.get("Reviewer Note", "")
-        out.append({
-            "match_id": row["Match ID"],
-            "decision": decision,
-            "reviewer_note": reviewer_note,
-            "reviewed_at": reviewed_at,
-            "division_filter": selected_div or "All",
-            "trailer_id": row["Trailer"],
-            "truck_id": row["Truck"],
-            "truck_coords": row["Truck Coords"],
-            "trailer_coords": row["Trailer Coords"],
-            "distance_miles": row["Distance (mi)"],
-            "confidence": row["Confidence"],
-            "history_hits": row["History Hits"],
-            "on_board": row["On Board"],
-            "trailer_yard": row["Trailer Yard"],
-            "truck_yard": row["Truck Yard"],
-            "reasons": row["Reasons"],
-            "truck_provider": row["Truck Provider"],
-            "trailer_provider": row["Trailer Provider"],
-            "truck_address": row["Truck Address"],
-            "trailer_address": row["Trailer Address"],
-            "truck_division": row["Truck Division"],
-            "trailer_division": row["Trailer Division"],
-            "raw": row,
-        })
-    return out
-
-
-def _table_to_records(data: object) -> list[dict[str, object]]:
-    if hasattr(data, "to_dict"):
-        try:
-            records = data.to_dict("records")
-            if isinstance(records, list):
-                return records
-        except TypeError:
-            pass
-    if isinstance(data, list):
-        return [dict(row) for row in data if isinstance(row, dict)]
-    return []
-
-
 def _rows_to_csv(rows: list[dict[str, object]]) -> str:
     if not rows:
         return ""
@@ -2449,36 +2121,3 @@ def _rows_to_csv(rows: list[dict[str, object]]) -> str:
     writer.writeheader()
     writer.writerows(rows)
     return buffer.getvalue()
-
-
-def _build_historical_usage_rows(
-    history: list[Asset],
-    *,
-    selected_div: str | None,
-    max_distance_miles: float,
-    min_hits: int,
-) -> list[dict[str, object]]:
-    usage = compute_historical_usage(
-        history,
-        max_distance_miles=max_distance_miles,
-        min_hits=min_hits,
-        division_filter=selected_div,
-    )
-    rows: list[dict[str, object]] = []
-    for item in usage:
-        seg_info = ""
-        if item.segment_count:
-            seg_info = f"{item.segment_count} trip{'s' if item.segment_count > 1 else ''} ({item.segment_hours:.1f}h)"
-        rows.append({
-            "Truck": item.truck_id,
-            "Trailer": item.trailer_id,
-            "Hits": item.hits,
-            "Days": ", ".join(item.days),
-            "Trip Segments": seg_info,
-            "First Seen": _format_dt_text(item.first_seen) if item.first_seen else "",
-            "Last Seen": _format_dt_text(item.last_seen) if item.last_seen else "",
-            "Min Distance (mi)": item.min_distance_miles,
-            "Avg Distance (mi)": item.avg_distance_miles,
-            "Confidence": f"{item.confidence:.0%}",
-        })
-    return rows
