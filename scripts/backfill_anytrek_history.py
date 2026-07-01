@@ -584,9 +584,24 @@ def _format_anytrek_time(dt: datetime) -> str:
 
 
 def _canonical_trailer_id(vehicle_name: str) -> str:
-    """Extract 6-digit canonical trailer ID from Anytrek vehicleName."""
-    match = re.search(r"\d{6}", str(vehicle_name or ""))
-    return match.group(0) if match else ""
+    """Extract canonical trailer ID from Anytrek vehicleName.
+
+    Prefers a 6-digit run (e.g. '536471 P-12' -> '536471').
+    Falls back to digit-dash tokens so IDs like '4907-15' are preserved.
+    """
+    text = str(vehicle_name or "").strip()
+    if not text:
+        return ""
+    match6 = re.search(r"\d{6}", text)
+    if match6:
+        return match6.group(0)
+    match_dash = re.match(r"(\d{2,}-\d+[\w-]*)", text)
+    if match_dash:
+        return match_dash.group(1)
+    match_digits = re.match(r"(\d+)", text)
+    if match_digits:
+        return match_digits.group(1)
+    return text
 
 
 def _haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

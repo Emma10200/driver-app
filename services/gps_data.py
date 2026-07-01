@@ -848,22 +848,36 @@ def load_trailer_gps_trail(
 
     Returns lightweight dicts with lat, lon, recorded_at for route plotting.
     """
+    return _load_asset_gps_trail("trailer", trailer_id, start, end)
+
+
+def load_truck_gps_trail(
+    truck_id: str, start: datetime, end: datetime
+) -> list[dict[str, Any]]:
+    """Load raw GPS pings for a single truck from assets_history."""
+    return _load_asset_gps_trail("truck", truck_id, start, end)
+
+
+def _load_asset_gps_trail(
+    asset_type: str, asset_id: str, start: datetime, end: datetime
+) -> list[dict[str, Any]]:
+    """Shared loader for truck/trailer GPS trail from assets_history."""
     try:
         client = _get_client()
     except Exception as e:
-        logger.warning("Trailer GPS trail unavailable: %s", e)
+        logger.warning("GPS trail unavailable: %s", e)
         return []
     start = _ensure_aware(start)
     end = _ensure_aware(end)
     filters: dict[str, Any] = {
-        "asset_id": f"eq.{trailer_id}",
-        "asset_type": "eq.trailer",
+        "asset_id": f"eq.{asset_id}",
+        "asset_type": f"eq.{asset_type}",
         "and": f"(recorded_at.gte.{start.isoformat()},recorded_at.lte.{end.isoformat()})",
     }
     try:
         rows = client.select_all(
             "assets_history",
-            select="lat,lon,recorded_at,speed",
+            select="lat,lon,recorded_at,speed,provider",
             filters=filters,
             order="recorded_at.asc",
             page_size=1000,
@@ -871,7 +885,7 @@ def load_trailer_gps_trail(
         )
         return [r for r in rows if r.get("lat") and r.get("lon")]
     except Exception as e:
-        logger.info("Trailer GPS trail query failed: %s", e)
+        logger.info("GPS trail query failed: %s", e)
         return []
 
 

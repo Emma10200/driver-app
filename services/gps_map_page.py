@@ -28,6 +28,7 @@ from services.gps_data import (
     load_manual_pair_assignments,
     load_trailer_activity_summary,
     load_trailer_gps_trail,
+    load_truck_gps_trail,
     load_usage_daily_summary,
     load_yard_proximity_pings,
     save_manual_pair_assignment,
@@ -701,7 +702,7 @@ def _render_unmatched_trailers_alert(start_dt: datetime, end_dt: datetime) -> No
 def _render_unmatched_trailer_trail(
     trailer_id: str, start_dt: datetime, end_dt: datetime
 ) -> None:
-    """Show GPS trail for an unmatched trailer on a pydeck map."""
+    """Show GPS trail for an unmatched trailer on a pydeck map, with timestamps."""
     try:
         import pydeck as pdk
     except ImportError:
@@ -715,14 +716,34 @@ def _render_unmatched_trailer_trail(
         st.info(f"No GPS pings found for trailer {trailer_id} in the selected date range.")
         return
 
+    # Parse timestamps for display
+    timestamps = []
+    for r in trail:
+        ts = r.get("recorded_at")
+        if ts:
+            try:
+                timestamps.append(datetime.fromisoformat(str(ts).replace("Z", "+00:00")))
+            except (ValueError, AttributeError):
+                pass
+    first_ts = min(timestamps) if timestamps else None
+    last_ts = max(timestamps) if timestamps else None
+
     points = _dedupe_path_points([(r["lat"], r["lon"]) for r in trail])
     if len(points) < 2:
         st.info(f"Only {len(points)} unique GPS point(s) — not enough for a route.")
         return
 
-    st.caption(f"{len(points)} GPS points for trailer {trailer_id}")
+    # Show timestamp range
+    if first_ts and last_ts:
+        fmt = "%m/%d %I:%M %p"
+        st.caption(
+            f"{len(points)} GPS points for trailer {trailer_id}  ·  "
+            f"**{first_ts.strftime(fmt)} — {last_ts.strftime(fmt)} UTC**"
+        )
+    else:
+        st.caption(f"{len(points)} GPS points for trailer {trailer_id}")
 
-    # Build pydeck layers
+    # Build timestamped point data for tooltips
     path_data = [{
         "trailer": trailer_id,
         "path": [[lon, lat] for lat, lon in points],
@@ -730,14 +751,18 @@ def _render_unmatched_trailer_trail(
         "label": f"Trailer {trailer_id} — {len(points)} pts, {len(trail)} pings",
     }]
     point_data = []
-    for i, (lat, lon) in enumerate(points):
+    for i, row in enumerate(trail):
+        lat, lon = row.get("lat"), row.get("lon")
+        if not lat or not lon:
+            continue
         is_start = i == 0
-        is_end = i == len(points) - 1
+        is_end = i == len(trail) - 1
         color = [34, 197, 94, 240] if is_start else ([239, 68, 68, 240] if is_end else [249, 115, 22, 180])
+        ts_str = str(row.get("recorded_at", ""))[:16].replace("T", " ")
         tag = "START" if is_start else ("END" if is_end else f"#{i + 1}")
         point_data.append({
-            "lat": lat, "lon": lon,
-            "label": f"{trailer_id} {tag}",
+            "lat": float(lat), "lon": float(lon),
+            "label": f"{trailer_id} {tag} — {ts_str}",
             "color": color,
         })
 
@@ -751,19 +776,142 @@ def _render_unmatched_trailer_trail(
                   get_radius=400, radius_min_pixels=4, radius_max_pixels=12,
                   get_fill_color="color", pickable=True),
     ]
-    st.pydeck_chart(pdk.Deck(
+    deck = pdk.Deck(
         layers=layers,
         initial_view_state=pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=7, pitch=0),
         tooltip={"text": "{label}"},
         map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
-    ))
+    )
+    st.pydeck_chart(deck)
 
     # Google Maps link + copy coords
     maps_url = _google_maps_route_url(points)
     if maps_url:
         st.markdown(f"[Open route in Google Maps]({maps_url})")
+
+    # --- Truck Guess Lookup ---
+    st.markdown("---")
+    st.markdown("**Guess which truck pulled this trailer**")
+    st.caption("Enter a truck number to overlay its GPS route on the same time window.")
+    guess_truck = st.text_input(
+        "Truck #",
+        key=f"truck_guess_{trailer_id}",
+        placeholder="e.g. 1987",
+    ).strip()
+    if guess_truck and st.button(f"Show truck {guess_truck} route", key=f"truck_guess_btn_{trailer_id}"):
+        _render_truck_guess_overlay(guess_truck, trailer_id, start_dt, end_dt, points, first_ts, last_ts)
+
     with st.expander(f"Copy coordinates ({len(points)} points)", expanded=False):
         st.code(_format_path_points(points), language="text")
+
+
+def _render_truck_guess_overlay(
+    truck_id: str,
+    trailer_id: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    trailer_points: list[tuple[float, float]],
+    trailer_first_ts: datetime | None,
+    trailer_last_ts: datetime | None,
+) -> None:
+    """Overlay a guessed truck's GPS trail on the unmatched trailer trail."""
+    try:
+        import pydeck as pdk
+    except ImportError:
+        st.warning("pydeck not available.")
+        return
+
+    with st.spinner(f"Loading GPS trail for truck {truck_id}..."):
+        truck_trail = load_truck_gps_trail(truck_id, start_dt, end_dt)
+
+    if not truck_trail:
+        st.warning(f"No GPS pings found for truck **{truck_id}** in this date range.")
+        return
+
+    truck_points = _dedupe_path_points([(r["lat"], r["lon"]) for r in truck_trail])
+    truck_timestamps = []
+    for r in truck_trail:
+        ts = r.get("recorded_at")
+        if ts:
+            try:
+                truck_timestamps.append(datetime.fromisoformat(str(ts).replace("Z", "+00:00")))
+            except (ValueError, AttributeError):
+                pass
+    truck_first = min(truck_timestamps) if truck_timestamps else None
+    truck_last = max(truck_timestamps) if truck_timestamps else None
+
+    if len(truck_points) < 2:
+        st.warning(f"Truck {truck_id} has only {len(truck_points)} GPS point(s) — not enough for a route.")
+        return
+
+    fmt = "%m/%d %I:%M %p"
+    st.markdown(
+        f"**Truck {truck_id}**: {len(truck_points)} GPS points"
+        + (f"  ·  {truck_first.strftime(fmt)} — {truck_last.strftime(fmt)} UTC" if truck_first and truck_last else "")
+    )
+
+    # Simple overlap check
+    if trailer_first_ts and trailer_last_ts and truck_first and truck_last:
+        overlap_start = max(trailer_first_ts, truck_first)
+        overlap_end = min(trailer_last_ts, truck_last)
+        if overlap_start < overlap_end:
+            overlap_hrs = (overlap_end - overlap_start).total_seconds() / 3600
+            st.success(f"Time overlap: **{overlap_hrs:.1f}h** ({overlap_start.strftime(fmt)} — {overlap_end.strftime(fmt)} UTC)")
+        else:
+            st.warning("No time overlap between truck and trailer GPS windows.")
+
+    # Build combined map
+    layers = [
+        # Trailer path (orange)
+        pdk.Layer("PathLayer", data=[{
+            "path": [[lon, lat] for lat, lon in trailer_points],
+            "color": [249, 115, 22, 200],
+        }], get_path="path", get_color="color", width_min_pixels=3, pickable=False),
+        # Truck path (blue)
+        pdk.Layer("PathLayer", data=[{
+            "path": [[lon, lat] for lat, lon in truck_points],
+            "color": [59, 130, 246, 200],
+        }], get_path="path", get_color="color", width_min_pixels=3, pickable=False),
+    ]
+
+    # Truck waypoints with timestamps
+    truck_point_data = []
+    for i, row in enumerate(truck_trail):
+        lat, lon = row.get("lat"), row.get("lon")
+        if not lat or not lon:
+            continue
+        is_start = i == 0
+        is_end = i == len(truck_trail) - 1
+        color = [34, 197, 94, 240] if is_start else ([239, 68, 68, 240] if is_end else [59, 130, 246, 160])
+        ts_str = str(row.get("recorded_at", ""))[:16].replace("T", " ")
+        tag = "START" if is_start else ("END" if is_end else f"#{i + 1}")
+        truck_point_data.append({
+            "lat": float(lat), "lon": float(lon),
+            "label": f"Truck {truck_id} {tag} — {ts_str}",
+            "color": color,
+        })
+
+    layers.append(
+        pdk.Layer("ScatterplotLayer", data=truck_point_data, get_position=["lon", "lat"],
+                  get_radius=350, radius_min_pixels=4, radius_max_pixels=10,
+                  get_fill_color="color", pickable=True),
+    )
+
+    all_points = list(trailer_points) + list(truck_points)
+    center_lat = sum(lat for lat, _ in all_points) / len(all_points)
+    center_lon = sum(lon for _, lon in all_points) / len(all_points)
+
+    st.markdown(
+        "<span style='color:#f97316;font-weight:800;'>■</span> Trailer "
+        f"<span style='color:#3b82f6;font-weight:800;'>■</span> Truck {truck_id}",
+        unsafe_allow_html=True,
+    )
+    st.pydeck_chart(pdk.Deck(
+        layers=layers,
+        initial_view_state=pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=6, pitch=0),
+        tooltip={"text": "{label}"},
+        map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+    ))
 
 
 def _render_manual_assignments_section() -> None:
