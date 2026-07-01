@@ -18,6 +18,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from services.gps_data import (
+    build_yard_mode_timeline,
     deactivate_manual_pair_assignment,
     load_assignments,
     load_current_assets_with_last_known,
@@ -28,12 +29,14 @@ from services.gps_data import (
     load_trailer_activity_summary,
     load_trailer_gps_trail,
     load_usage_daily_summary,
+    load_yard_proximity_pings,
     save_manual_pair_assignment,
 )
 from services.gps_matching import (
     Asset,
     MatchResult,
     TimelineSegment,
+    YARD_GEOFENCES,
     in_yard,
     YARD_BOXES,
 )
@@ -1349,6 +1352,23 @@ def _render_timeline_tab(assets: list[Asset]) -> None:
     with col2:
         tl_end = st.date_input("To", value=today, key="tl_end")
 
+    # --- Yard Mode toggle ---
+    yard_mode = st.toggle(
+        "Yard Mode (aggressive matching)",
+        value=False,
+        key="tl_yard_mode",
+        help=(
+            "Hyper-specific yard analysis. Throws out all conservative logic and "
+            "shows every data point at 5- or 10-minute intervals across all GPS "
+            "providers. Catches trailer shuffling in the yard. Does NOT affect "
+            "normal pairing logic."
+        ),
+    )
+
+    if yard_mode:
+        _render_yard_mode_controls(unit_id, unit_type, tl_start, tl_end)
+        return
+
     if st.button("Load Timeline", type="primary", key="tl_compute"):
         start_dt, end_dt = _local_date_range_to_utc(tl_start, tl_end)
         if end_dt < start_dt:
@@ -1374,6 +1394,212 @@ def _render_timeline_tab(assets: list[Asset]) -> None:
     if "timeline_segments" in st.session_state:
         segments = st.session_state["timeline_segments"]
         _render_timeline_visual(segments)
+
+
+# ---------------------------------------------------------------------------
+# Yard Mode — aggressive fine-grained proximity timeline
+# ---------------------------------------------------------------------------
+
+_YARD_MODE_CSS = """
+<style>
+.yard-alert { background: rgba(239,68,68,.14); border: 1px solid rgba(239,68,68,.35); border-radius: 10px; padding: .65rem .85rem; margin: .45rem 0; }
+.yard-alert b { color: #fca5a5; }
+.yard-detail-row { font-size: .85rem; }
+.yard-close { color: #fbbf24; font-weight: 800; }
+.yard-far { color: #94a3b8; }
+</style>
+"""
+
+
+def _render_yard_mode_controls(
+    unit_id: str, unit_type: str, tl_start: date, tl_end: date
+) -> None:
+    """Render yard-mode-specific controls and results."""
+    st.markdown(_YARD_MODE_CSS, unsafe_allow_html=True)
+
+    st.info(
+        "**Yard Mode** — every available ping, every provider, no conservative "
+        "filtering. Use short date ranges (1–3 days) for best performance.",
+        icon="🔬",
+    )
+
+    yard_names = list(YARD_GEOFENCES.keys())
+    yc1, yc2 = st.columns(2)
+    with yc1:
+        yard_name = st.selectbox("Yard", yard_names, key="tl_yard_name")
+    with yc2:
+        bucket_minutes = st.selectbox(
+            "Bucket interval",
+            [5, 10, 15],
+            index=0,
+            key="tl_yard_bucket",
+            help="Smaller = more data points. 5 min recommended for catching shuffles.",
+        )
+
+    if st.button("Run Yard Analysis", type="primary", key="tl_yard_run"):
+        start_dt, end_dt = _local_date_range_to_utc(tl_start, tl_end)
+        if end_dt < start_dt:
+            start_dt, end_dt = end_dt, start_dt
+
+        # Guard: warn on ranges > 3 days
+        span_days = (end_dt - start_dt).total_seconds() / 86400
+        if span_days > 5:
+            st.warning("Yard mode works best with 1–3 day ranges. This range is "
+                        f"{span_days:.0f} days — results may be slow or truncated.")
+
+        with st.spinner("Loading ALL yard pings (every provider, no filters)..."):
+            raw_pings = load_yard_proximity_pings(yard_name, start_dt, end_dt)
+
+        if not raw_pings:
+            st.warning(
+                f"No GPS pings found inside **{yard_name}** for this date range. "
+                "The unit may not have been in the yard, or history data hasn't been backfilled yet."
+            )
+            return
+
+        with st.spinner(f"Building {bucket_minutes}-min proximity buckets..."):
+            segments, detail_rows = build_yard_mode_timeline(
+                unit_id, unit_type, raw_pings, bucket_minutes=bucket_minutes,
+            )
+
+        if not segments:
+            st.warning(
+                f"**{unit_type.title()} {unit_id}** had no pings inside "
+                f"**{yard_name}** during this period."
+            )
+            # Show what WAS there
+            _render_yard_other_units(raw_pings, unit_id, unit_type)
+            return
+
+        st.session_state["yard_segments"] = segments
+        st.session_state["yard_details"] = detail_rows
+        st.session_state["yard_raw_count"] = len(raw_pings)
+        st.session_state["yard_meta"] = {
+            "unit": f"{unit_type}:{unit_id}",
+            "yard": yard_name,
+            "bucket": bucket_minutes,
+        }
+
+    # Display yard results if available
+    if "yard_segments" in st.session_state:
+        meta = st.session_state.get("yard_meta", {})
+        segments = st.session_state["yard_segments"]
+        detail_rows = st.session_state["yard_details"]
+        raw_count = st.session_state.get("yard_raw_count", 0)
+
+        _render_yard_metrics(segments, detail_rows, raw_count, meta)
+        _render_timeline_visual(segments)  # reuse existing bar
+        _render_yard_detail_table(detail_rows, meta)
+
+
+def _render_yard_metrics(
+    segments: list[TimelineSegment],
+    detail_rows: list[dict[str, Any]],
+    raw_count: int,
+    meta: dict[str, Any],
+) -> None:
+    """Top-level metrics for yard mode results."""
+    partner_segs = [s for s in segments if s.partner_type not in ("gap",)]
+    unique_partners = len({s.partner_id for s in partner_segs})
+    close_buckets = sum(1 for d in detail_rows if 0 < d["distance_ft"] <= 100)
+    avg_dist = (
+        sum(d["distance_ft"] for d in detail_rows if d["distance_ft"] > 0)
+        / max(sum(1 for d in detail_rows if d["distance_ft"] > 0), 1)
+    )
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Raw Pings", f"{raw_count:,}")
+    c2.metric("Buckets", len(detail_rows))
+    c3.metric("Unique Neighbors", unique_partners)
+    c4.metric("< 100 ft buckets", close_buckets)
+    c5.metric("Avg Distance", f"{avg_dist:.0f} ft")
+
+
+def _render_yard_detail_table(
+    detail_rows: list[dict[str, Any]],
+    meta: dict[str, Any],
+) -> None:
+    """Render the per-bucket detail table for yard mode."""
+    if not detail_rows:
+        return
+
+    st.subheader("Yard Proximity Detail")
+    st.caption(
+        f"Every {meta.get('bucket', 5)}-minute bucket where "
+        f"**{meta.get('unit', '?')}** was inside **{meta.get('yard', '?')}**. "
+        "Distances in feet."
+    )
+
+    # Highlight close encounters
+    table_data = []
+    for d in detail_rows:
+        dist_ft = d["distance_ft"]
+        if dist_ft == 0:
+            dist_display = "—"
+            flag = ""
+        elif dist_ft <= 50:
+            dist_display = f"{dist_ft:.0f}"
+            flag = "🔴"
+        elif dist_ft <= 150:
+            dist_display = f"{dist_ft:.0f}"
+            flag = "🟡"
+        elif dist_ft <= 500:
+            dist_display = f"{dist_ft:.0f}"
+            flag = "🟢"
+        else:
+            dist_display = f"{dist_ft:.0f}"
+            flag = ""
+
+        table_data.append({
+            "": flag,
+            "Time": d["time"],
+            "Partner": d["partner_id"],
+            "Type": d["partner_type"],
+            "Dist (ft)": dist_display,
+            "Unit Pings": d["unit_pings"],
+            "Partner Pings": d["partner_pings"],
+            "Providers": d["unit_providers"],
+            "Avg Speed": f"{d['avg_speed']:.1f}" if d["avg_speed"] > 0 else "0",
+        })
+
+    st.dataframe(table_data, use_container_width=True, hide_index=True)
+
+    # CSV download
+    csv_out = StringIO()
+    if table_data:
+        writer = csv.DictWriter(csv_out, fieldnames=list(table_data[0].keys()), extrasaction="ignore")
+        writer.writeheader()
+        for row in table_data:
+            writer.writerow(row)
+    st.download_button(
+        "Download yard detail CSV",
+        csv_out.getvalue(),
+        file_name="yard_mode_detail.csv",
+        mime="text/csv",
+    )
+
+
+def _render_yard_other_units(
+    raw_pings: list[dict[str, Any]],
+    unit_id: str,
+    unit_type: str,
+) -> None:
+    """When the selected unit has no yard pings, show what units ARE there."""
+    from collections import Counter
+    others: Counter[str] = Counter()
+    for p in raw_pings:
+        aid = str(p.get("asset_id", ""))
+        atype = str(p.get("asset_type", ""))
+        if aid and not (atype == unit_type and aid == unit_id):
+            others[f"{atype.title()}: {aid}"] += 1
+
+    if others:
+        st.markdown("**Units that *were* in the yard during this period:**")
+        top = others.most_common(20)
+        for label, count in top:
+            st.markdown(f"- {label} — {count} pings")
+    else:
+        st.info("No units had pings inside this yard during the selected range.")
 
 
 def _consolidate_timeline(segments: list[TimelineSegment], *, max_absorb_hours: int = 2) -> list[TimelineSegment]:

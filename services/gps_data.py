@@ -407,6 +407,259 @@ def load_hourly_evidence_rows(
         return []
 
 
+# ---------------------------------------------------------------------------
+# Yard Mode — aggressive fine-grained proximity analysis
+# ---------------------------------------------------------------------------
+
+
+def load_yard_proximity_pings(
+    yard_name: str,
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, Any]]:
+    """Load ALL raw GPS pings within a yard's bounding box for a time range.
+
+    No source filter — every provider, every ping type.  Designed for the
+    aggressive "Yard Mode" toggle on the Unit Assignment Timeline.
+    """
+    import math
+
+    from services.gps_matching import YARD_GEOFENCES
+
+    fence = YARD_GEOFENCES.get(yard_name)
+    if not fence:
+        logger.warning("Unknown yard for yard-mode query: %s", yard_name)
+        return []
+
+    try:
+        client = _get_client()
+    except Exception as e:
+        logger.warning("Supabase unavailable for yard pings: %s", e)
+        return []
+
+    start = _ensure_aware(start)
+    end = _ensure_aware(end)
+
+    # Convert circular geofence → bounding-box for efficient PostgREST filter.
+    radius = fence["radius_miles"]
+    lat_delta = radius / 69.0
+    lon_delta = radius / (69.0 * max(math.cos(math.radians(fence["lat"])), 0.01))
+
+    lat_min = fence["lat"] - lat_delta
+    lat_max = fence["lat"] + lat_delta
+    lon_min = fence["lon"] - lon_delta
+    lon_max = fence["lon"] + lon_delta
+
+    filters: dict[str, Any] = {
+        "and": (
+            f"(recorded_at.gte.{start.isoformat()}"
+            f",recorded_at.lte.{end.isoformat()}"
+            f",lat.gte.{lat_min:.6f}"
+            f",lat.lte.{lat_max:.6f}"
+            f",lon.gte.{lon_min:.6f}"
+            f",lon.lte.{lon_max:.6f})"
+        ),
+    }
+
+    try:
+        return client.select_all(
+            "assets_history",
+            select=(
+                "asset_type,asset_id,lat,lon,speed,heading_deg,"
+                "provider,recorded_at,address,source"
+            ),
+            filters=filters,
+            order="recorded_at.asc",
+            page_size=1000,
+            hard_cap=500000,
+        )
+    except Exception as e:
+        logger.warning("Yard proximity ping query failed: %s", e)
+        return []
+
+
+def build_yard_mode_timeline(
+    unit_id: str,
+    unit_type: str,
+    yard_pings: list[dict[str, Any]],
+    bucket_minutes: int = 5,
+) -> tuple[list[TimelineSegment], list[dict[str, Any]]]:
+    """Build fine-grained yard proximity timeline from raw pings.
+
+    Returns ``(segments, detail_rows)``.
+
+    *segments* are ``TimelineSegment`` objects at ``bucket_minutes`` resolution
+    for use with the existing timeline bar renderer.
+
+    *detail_rows* is a list of dicts (one per bucket) with extra fields useful
+    for the raw-detail table: distance in feet, provider, ping counts, etc.
+    """
+    import math
+    from collections import defaultdict
+
+    from services.gps_matching import haversine_miles
+
+    # -- Parse pings --------------------------------------------------------
+    unit_pings: list[dict[str, Any]] = []
+    # other_pings keyed by (asset_type, asset_id)
+    other_pings: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+
+    for row in yard_pings:
+        lat = row.get("lat")
+        lon = row.get("lon")
+        recorded_at = _parse_dt(row.get("recorded_at"))
+        if lat is None or lon is None or recorded_at is None:
+            continue
+
+        ping = {
+            "asset_type": row.get("asset_type", ""),
+            "asset_id": str(row.get("asset_id", "")),
+            "lat": float(lat),
+            "lon": float(lon),
+            "speed": float(row.get("speed") or 0),
+            "provider": str(row.get("provider") or ""),
+            "recorded_at": recorded_at,
+            "address": str(row.get("address") or ""),
+        }
+
+        if ping["asset_type"] == unit_type and ping["asset_id"] == unit_id:
+            unit_pings.append(ping)
+        else:
+            key = (ping["asset_type"], ping["asset_id"])
+            other_pings[key].append(ping)
+
+    if not unit_pings:
+        return [], []
+
+    # -- Bucket unit pings --------------------------------------------------
+    bucket_secs = bucket_minutes * 60
+    half_bucket = bucket_secs / 2.0
+
+    # Determine bucket boundaries spanning the unit's presence
+    first_ts = unit_pings[0]["recorded_at"].timestamp()
+    last_ts = unit_pings[-1]["recorded_at"].timestamp()
+    bucket_start_epoch = int(first_ts) // bucket_secs * bucket_secs
+
+    # Build a flat list of other pings sorted by time for scanning
+    all_others: list[dict[str, Any]] = []
+    for plist in other_pings.values():
+        all_others.extend(plist)
+    all_others.sort(key=lambda p: p["recorded_at"])
+
+    segments: list[TimelineSegment] = []
+    detail_rows: list[dict[str, Any]] = []
+
+    epoch = bucket_start_epoch
+    other_idx = 0  # sliding window start for other pings
+
+    while epoch <= last_ts + bucket_secs:
+        bucket_end_epoch = epoch + bucket_secs
+        bucket_center = epoch + half_bucket
+
+        # Unit pings in this bucket
+        bucket_unit = [
+            p for p in unit_pings
+            if epoch <= p["recorded_at"].timestamp() < bucket_end_epoch
+        ]
+        if not bucket_unit:
+            epoch = bucket_end_epoch
+            continue
+
+        # Average unit position in this bucket
+        avg_lat = sum(p["lat"] for p in bucket_unit) / len(bucket_unit)
+        avg_lon = sum(p["lon"] for p in bucket_unit) / len(bucket_unit)
+
+        # Find nearby other-asset pings in this time window
+        # (expand window slightly for ping alignment tolerance)
+        window_start = epoch - half_bucket
+        window_end = bucket_end_epoch + half_bucket
+        candidates: dict[tuple[str, str], list[float]] = defaultdict(list)
+
+        # Advance sliding index past stale pings
+        while other_idx < len(all_others) and all_others[other_idx]["recorded_at"].timestamp() < window_start:
+            other_idx += 1
+
+        scan = other_idx
+        while scan < len(all_others) and all_others[scan]["recorded_at"].timestamp() < window_end:
+            op = all_others[scan]
+            dist = haversine_miles(avg_lat, avg_lon, op["lat"], op["lon"])
+            key = (op["asset_type"], op["asset_id"])
+            candidates[key].append(dist)
+            scan += 1
+
+        # Pick the nearest partner for this bucket
+        best_key: tuple[str, str] | None = None
+        best_dist = float("inf")
+        best_pings = 0
+        for key, dists in candidates.items():
+            min_d = min(dists)
+            if min_d < best_dist:
+                best_dist = min_d
+                best_key = key
+                best_pings = len(dists)
+
+        bucket_start_dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+        bucket_end_dt = datetime.fromtimestamp(bucket_end_epoch, tz=timezone.utc)
+
+        if best_key is not None:
+            partner_type, partner_id = best_key
+            dist_feet = round(best_dist * 5280, 1)
+
+            segments.append(TimelineSegment(
+                unit_id=unit_id,
+                unit_type=unit_type,
+                partner_id=partner_id,
+                partner_type=partner_type,
+                start=bucket_start_dt,
+                end=bucket_end_dt,
+                duration_minutes=float(bucket_minutes),
+                avg_distance_miles=round(best_dist, 4),
+                bucket_count=len(bucket_unit) + best_pings,
+                confidence=1.0,
+            ))
+
+            detail_rows.append({
+                "time": bucket_start_dt.strftime("%H:%M"),
+                "partner_type": partner_type,
+                "partner_id": partner_id,
+                "distance_ft": dist_feet,
+                "distance_mi": round(best_dist, 4),
+                "unit_pings": len(bucket_unit),
+                "partner_pings": best_pings,
+                "unit_providers": ", ".join(sorted({p["provider"] for p in bucket_unit if p["provider"]})),
+                "avg_speed": round(sum(p["speed"] for p in bucket_unit) / len(bucket_unit), 1),
+            })
+        else:
+            segments.append(TimelineSegment(
+                unit_id=unit_id,
+                unit_type=unit_type,
+                partner_id="ALONE",
+                partner_type="gap",
+                start=bucket_start_dt,
+                end=bucket_end_dt,
+                duration_minutes=float(bucket_minutes),
+                avg_distance_miles=0.0,
+                bucket_count=len(bucket_unit),
+                confidence=0.0,
+            ))
+
+            detail_rows.append({
+                "time": bucket_start_dt.strftime("%H:%M"),
+                "partner_type": "—",
+                "partner_id": "No nearby units",
+                "distance_ft": 0,
+                "distance_mi": 0,
+                "unit_pings": len(bucket_unit),
+                "partner_pings": 0,
+                "unit_providers": ", ".join(sorted({p["provider"] for p in bucket_unit if p["provider"]})),
+                "avg_speed": round(sum(p["speed"] for p in bucket_unit) / len(bucket_unit), 1),
+            })
+
+        epoch = bucket_end_epoch
+
+    return segments, detail_rows
+
+
 def load_usage_daily_summary(start: datetime, end: datetime) -> list[dict[str, Any]]:
     """Load precomputed dense truck↔trailer daily usage summaries."""
     try:
