@@ -347,19 +347,40 @@ def _render_fleet_overview_tab(assets: list[Asset], assignments: dict[str, str],
 def _render_usage_dashboard(assets: list[Asset], assignments: dict[str, str], unit_search: str) -> None:
     """Main dense-evidence dashboard for trailer usage and truck usage."""
     st.subheader("Trailer Usage Dashboard")
-    st.caption(
-        "Dense timestamp-matched usage from `asset_pair_daily_summary` and `asset_pair_hourly_evidence`. "
-        "This does not use legacy asset_pairings or live map snapshots."
-    )
-    st.caption(
-        "Billable Candidate is stricter than Paired Hours: it only counts non-yard paired hours with enough confidence "
-        "and a repeated truck/trailer pattern across multiple service dates. Near-yard and same-yard evidence stays visible for review, "
-        "but should not drive billing."
-    )
-    st.caption(
-        "Times below are shown in this machine/user's local timezone; hourly evidence details also include approximate "
-        "local time at the truck/trailer coordinates. Stored Supabase timestamps remain UTC."
-    )
+
+    with st.expander("ℹ️ How matching & billing works — parameters explained", expanded=False):
+        st.markdown("""
+**Matching Engine Parameters**
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Match radius | 0.5 miles | Truck and trailer must be within 0.5 mi in the same hour to be considered a candidate pair |
+| Exclusive matching | 1:1 per hour | Each truck can only match ONE trailer per hour, and each trailer can only match ONE truck (greedy assignment by confidence) |
+| Movement-evidence gate | ≥ 0.5 mi traveled OR ≥ 1 movement-compatible ping | Stationary-only proximity (parked near each other) does NOT produce a "paired" status — demoted to "near" |
+| Confidence threshold | Weighted score | Combines distance (closer = better), ping count, co-movement pattern, and history overlap |
+| Yard suppression | CA & TX yards | Hours where both units are inside a known yard polygon are tagged "same_yard" and excluded from billable hours |
+| Source data | Dense GPS backfills | Only uses accepted backfill sources (gpstab, anytrek, track888, eroad) — not sparse live publisher snapshots |
+
+**Billing Logic**
+
+| Rule | Description |
+|------|-------------|
+| Paired Hours | Total hours a trailer was exclusively matched to a truck (passed all gates above) |
+| Billable Candidate | Stricter — only counts non-yard paired hours with sufficient confidence AND a repeated pattern across multiple service dates |
+| Near-only hours | NOT billable — these are proximity detections that failed the movement-evidence gate or exclusivity check |
+| Manual assignments | Paper-log drivers confirmed via dispatch board cross-reference — counted as paired, suppresses unmatched alerts |
+
+**Unmatched Trailer Alerts**
+
+| Threshold | Value |
+|-----------|-------|
+| Minimum unmatched moving hours | ≥ 3 hours |
+| Minimum miles moved | ≥ 10 miles |
+| Excluded | Trailers in yard zones, manually-assigned trailers |
+
+These parameters are applied automatically by the hourly evidence rebuild script. Data refreshes on each scheduled rebuild.
+""")
+
 
     latest_job = load_latest_pairing_job()
     if latest_job:
