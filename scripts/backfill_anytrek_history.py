@@ -1128,48 +1128,82 @@ def backfill_shotgun(
 
         # --- Try Anytrek (for trailers, or trucks registered as trailers) ---
         if not found and anytrek_key:
-            # Anytrek returns all vehicles per chunk; we filter by ID
-            chunk_start = start
-            anytrek_rows: list[dict[str, Any]] = []
-            while chunk_start < now:
-                chunk_end = min(chunk_start + timedelta(days=CHUNK_DAYS), now)
-                transactions = fetch_anytrek_chunk(anytrek_key, chunk_start, chunk_end)
-                for tx in transactions:
-                    vehicle_name = str(tx.get("vehicleName") or "").strip()
-                    canonical = _canonical_trailer_id(vehicle_name)
-                    if canonical != asset_id:
-                        continue
-                    lat = tx.get("lat")
-                    lon = tx.get("lng")
-                    if lat is None or lon is None or (lat == 0 and lon == 0):
-                        continue
-                    recorded_at = tx.get("createTime") or tx.get("reportTime")
-                    if not recorded_at:
-                        continue
-                    speed = tx.get("speed")
-                    heading = tx.get("heading")
-                    anytrek_rows.append({
-                        "asset_type": asset_type,
-                        "asset_id": asset_id,
-                        "division": "",
-                        "lat": float(lat), "lon": float(lon),
-                        "address": " ".join(filter(None, [tx.get("streetAddress"), tx.get("city"), tx.get("state")])),
-                        "zip": tx.get("zip") or "",
-                        "speed": float(speed) if speed is not None else None,
-                        "heading_deg": float(heading) if heading is not None else None,
-                        "provider": "anytrek",
-                        "recorded_at": recorded_at,
-                        "source": "anytrek_backfill",
-                        "raw": {"vehicleName": vehicle_name, "shotgun": True},
+            # First fetch one day to discover all Anytrek vehicle names, then
+            # fuzzy-match against the target ID (Anytrek may store "4400-14"
+            # as just "4400").
+            if not hasattr(backfill_shotgun, "_anytrek_names"):
+                print(f"\n  Discovering Anytrek vehicle names...", end=" ", flush=True)
+                sample_txs = fetch_anytrek_chunk(anytrek_key, now - timedelta(days=1), now)
+                names = sorted({str(tx.get("vehicleName") or "").strip() for tx in sample_txs if tx.get("vehicleName")})
+                backfill_shotgun._anytrek_names = names
+                print(f"{len(names)} unique vehicles found")
+                if names:
+                    print(f"    Sample: {', '.join(names[:20])}")
+
+            anytrek_names = backfill_shotgun._anytrek_names
+            # Fuzzy match: find Anytrek vehicle names whose digits-only prefix
+            # matches the target's digits-only prefix
+            target_digits = re.sub(r"\D", "", asset_id)
+            matched_names: set[str] = set()
+            for name in anytrek_names:
+                canonical = _canonical_trailer_id(name)
+                name_digits = re.sub(r"\D", "", canonical)
+                if not target_digits or not name_digits:
+                    continue
+                # Match if either starts with the other (4400 matches 4400-14, etc.)
+                if name_digits.startswith(target_digits) or target_digits.startswith(name_digits):
+                    matched_names.add(name)
+
+            if matched_names:
+                print(f"  Anytrek fuzzy match for '{asset_id}': {matched_names}", flush=True)
+            else:
+                print(f"  No Anytrek fuzzy match for '{asset_id}'", flush=True)
+
+            if matched_names:
+                chunk_start = start
+                anytrek_rows: list[dict[str, Any]] = []
+                while chunk_start < now:
+                    chunk_end = min(chunk_start + timedelta(days=CHUNK_DAYS), now)
+                    transactions = fetch_anytrek_chunk(anytrek_key, chunk_start, chunk_end)
+                    for tx in transactions:
+                        vehicle_name = str(tx.get("vehicleName") or "").strip()
+                        if vehicle_name not in matched_names:
+                            continue
+                        lat = tx.get("lat")
+                        lon = tx.get("lng")
+                        if lat is None or lon is None or (lat == 0 and lon == 0):
+                            continue
+                        recorded_at = tx.get("createTime") or tx.get("reportTime")
+                        if not recorded_at:
+                            continue
+                        speed = tx.get("speed")
+                        heading = tx.get("heading")
+                        anytrek_rows.append({
+                            "asset_type": "trailer",
+                            "asset_id": asset_id,  # Store under the board's ID, not Anytrek's
+                            "division": "",
+                            "lat": float(lat), "lon": float(lon),
+                            "address": " ".join(filter(None, [tx.get("streetAddress"), tx.get("city"), tx.get("state")])),
+                            "zip": tx.get("zip") or "",
+                            "speed": float(speed) if speed is not None else None,
+                            "heading_deg": float(heading) if heading is not None else None,
+                            "provider": "anytrek",
+                            "recorded_at": recorded_at,
+                            "source": "anytrek_backfill",
+                            "raw": {"vehicleName": vehicle_name, "anytrek_name": vehicle_name, "board_id": asset_id, "shotgun": True},
+                        })
+                    chunk_start = chunk_end
+                    time.sleep(0.3)
+                if anytrek_rows:
+                    print(f" → Anytrek: {len(anytrek_rows)} pings! (Anytrek name: {matched_names})", flush=True)
+                    discoveries.append({
+                        "asset_type": "trailer", "asset_id": asset_id,
+                        "found_via": f"Anytrek (as {', '.join(matched_names)})",
+                        "pings": str(len(anytrek_rows)),
                     })
-                chunk_start = chunk_end
-                time.sleep(0.3)
-            if anytrek_rows:
-                print(f" → Anytrek: {len(anytrek_rows)} pings!", flush=True)
-                discoveries.append({"asset_type": asset_type, "asset_id": asset_id, "found_via": "Anytrek", "pings": str(len(anytrek_rows))})
-                if not dry_run:
-                    total_inserted += upsert_to_supabase(supabase_url, supabase_key, anytrek_rows)
-                found = True
+                    if not dry_run:
+                        total_inserted += upsert_to_supabase(supabase_url, supabase_key, anytrek_rows)
+                    found = True
 
         if not found:
             print(" → no data found on any provider", flush=True)
