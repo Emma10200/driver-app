@@ -773,11 +773,56 @@ def source_rows_exist(
     return isinstance(rows, list) and bool(rows)
 
 
+def unit_history_count(
+    supabase_url: str,
+    supabase_key: str,
+    asset_type: str,
+    asset_id: str,
+    start: datetime,
+    end: datetime,
+) -> int:
+    """Return how many history rows exist for a specific unit in a date range."""
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Accept": "application/json",
+        "Prefer": "count=exact",
+        "Range-Unit": "items",
+        "Range": "0-0",
+    }
+    resp = requests.get(
+        f"{supabase_url}/rest/v1/assets_history",
+        headers=headers,
+        params={
+            "select": "id",
+            "asset_type": f"eq.{asset_type}",
+            "asset_id": f"eq.{asset_id}",
+            "and": f"(recorded_at.gte.{start.isoformat()},recorded_at.lte.{end.isoformat()})",
+        },
+        timeout=30,
+    )
+    if not resp.ok:
+        return -1
+    # Count comes from Content-Range header: "0-0/42"
+    content_range = resp.headers.get("Content-Range", "")
+    if "/" in content_range:
+        try:
+            return int(content_range.split("/")[1])
+        except (ValueError, IndexError):
+            pass
+    return len(resp.json()) if resp.ok else 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backfill GPS history to Supabase (Anytrek trailers + GPSTab trucks)")
     parser.add_argument("--days", type=int, default=60, help="How many days back to pull (default: 60)")
     parser.add_argument("--provider", choices=["all", "anytrek", "gpstab", "track888", "eroad"], default="all", help="Which provider to backfill")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and transform but don't write to Supabase")
+    parser.add_argument("--shotgun", action="store_true",
+                        help="After normal backfill, find units with 0 history and "
+                             "try every provider until data is found")
+    parser.add_argument("--shotgun-only", nargs="*", metavar="UNIT_ID",
+                        help="Run shotgun lookup for specific unit IDs only (skip normal backfill)")
     args = parser.parse_args()
 
     secrets = _load_secrets()
@@ -793,9 +838,10 @@ def main() -> None:
     print()
 
     grand_total = 0
+    skip_normal = getattr(args, "shotgun_only", None) is not None
 
     # --- Anytrek (trailers) ---
-    if args.provider in ("all", "anytrek"):
+    if not skip_normal and args.provider in ("all", "anytrek"):
         api_key = secrets.get("ANYTREK_API_KEY", "")
         if not api_key:
             print("WARNING: ANYTREK_API_KEY not found. Skipping Anytrek backfill.")
@@ -837,7 +883,7 @@ def main() -> None:
             grand_total += total_inserted
 
     # --- GPSTab (trucks) ---
-    if args.provider in ("all", "gpstab"):
+    if not skip_normal and args.provider in ("all", "gpstab"):
         print()
         print("=" * 60)
         print("GPSTAB TRUCK BACKFILL")
@@ -847,7 +893,7 @@ def main() -> None:
         grand_total += inserted
 
     # --- 888 ELD (trucks via Track Mile portal) ---
-    if args.provider in ("all", "track888"):
+    if not skip_normal and args.provider in ("all", "track888"):
         print()
         print("=" * 60)
         print("888 ELD TRUCK BACKFILL (Track Mile Portal)")
@@ -857,7 +903,7 @@ def main() -> None:
         grand_total += inserted
 
     # --- EROAD (trucks) ---
-    if args.provider in ("all", "eroad"):
+    if not skip_normal and args.provider in ("all", "eroad"):
         print()
         print("=" * 60)
         print("EROAD TRUCK BACKFILL")
@@ -866,8 +912,273 @@ def main() -> None:
         print(f"\nEROAD done: {inserted} rows inserted.")
         grand_total += inserted
 
+    # --- Shotgun fallback: try every provider for units with 0 recent hits ---
+    shotgun_units = getattr(args, "shotgun_only", None)
+    if args.shotgun or shotgun_units is not None:
+        print()
+        print("=" * 60)
+        print("SHOTGUN GPS FALLBACK — trying all providers for missing units")
+        print("=" * 60)
+        inserted, discoveries = backfill_shotgun(
+            secrets, args.days, supabase_url, supabase_key,
+            args.dry_run, specific_units=shotgun_units or [],
+        )
+        print(f"\nShotgun done: {inserted} rows inserted, {len(discoveries)} new discoveries.")
+        grand_total += inserted
+
     print()
     print(f"Grand total: {grand_total} rows inserted into Supabase assets_history.")
+
+
+# ---------------------------------------------------------------------------
+# Shotgun GPS fallback — try every provider for units missing recent data
+# ---------------------------------------------------------------------------
+
+SHOTGUN_STALE_DAYS = 7  # Units with 0 pings in this window are candidates
+
+
+def _load_known_units(supabase_url: str, supabase_key: str) -> list[dict[str, str]]:
+    """Load all known truck/trailer units from dispatch board + assets_current."""
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Accept": "application/json",
+    }
+    units: dict[tuple[str, str], dict[str, str]] = {}
+
+    # From dispatch_board_rows
+    try:
+        resp = requests.get(
+            f"{supabase_url}/rest/v1/dispatch_board_rows",
+            headers=headers,
+            params={"select": "truck_id,trailer_id,status", "limit": "5000"},
+            timeout=30,
+        )
+        if resp.ok:
+            for row in resp.json():
+                truck = str(row.get("truck_id") or "").strip()
+                trailer = str(row.get("trailer_id") or "").strip()
+                status = str(row.get("status") or "").upper()
+                if truck:
+                    units[("truck", truck)] = {"asset_type": "truck", "asset_id": truck, "status": status}
+                if trailer:
+                    units[("trailer", trailer)] = {"asset_type": "trailer", "asset_id": trailer, "status": status}
+    except Exception as exc:
+        print(f"  Warning: could not load dispatch_board_rows: {exc}")
+
+    # From assets_current
+    try:
+        resp = requests.get(
+            f"{supabase_url}/rest/v1/assets_current",
+            headers=headers,
+            params={"select": "asset_type,asset_id", "limit": "5000"},
+            timeout=30,
+        )
+        if resp.ok:
+            for row in resp.json():
+                atype = str(row.get("asset_type") or "").strip()
+                aid = str(row.get("asset_id") or "").strip()
+                if atype and aid and (atype, aid) not in units:
+                    units[(atype, aid)] = {"asset_type": atype, "asset_id": aid, "status": ""}
+    except Exception as exc:
+        print(f"  Warning: could not load assets_current: {exc}")
+
+    return list(units.values())
+
+
+def _find_stale_units(
+    supabase_url: str,
+    supabase_key: str,
+    units: list[dict[str, str]],
+    stale_window: datetime,
+) -> list[dict[str, str]]:
+    """Return units with 0 pings since stale_window."""
+    stale = []
+    now = datetime.now(timezone.utc)
+    for unit in units:
+        count = unit_history_count(
+            supabase_url, supabase_key,
+            unit["asset_type"], unit["asset_id"],
+            stale_window, now,
+        )
+        if count == 0:
+            stale.append(unit)
+    return stale
+
+
+def backfill_shotgun(
+    secrets: dict[str, str],
+    days: int,
+    supabase_url: str,
+    supabase_key: str,
+    dry_run: bool,
+    specific_units: list[str] | None = None,
+) -> tuple[int, list[dict[str, str]]]:
+    """Try every GPS provider for units with 0 recent history.
+
+    Returns (total_inserted, discoveries) where discoveries is a list of
+    units that were found on a provider they weren't assigned to.
+    """
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=days)
+    stale_since = now - timedelta(days=SHOTGUN_STALE_DAYS)
+
+    if specific_units:
+        # User specified exact unit IDs — try them as both truck and trailer
+        candidates = []
+        for uid in specific_units:
+            uid = uid.strip()
+            if not uid:
+                continue
+            candidates.append({"asset_type": "truck", "asset_id": uid, "status": ""})
+            candidates.append({"asset_type": "trailer", "asset_id": uid, "status": ""})
+        print(f"  Shotgun: {len(specific_units)} user-specified units → {len(candidates)} candidates")
+    else:
+        print(f"  Loading known units from dispatch board + assets_current...")
+        all_units = _load_known_units(supabase_url, supabase_key)
+        print(f"  {len(all_units)} known units. Checking for stale (0 pings in last {SHOTGUN_STALE_DAYS} days)...")
+        candidates = _find_stale_units(supabase_url, supabase_key, all_units, stale_since)
+        print(f"  {len(candidates)} stale units found.")
+
+    if not candidates:
+        print("  No stale units to shotgun.")
+        return 0, []
+
+    total_inserted = 0
+    discoveries: list[dict[str, str]] = []
+
+    # Build provider APIs to try
+    gpstab_accounts = _gpstab_api_keys(secrets)
+    track888_companies = _track888_companies(secrets)
+    anytrek_key = secrets.get("ANYTREK_API_KEY", "").strip()
+
+    # Pre-fetch GPSTab vehicle lists for all accounts
+    gpstab_vehicles: dict[str, list[dict[str, Any]]] = {}
+    for label, api_key in gpstab_accounts:
+        gpstab_vehicles[label] = _gpstab_get_vehicles(api_key)
+
+    for unit in candidates:
+        asset_type = unit["asset_type"]
+        asset_id = unit["asset_id"]
+        print(f"\n  🔫 Shotgun: {asset_type} {asset_id}", end="", flush=True)
+
+        found = False
+
+        # --- Try GPSTab (for trucks) ---
+        if asset_type == "truck":
+            for label, api_key in gpstab_accounts:
+                vehicles = gpstab_vehicles.get(label, [])
+                # Find this truck in the vehicle list
+                v_match = None
+                for v in vehicles:
+                    v_display = str(v.get("vehicleid") or v.get("vehicleId") or "").strip()
+                    if v_display == asset_id:
+                        v_match = v
+                        break
+                if not v_match:
+                    continue
+
+                v_id = v_match.get("id")
+                items = _gpstab_fetch_vehicle_history(api_key, v_id, start, now)
+                if items:
+                    rows = []
+                    for item in items:
+                        lat_str = item.get("Latitude") or item.get("latitude")
+                        lon_str = item.get("Longitude") or item.get("longitude")
+                        if not lat_str or not lon_str:
+                            continue
+                        try:
+                            lat = float(lat_str)
+                            lon = float(lon_str)
+                        except (ValueError, TypeError):
+                            continue
+                        if lat == 0 and lon == 0:
+                            continue
+                        recorded_at = item.get("Time") or item.get("time")
+                        if not recorded_at:
+                            continue
+                        speed = item.get("Speed") or item.get("speed")
+                        heading = item.get("Bearing") or item.get("bearing")
+                        rows.append({
+                            "asset_type": "truck",
+                            "asset_id": asset_id,
+                            "division": "",
+                            "lat": lat, "lon": lon,
+                            "address": item.get("Address") or item.get("address") or "",
+                            "zip": "",
+                            "speed": float(speed) if speed is not None else None,
+                            "heading_deg": float(heading) if heading is not None else None,
+                            "provider": f"GPSTab ({label})",
+                            "recorded_at": recorded_at,
+                            "source": "gpstab_backfill",
+                            "raw": {"VehicleId": v_id, "account": label, "shotgun": True},
+                        })
+                    if rows:
+                        print(f" → GPSTab({label}): {len(rows)} pings!", flush=True)
+                        discoveries.append({"asset_type": asset_type, "asset_id": asset_id, "found_via": f"GPSTab ({label})", "pings": str(len(rows))})
+                        if not dry_run:
+                            total_inserted += upsert_to_supabase(supabase_url, supabase_key, rows)
+                        found = True
+                        break
+                time.sleep(0.3)
+
+        # --- Try Anytrek (for trailers, or trucks registered as trailers) ---
+        if not found and anytrek_key:
+            # Anytrek returns all vehicles per chunk; we filter by ID
+            chunk_start = start
+            anytrek_rows: list[dict[str, Any]] = []
+            while chunk_start < now:
+                chunk_end = min(chunk_start + timedelta(days=CHUNK_DAYS), now)
+                transactions = fetch_anytrek_chunk(anytrek_key, chunk_start, chunk_end)
+                for tx in transactions:
+                    vehicle_name = str(tx.get("vehicleName") or "").strip()
+                    canonical = _canonical_trailer_id(vehicle_name)
+                    if canonical != asset_id:
+                        continue
+                    lat = tx.get("lat")
+                    lon = tx.get("lng")
+                    if lat is None or lon is None or (lat == 0 and lon == 0):
+                        continue
+                    recorded_at = tx.get("createTime") or tx.get("reportTime")
+                    if not recorded_at:
+                        continue
+                    speed = tx.get("speed")
+                    heading = tx.get("heading")
+                    anytrek_rows.append({
+                        "asset_type": asset_type,
+                        "asset_id": asset_id,
+                        "division": "",
+                        "lat": float(lat), "lon": float(lon),
+                        "address": " ".join(filter(None, [tx.get("streetAddress"), tx.get("city"), tx.get("state")])),
+                        "zip": tx.get("zip") or "",
+                        "speed": float(speed) if speed is not None else None,
+                        "heading_deg": float(heading) if heading is not None else None,
+                        "provider": "anytrek",
+                        "recorded_at": recorded_at,
+                        "source": "anytrek_backfill",
+                        "raw": {"vehicleName": vehicle_name, "shotgun": True},
+                    })
+                chunk_start = chunk_end
+                time.sleep(0.3)
+            if anytrek_rows:
+                print(f" → Anytrek: {len(anytrek_rows)} pings!", flush=True)
+                discoveries.append({"asset_type": asset_type, "asset_id": asset_id, "found_via": "Anytrek", "pings": str(len(anytrek_rows))})
+                if not dry_run:
+                    total_inserted += upsert_to_supabase(supabase_url, supabase_key, anytrek_rows)
+                found = True
+
+        if not found:
+            print(" → no data found on any provider", flush=True)
+
+    # Print discovery summary
+    if discoveries:
+        print(f"\n{'=' * 60}")
+        print(f"SHOTGUN DISCOVERIES — {len(discoveries)} units found on unexpected providers:")
+        print(f"{'=' * 60}")
+        for d in discoveries:
+            print(f"  {d['asset_type'].title()} {d['asset_id']} → {d['found_via']} ({d['pings']} pings)")
+
+    return total_inserted, discoveries
 
 
 if __name__ == "__main__":
