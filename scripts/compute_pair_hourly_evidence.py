@@ -58,9 +58,11 @@ YARD_SUPPRESSION_RADIUS = {
 }
 # Accepted historical GPS evidence sources for pairing.
 # Includes dense backfills plus blank-source historical imports that contain
-# useful older 888/dispatch-board history for trucks like 129. Explicitly do
-# NOT include sparse live publisher snapshots (truck_publish/trailer_publish).
-MATCHING_SOURCES = ("gpstab_backfill", "anytrek_backfill", "track888_backfill", "eroad_backfill", "")
+# useful older 888/dispatch-board history for trucks like 129. We also include
+# truck_publish because 888 ELD currently arrives through the live Apps Script
+# publisher at roughly 10-minute intervals; there is no working Track888 bulk
+# history endpoint for those Xpress/Prestige trucks yet.
+MATCHING_SOURCES = ("gpstab_backfill", "anytrek_backfill", "track888_backfill", "eroad_backfill", "truck_publish", "")
 MOVING_SPEED_THRESHOLD = 5.0
 STATIONARY_SPEED_THRESHOLD = 2.0
 MOTION_DERIVE_MAX_GAP_MINUTES = 30.0
@@ -112,8 +114,6 @@ class TimestampMatch:
 
 def main() -> None:
     args = _parse_args()
-    start, end = _resolve_window(args)
-    job_id = f"hourly-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
     secrets = _load_secrets()
     supabase_url = (secrets.get("SUPABASE_URL") or "").rstrip("/")
     supabase_key = secrets.get("SUPABASE_SERVICE_KEY") or secrets.get("SUPABASE_KEY") or ""
@@ -121,6 +121,8 @@ def main() -> None:
         raise SystemExit("SUPABASE_URL and SUPABASE_SERVICE_KEY are required in .env, .streamlit/secrets.toml, or environment.")
 
     client = SupabaseClient(supabase_url, supabase_key, batch_size=args.batch_size)
+    start, end = _resolve_window(args, client=client)
+    job_id = f"hourly-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
     print(
         f"All-fleet hourly evidence job {job_id}\n"
         f"Window: {start.isoformat()} → {end.isoformat()}\n"
@@ -213,6 +215,18 @@ def main() -> None:
             daily_rows=stats["daily_rows"],
             weekly_rows=stats["weekly_rows"],
             message="Dense timestamp evidence backfill completed.",
+        )
+        client.upsert_compute_state(
+            "hourly_evidence",
+            job_id=job_id,
+            start=start,
+            end=end,
+            metadata={
+                "incremental": bool(args.incremental),
+                "overlap_hours": int(args.overlap_hours),
+                "history_rows": stats["history_rows"],
+                "hourly_rows": stats["hourly_rows"],
+            },
         )
         print(f"Done. Job {job_id} complete.")
     except Exception as exc:
@@ -945,7 +959,8 @@ class SupabaseClient:
     def load_history(self, start: datetime, end: datetime, *, hard_cap: int) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         offset = 0
-        # Filter to accepted historical sources only (exclude sparse dispatch board snapshots)
+        # Filter to accepted historical sources only. `truck_publish` is included
+        # for 888 ELD because the live publisher is our only dense-ish 888 feed.
         source_filter = ",".join(f"source.eq.{s}" for s in MATCHING_SOURCES)
         params_base = {
             "select": "asset_type,asset_id,division,lat,lon,speed,heading_deg,provider,recorded_at,address",
@@ -996,6 +1011,43 @@ class SupabaseClient:
             "message": message,
             "error": error,
         }, filters={"job_id": f"eq.{job_id}"})
+
+    def load_compute_state_end(self, job_type: str) -> datetime | None:
+        response = requests.get(
+            f"{self.url}/rest/v1/gps_compute_state",
+            headers=self.headers,
+            params={"select": "last_range_end", "job_type": f"eq.{job_type}", "limit": 1},
+            timeout=30,
+        )
+        if not response.ok:
+            return None
+        rows = response.json()
+        if not isinstance(rows, list) or not rows:
+            return None
+        value = rows[0].get("last_range_end")
+        if not value:
+            return None
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    def upsert_compute_state(
+        self,
+        job_type: str,
+        *,
+        job_id: str,
+        start: datetime,
+        end: datetime,
+        metadata: dict[str, Any],
+    ) -> None:
+        self.upsert("gps_compute_state", [{
+            "job_type": job_type,
+            "last_success_at": datetime.now(timezone.utc).isoformat(),
+            "last_range_start": start.isoformat(),
+            "last_range_end": end.isoformat(),
+            "last_job_id": job_id,
+            "metadata": metadata,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }], on_conflict="job_type")
 
     def insert(self, table: str, row: dict[str, Any]) -> None:
         response = requests.post(f"{self.url}/rest/v1/{table}", headers={**self.headers, "Content-Type": "application/json", "Prefer": "return=minimal"}, json=row, timeout=60)
@@ -1078,11 +1130,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--hard-cap", type=int, default=DEFAULT_HARD_CAP)
     parser.add_argument("--chunk-days", type=int, default=DEFAULT_CHUNK_DAYS, help="Chunk size for non-dry-run rebuilds; use 0 to process in one query.")
+    parser.add_argument("--incremental", action="store_true", help="Recompute only from the last successful hourly_evidence run minus --overlap-hours.")
+    parser.add_argument("--overlap-hours", type=int, default=72, help="Safety overlap window for incremental recompute runs.")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
 
-def _resolve_window(args: argparse.Namespace) -> tuple[datetime, datetime]:
+def _resolve_window(args: argparse.Namespace, client: SupabaseClient | None = None) -> tuple[datetime, datetime]:
     if args.start or args.end:
         if not args.start or not args.end:
             raise SystemExit("Use both --start and --end, or neither.")
@@ -1090,7 +1144,11 @@ def _resolve_window(args: argparse.Namespace) -> tuple[datetime, datetime]:
         end = _parse_date_or_datetime(args.end, is_end=True)
     else:
         end = datetime.now(timezone.utc)
-        start = end - timedelta(days=max(1, int(args.days)))
+        last_end = client.load_compute_state_end("hourly_evidence") if client and args.incremental else None
+        if last_end:
+            start = last_end - timedelta(hours=max(1, int(args.overlap_hours)))
+        else:
+            start = end - timedelta(days=max(1, int(args.days)))
     if end < start:
         start, end = end, start
     return start.astimezone(timezone.utc), end.astimezone(timezone.utc)

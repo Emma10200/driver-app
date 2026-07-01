@@ -27,6 +27,7 @@ from services.gps_data import (
     load_hourly_evidence_timeline,
     load_latest_pairing_job,
     load_manual_pair_assignments,
+    load_trailer_drop_events,
     load_trailer_activity_summary,
     load_trailer_gps_trail,
     load_truck_gps_trail,
@@ -130,8 +131,8 @@ def render_gps_map_page() -> None:
     _render_map(visible_trucks, visible_trailers, divisions, assignments, focus_asset=focused_asset)
 
     # --- Tabs: dispatcher-friendly first, audit behind ---
-    tab_fleet, tab_history, tab_timeline, tab_usage = st.tabs([
-        "🚛 Fleet Overview", "🗺️ Unit History", "📍 Unit Timeline", "📊 Trailer Usage & Billing",
+    tab_fleet, tab_history, tab_timeline, tab_drops, tab_usage = st.tabs([
+        "🚛 Fleet Overview", "🗺️ Unit History", "📍 Unit Timeline", "📦 Dropped Trailers", "📊 Trailer Usage & Billing",
     ])
 
     with tab_fleet:
@@ -142,6 +143,9 @@ def render_gps_map_page() -> None:
 
     with tab_timeline:
         _render_timeline_tab(visible_assets)
+
+    with tab_drops:
+        _render_dropped_trailers_tab()
 
     with tab_usage:
         _render_usage_dashboard(visible_assets, assignments, unit_search)
@@ -386,6 +390,98 @@ def _render_fleet_overview_tab(assets: list[Asset], assignments: dict[str, str],
 
 
 @st.fragment
+def _render_dropped_trailers_tab() -> None:
+    """Operational dropped-trailer custody view.
+
+    Reads the compact ``trailer_drop_events`` table so the UI does not scan raw
+    GPS. Drops are separate from billable hours: this is a dispatcher/audit
+    section for trailers left idle away from excluded yards.
+    """
+    st.subheader("Dropped Trailers")
+    st.caption(
+        "Operational custody events: trailers idle for **12+ hours** outside excluded yards. "
+        "This is intentionally separate from billable trailer usage."
+    )
+
+    today = date.today()
+    default_start = today - timedelta(days=14)
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c1:
+        start_date = st.date_input("Drops from", value=default_start, key="drop_events_start")
+    with c2:
+        end_date = st.date_input("Drops to", value=today, key="drop_events_end")
+    with c3:
+        active_only = st.checkbox("Active drops only", value=False, key="drop_events_active_only")
+
+    start_dt, end_dt = _local_date_range_to_utc(start_date, end_date)
+    if end_dt < start_dt:
+        start_dt, end_dt = end_dt, start_dt
+
+    with st.spinner("Loading dropped trailer events..."):
+        events = load_trailer_drop_events(start_dt, end_dt, active_only=active_only)
+
+    if not events:
+        st.info(
+            "No drop events found for this range. If this is the first setup, apply migration `0022_drop_events_and_hour_tracks.sql`, "
+            "then run the hourly-track and drop-event scripts."
+        )
+        return
+
+    active_count = sum(1 for row in events if str(row.get("status") or "") == "active_drop")
+    picked_count = sum(1 for row in events if str(row.get("status") or "") == "picked_up")
+    unknown_count = sum(1 for row in events if str(row.get("status") or "") == "unknown_dropper")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Drop Events", len(events))
+    m2.metric("Active", active_count)
+    m3.metric("Picked Up", picked_count)
+    m4.metric("Unknown Dropper", unknown_count)
+
+    display_rows: list[dict[str, Any]] = []
+    for row in events:
+        lat = row.get("lat")
+        lon = row.get("lon")
+        maps_url = _maps_url_for_coords(lat, lon)
+        status = _drop_status_label(row.get("status"))
+        display_rows.append({
+            "Trailer": str(row.get("trailer_id") or ""),
+            "Status": status,
+            "Idle Hours": float(row.get("idle_hours") or 0),
+            "Drop Started": _format_dt_text(row.get("drop_started_at")),
+            "Drop Ended": _format_dt_text(row.get("drop_ended_at")),
+            "Dropped By": str(row.get("dropped_by_truck_id") or ""),
+            "Drop Conf": float(row.get("dropped_by_confidence") or 0) * 100.0,
+            "Picked Up By": str(row.get("picked_up_by_truck_id") or ""),
+            "Pickup Conf": float(row.get("pickup_confidence") or 0) * 100.0,
+            "Yard": str(row.get("yard_name") or ""),
+            "Address": str(row.get("address") or ""),
+            "Maps": maps_url,
+            "Stationary Pings": int(row.get("ping_count") or 0),
+            "Last Pair Hour": _format_dt_text(row.get("last_pair_hour")),
+        })
+
+    st.dataframe(
+        display_rows,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Idle Hours": st.column_config.NumberColumn(format="%.1f"),
+            "Drop Conf": st.column_config.NumberColumn(format="%.1f%%"),
+            "Pickup Conf": st.column_config.NumberColumn(format="%.1f%%"),
+            "Maps": st.column_config.LinkColumn(display_text="Open map"),
+        },
+    )
+
+    csv_data = _rows_to_csv(display_rows)
+    st.download_button(
+        "⬇️ Download drop events CSV",
+        data=csv_data,
+        file_name=f"trailer_drop_events_{start_date}_{end_date}.csv",
+        mime="text/csv",
+        key="drop_events_download",
+    )
+
+
+@st.fragment
 def _render_usage_dashboard(assets: list[Asset], assignments: dict[str, str], unit_search: str) -> None:
     """Main dense-evidence dashboard for trailer usage and truck usage."""
     st.subheader("Trailer Usage Dashboard")
@@ -401,7 +497,7 @@ def _render_usage_dashboard(assets: list[Asset], assignments: dict[str, str], un
 | Movement-evidence gate | ≥ 0.5 mi traveled OR ≥ 1 movement-compatible ping | Stationary-only proximity (parked near each other) does NOT produce a "paired" status — demoted to "near" |
 | Confidence threshold | Weighted score | Combines distance (closer = better), ping count, co-movement pattern, and history overlap |
 | Yard suppression | CA & TX yards | Hours where both units are inside a known yard polygon are tagged "same_yard" and excluded from billable hours |
-| Source data | Dense GPS backfills | Only uses accepted backfill sources (gpstab, anytrek, track888, eroad) — not sparse live publisher snapshots |
+| Source data | Dense GPS backfills + 888 live history | Uses accepted backfill sources (gpstab, anytrek, track888, eroad), blank legacy imports, and `truck_publish` for 888 ELD because that provider currently arrives as live 10-minute history |
 
 **Billing Logic**
 
@@ -1459,6 +1555,29 @@ def _format_time_window(start: object, end: object, *, tz: timezone | ZoneInfo |
     if not start_dt:
         return end_dt
     return f"{start_dt} → {end_dt}"
+
+
+def _drop_status_label(value: object) -> str:
+    status = str(value or "").strip()
+    labels = {
+        "active_drop": "Active Drop",
+        "picked_up": "Picked Up",
+        "returned_to_yard": "Returned to Yard",
+        "yard_drop": "Yard Drop",
+        "unknown_dropper": "Unknown Dropper",
+    }
+    return labels.get(status, status.replace("_", " ").title() if status else "")
+
+
+def _maps_url_for_coords(lat: object, lon: object) -> str:
+    try:
+        lat_f = float(lat)
+        lon_f = float(lon)
+    except (TypeError, ValueError):
+        return ""
+    if lat_f == 0 and lon_f == 0:
+        return ""
+    return f"https://www.google.com/maps/search/?api=1&query={lat_f:.6f},{lon_f:.6f}"
 
 
 def _local_date_range_to_utc(start_date: date, end_date: date) -> tuple[datetime, datetime]:

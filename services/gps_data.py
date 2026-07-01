@@ -131,10 +131,11 @@ def load_asset_history_range(
     end = _ensure_aware(end)
     # PostgREST range filter — single 'and' key avoids dict duplicate-key issues.
     # Use accepted historical sources only: dense backfills plus blank-source
-    # historical imports, but not sparse live publisher snapshots.
+    # historical imports. Include truck_publish because 888 ELD currently lands
+    # through the live publisher at roughly 10-minute intervals.
     filters: dict[str, Any] = {
         "and": f"(recorded_at.gte.{start.isoformat()},recorded_at.lte.{end.isoformat()})",
-        "or": "(source.eq.gpstab_backfill,source.eq.anytrek_backfill,source.eq.track888_backfill,source.eq.eroad_backfill,source.eq.)",
+        "or": "(source.eq.gpstab_backfill,source.eq.anytrek_backfill,source.eq.track888_backfill,source.eq.eroad_backfill,source.eq.truck_publish,source.eq.)",
     }
 
     rows = client.select_all(
@@ -183,7 +184,7 @@ def load_unit_timeline_history(
     end = _ensure_aware(end)
     filters: dict[str, Any] = {
         "and": f"(recorded_at.gte.{start.isoformat()},recorded_at.lte.{end.isoformat()})",
-        "or": "(source.eq.gpstab_backfill,source.eq.anytrek_backfill,source.eq.track888_backfill,source.eq.eroad_backfill,source.eq.)",
+        "or": "(source.eq.gpstab_backfill,source.eq.anytrek_backfill,source.eq.track888_backfill,source.eq.eroad_backfill,source.eq.truck_publish,source.eq.)",
     }
 
     rows = client.select_all(
@@ -728,6 +729,46 @@ def load_latest_pairing_job() -> dict[str, Any] | None:
         logger.info("Pairing job metadata unavailable: %s", e)
         return None
     return rows[0] if rows else None
+
+
+def load_trailer_drop_events(
+    start: datetime,
+    end: datetime,
+    *,
+    active_only: bool = False,
+) -> list[dict[str, Any]]:
+    """Load compact operational dropped-trailer events.
+
+    These rows come from ``trailer_drop_events`` and are intentionally separate
+    from billing/paired-hour summaries. Missing table/migration is treated as
+    no data so older deployments keep working until migration 0022 is applied.
+    """
+    try:
+        client = _get_client()
+    except Exception as e:
+        logger.warning("Trailer drop events unavailable: %s", e)
+        return []
+
+    start = _ensure_aware(start)
+    end = _ensure_aware(end)
+    filters: dict[str, Any] = {
+        "drop_started_at": f"gte.{start.isoformat()}",
+        "and": f"(drop_started_at.lte.{end.isoformat()})",
+    }
+    if active_only:
+        filters["status"] = "in.(active_drop,unknown_dropper,yard_drop)"
+
+    try:
+        return client.select_all(
+            "trailer_drop_events",
+            filters=filters,
+            order="drop_started_at.desc,trailer_id.asc",
+            page_size=1000,
+            hard_cap=50000,
+        )
+    except Exception as e:
+        logger.info("Trailer drop events query unavailable: %s", e)
+        return []
 
 
 def load_match_reviews(match_ids: list[str]) -> dict[str, dict[str, Any]]:
