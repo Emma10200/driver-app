@@ -279,11 +279,13 @@ def _render_fleet_overview_tab(assets: list[Asset], assignments: dict[str, str],
     n_trailers = sum(1 for r in fleet_rows if r["Type"] == "Trailer")
     n_in_yard = sum(1 for r in fleet_rows if r["Yard"])
     n_moving = sum(1 for r in fleet_rows if r["Speed"] and str(r["Speed"]) not in ("0", "0.0", ""))
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Trucks", n_trucks)
-    c2.metric("Trailers", n_trailers)
-    c3.metric("In Yard", n_in_yard)
-    c4.metric("Moving", n_moving)
+    with st.sidebar:
+        c1, c2 = st.columns(2)
+        c1.metric("Trucks", n_trucks)
+        c2.metric("Trailers", n_trailers)
+        c3, c4 = st.columns(2)
+        c3.metric("In Yard", n_in_yard)
+        c4.metric("Moving", n_moving)
 
     if not fleet_rows:
         st.info("No units match the current filters." + (" Try clearing the search." if search_norm else ""))
