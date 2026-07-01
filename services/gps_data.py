@@ -688,6 +688,29 @@ def load_usage_daily_summary(start: datetime, end: datetime) -> list[dict[str, A
         return []
 
 
+def load_evidence_truck_map(
+    start: datetime, end: datetime,
+) -> dict[str, dict[str, int]]:
+    """Return {trailer_id: {truck_id: paired_hours}} from daily summary.
+
+    Lightweight query used by the unmatched-trailer alert to determine which
+    truck actually pulled each trailer according to GPS evidence — regardless
+    of whether that truck is still on the dispatch board.
+    """
+    rows = load_usage_daily_summary(start, end)
+    result: dict[str, dict[str, int]] = {}
+    for row in rows:
+        paired = int(row.get("paired_hours") or 0)
+        if paired <= 0:
+            continue
+        tid = str(row.get("trailer_id") or "")
+        truck = str(row.get("truck_id") or "")
+        if tid and truck:
+            result.setdefault(tid, {})
+            result[tid][truck] = result[tid].get(truck, 0) + paired
+    return result
+
+
 def load_latest_pairing_job() -> dict[str, Any] | None:
     """Return the latest dense hourly-evidence job metadata."""
     try:

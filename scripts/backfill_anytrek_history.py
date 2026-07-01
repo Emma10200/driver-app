@@ -819,10 +819,14 @@ def main() -> None:
     parser.add_argument("--provider", choices=["all", "anytrek", "gpstab", "track888", "eroad"], default="all", help="Which provider to backfill")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and transform but don't write to Supabase")
     parser.add_argument("--shotgun", action="store_true",
-                        help="After normal backfill, find units with 0 history and "
-                             "try every provider until data is found")
+                        help="After normal backfill, find units with 0 pings in last "
+                             "7 days and try every provider until data is found")
     parser.add_argument("--shotgun-only", nargs="*", metavar="UNIT_ID",
                         help="Run shotgun lookup for specific unit IDs only (skip normal backfill)")
+    parser.add_argument("--blind", action="store_true",
+                        help="Pull ALL vehicles from ALL providers regardless of board "
+                             "status. Any unit that exists on any GPS API gets stored. "
+                             "Equivalent to --provider all but also logs unknown units.")
     args = parser.parse_args()
 
     secrets = _load_secrets()

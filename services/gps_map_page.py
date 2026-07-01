@@ -22,6 +22,7 @@ from services.gps_data import (
     deactivate_manual_pair_assignment,
     load_assignments,
     load_current_assets_with_last_known,
+    load_evidence_truck_map,
     load_hourly_evidence_rows,
     load_hourly_evidence_timeline,
     load_latest_pairing_job,
@@ -594,6 +595,10 @@ def _render_unmatched_trailers_alert(start_dt: datetime, end_dt: datetime) -> No
         if trailer:
             trailer_to_truck[str(trailer)] = str(truck)
 
+    # Load GPS-evidence pairings — this is the SOURCE OF TRUTH for who actually
+    # pulled each trailer, regardless of whether the truck is still on the board.
+    evidence_truck_map = load_evidence_truck_map(start_dt, end_dt)
+
     # Aggregate per trailer across the date range
     trailer_agg: dict[str, dict[str, Any]] = {}
     for row in activity_rows:
@@ -618,6 +623,23 @@ def _render_unmatched_trailers_alert(start_dt: datetime, end_dt: datetime) -> No
         acc["unmatched_moving_hours"] += int(row.get("unmatched_moving_hours") or 0)
         acc["in_yard_hours"] += int(row.get("in_yard_hours") or 0)
 
+    # Exclude trailers that have strong GPS-evidence pairing — even if the
+    # truck is no longer on the dispatch board. GPS evidence is primary truth.
+    for tid, trucks in evidence_truck_map.items():
+        if tid not in trailer_agg:
+            continue
+        total_evidence_hours = sum(trucks.values())
+        agg = trailer_agg[tid]
+        # If GPS evidence shows this trailer was paired for most of its moving
+        # hours, it's NOT truly unmatched — the truck was just deactivated.
+        if total_evidence_hours >= max(agg["moving_hours"] * 0.5, 3):
+            # Attach the evidence truck to the trailer data for display
+            best_truck = max(trucks, key=trucks.get)
+            agg["evidence_truck"] = best_truck
+            agg["evidence_hours"] = total_evidence_hours
+            # Reduce unmatched hours by evidence-paired hours
+            agg["unmatched_moving_hours"] = max(0, agg["unmatched_moving_hours"] - total_evidence_hours)
+
     # Filter: only show trailers with significant unmatched movement
     alerts = [
         v for v in trailer_agg.values()
@@ -631,16 +653,20 @@ def _render_unmatched_trailers_alert(start_dt: datetime, end_dt: datetime) -> No
     with st.expander(f"⚠️ Unmatched Moving Trailers ({len(alerts)})", expanded=False):
         st.caption(
             "Trailers with significant GPS movement but few or no matched truck hours. "
-            "These may be pulled by paper-log drivers or have GPS pairing gaps. "
-            "Excludes trailers in yard suppression zones and manually-assigned trailers."
+            "GPS evidence is the primary source of truth — trailers paired in GPS data "
+            "are excluded even if the truck was deactivated from the dispatch board."
         )
         display_rows = []
         for a in alerts:
             match_pct = (a["paired_hours"] / max(1, a["moving_hours"])) * 100.0
             dispatch_truck = trailer_to_truck.get(a["trailer_id"], "—")
+            evidence_truck = a.get("evidence_truck", "")
+            truck_display = dispatch_truck
+            if evidence_truck and evidence_truck != dispatch_truck:
+                truck_display = f"{evidence_truck} (GPS)" if not dispatch_truck or dispatch_truck == "—" else f"{dispatch_truck} / {evidence_truck} (GPS)"
             display_rows.append({
                 "Trailer": a["trailer_id"],
-                "Dispatch Truck": dispatch_truck,
+                "Truck": truck_display,
                 "Moving Hours": a["moving_hours"],
                 "Paired Hours": a["paired_hours"],
                 "Unmatched Hours": a["unmatched_moving_hours"],
