@@ -10,6 +10,7 @@ import json
 from datetime import date, datetime, time, timedelta, timezone
 from html import escape
 from io import StringIO
+from typing import Any
 from urllib.parse import quote_plus
 
 import streamlit as st
@@ -19,7 +20,7 @@ from services.gps_data import (
     load_assignments,
     load_asset_history,
     load_asset_history_range,
-    load_current_assets,
+    load_current_assets_with_last_known,
     load_hourly_evidence_timeline,
     load_latest_pairing_job,
     load_match_reviews,
@@ -43,7 +44,7 @@ def render_gps_map_page() -> None:
 
     # --- Load FAST data first (current positions only) ---
     with st.spinner("Loading positions..."):
-        assets = load_current_assets()
+        assets = load_current_assets_with_last_known(stale_after_days=30)
         assignments = load_assignments()
 
     if not assets:
@@ -53,43 +54,41 @@ def render_gps_map_page() -> None:
     trucks = [a for a in assets if a.asset_type == "truck"]
     trailers = [a for a in assets if a.asset_type == "trailer"]
 
-    # --- Sidebar: toggles for companies + providers ---
-    st.sidebar.subheader("Visibility")
     divisions = sorted({a.division for a in assets if a.division})
     providers = sorted({a.provider for a in assets if a.provider})
+    (
+        active_divs,
+        show_no_div,
+        active_providers,
+        show_trucks,
+        show_trailers,
+        show_historical,
+        unit_search,
+    ) = _render_map_controls(assets, divisions, providers)
 
-    # Company toggles
-    st.sidebar.caption("**Companies**")
-    active_divs: set[str] = set()
-    for div in divisions:
-        if st.sidebar.checkbox(div, value=True, key=f"div_{div}"):
-            active_divs.add(div)
-    # Include assets with empty division if any company is checked
-    show_no_div = st.sidebar.checkbox("(No division)", value=True, key="div_none")
-
-    # Provider toggles
-    st.sidebar.caption("**GPS Providers**")
-    active_providers: set[str] = set()
-    for prov in providers:
-        short = prov.split("(")[0].strip() if "(" in prov else prov
-        if st.sidebar.checkbox(short, value=True, key=f"prov_{prov}"):
-            active_providers.add(prov)
-
-    st.sidebar.subheader("Matching")
-    max_dist = st.sidebar.slider("Match radius (miles)", 0.1, 5.0, 0.5, 0.1)
-    max_stale = st.sidebar.slider("Max stale (minutes)", 15, 240, 60, 15)
-    history_hours = st.sidebar.slider("History lookback (hours)", 12, 168, 48, 12)
-    min_history_hits = st.sidebar.slider("Min route hits", 1, 6, 2, 1)
-    unit_search = st.sidebar.text_input("Search units", placeholder="Unit, provider, address, VIN...")
+    with st.sidebar.expander("Advanced diagnostic tuning", expanded=False):
+        st.caption("Used only by the diagnostic tabs below — not by the dense usage dashboard.")
+        max_dist = st.slider("Match radius (miles)", 0.1, 5.0, 0.5, 0.1)
+        max_stale = st.slider("Max stale (minutes)", 15, 240, 60, 15)
+        history_hours = st.slider("History lookback (hours)", 12, 168, 48, 12)
+        min_history_hits = st.slider("Min route hits", 1, 6, 2, 1)
 
     # --- Filter assets by toggles ---
     def _visible(a: Asset) -> bool:
+        if a.asset_type == "truck" and not show_trucks:
+            return False
+        if a.asset_type == "trailer" and not show_trailers:
+            return False
+        if _is_historical_last_known(a) and not show_historical:
+            return False
         if a.division:
             if a.division not in active_divs:
                 return False
         elif not show_no_div:
             return False
         if a.provider and a.provider not in active_providers:
+            return False
+        if unit_search and not _asset_matches_search(a, unit_search):
             return False
         return True
 
@@ -98,11 +97,14 @@ def render_gps_map_page() -> None:
     visible_assets = [a for a in assets if _visible(a)]
 
     # --- Metrics (instant) ---
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Trucks", len(visible_trucks))
     col2.metric("Trailers", len(visible_trailers))
-    col3.metric("Divisions", len(active_divs))
-    col4.metric("Providers", len(active_providers))
+    col3.metric("Last-Known", sum(1 for a in visible_assets if _is_historical_last_known(a)))
+    col4.metric("No Coordinates", sum(1 for a in visible_assets if not _has_coords(a)))
+    col5.metric("Providers", len(active_providers))
+
+    _render_map_lookup_panel(visible_assets, unit_search)
 
     # --- Map (renders FIRST with just current positions) ---
     _render_map(visible_trucks, visible_trailers, divisions, assignments)
@@ -156,7 +158,9 @@ def _render_map(
             "division": _division_display(t.division), "provider": _provider_display(t.provider),
             "address": t.address, "coords": _coords(t),
             "last_ping": _last_ping_text(t), "ping_age": _ping_age_text(t),
-            "color": _truck_color(t.division, division_colors),
+            "location_status": _location_status(t), "status_note": _location_note(t),
+            "maps_url": _maps_url(t),
+            "color": _asset_marker_color(t, _truck_color(t.division, division_colors)),
             "asset_type": "Truck",
         }
         for t in trucks if _has_coords(t)
@@ -184,8 +188,10 @@ def _render_map(
             "division": _division_display(t.division), "provider": _provider_display(t.provider),
             "address": t.address, "coords": _coords(t),
             "last_ping": _last_ping_text(t), "ping_age": _ping_age_text(t),
+            "location_status": _location_status(t), "status_note": _location_note(t),
+            "maps_url": _maps_url(t),
             "in_yard": in_yard(t.lat, t.lon) or "",
-            "color": [255, 140, 0, 230], "asset_type": "Trailer",
+            "color": _asset_marker_color(t, [255, 140, 0, 230]), "asset_type": "Trailer",
         }
         for t in trailers if _has_coords(t)
     ]
@@ -220,9 +226,12 @@ def _render_map(
             "html": (
                 "<div style='font-size:13px;line-height:1.35;'>"
                 "<b style='font-size:15px'>{asset_type}: {id}</b><br/>"
+                "<b>Status:</b> {location_status}<br/>"
+                "<b>Note:</b> {status_note}<br/>"
                 "<b>Ping:</b> {last_ping}<br/>"
                 "<b>Age:</b> {ping_age}<br/>"
                 "<b>Coords:</b> {coords}<br/>"
+                "<a style='color:#93c5fd' href='{maps_url}' target='_blank'>🗺️ Open in Google Maps</a><br/>"
                 "<b>Division:</b> {division}<br/>"
                 "<b>GPS:</b> {provider}<br/>"
                 "<b>Address:</b> {address}"
@@ -913,6 +922,162 @@ def _render_review_tab(
     _render_match_review(matches, selected_div=None)
 
 
+def _render_map_controls(
+    assets: list[Asset],
+    divisions: list[str],
+    providers: list[str],
+) -> tuple[set[str], bool, set[str], bool, bool, bool, str]:
+    """Render dispatcher-friendly map controls above the map."""
+    st.markdown("#### Map lookup")
+    c1, c2, c3 = st.columns([2.4, 1.2, 1.4])
+    with c1:
+        unit_search = st.text_input(
+            "Find unit on map",
+            placeholder="Try 129, 759012, Anytrek, Prestige, address...",
+            key="gps_map_unit_search",
+        )
+    with c2:
+        shown_types = st.multiselect(
+            "Show",
+            ["Trucks", "Trailers"],
+            default=["Trucks", "Trailers"],
+            key="gps_map_types",
+        )
+    with c3:
+        show_historical = st.checkbox(
+            "Include historical last-known",
+            value=True,
+            key="gps_map_show_historical",
+            help="Shows active units whose current GPS is missing/stale by borrowing their latest historical ping.",
+        )
+
+    with st.expander("Map filters", expanded=False):
+        f1, f2 = st.columns(2)
+        no_div_token = "__NO_DIVISION__"
+        division_options = list(divisions)
+        if any(not a.division for a in assets):
+            division_options = [no_div_token] + division_options
+        with f1:
+            selected_divisions = st.multiselect(
+                "Companies / divisions",
+                division_options,
+                default=division_options,
+                format_func=lambda value: "No division" if value == no_div_token else _division_display(value),
+                key="gps_map_division_filter",
+            )
+        with f2:
+            selected_providers = st.multiselect(
+                "GPS providers",
+                providers,
+                default=providers,
+                format_func=_provider_display,
+                key="gps_map_provider_filter",
+            )
+
+    return (
+        {d for d in selected_divisions if d != no_div_token},
+        no_div_token in selected_divisions,
+        set(selected_providers),
+        "Trucks" in shown_types,
+        "Trailers" in shown_types,
+        show_historical,
+        unit_search.strip(),
+    )
+
+
+def _render_map_lookup_panel(assets: list[Asset], unit_search: str) -> None:
+    """Render a compact copy/Google Maps action panel for the currently visible map units."""
+    lookup_assets = [a for a in assets if _has_coords(a)]
+    if not lookup_assets:
+        st.info("No visible units have coordinates with the current filters.")
+        return
+
+    lookup_assets = sorted(lookup_assets, key=lambda a: (a.asset_type, _unit_sort_key(a.asset_id)))
+    by_key = {f"{a.asset_type}:{a.asset_id}": a for a in lookup_assets}
+    labels = {
+        key: f"{asset.asset_type.title()} {asset.asset_id} · {_location_status(asset)} · {_ping_age_text(asset)}"
+        for key, asset in by_key.items()
+    }
+
+    default_index = 0
+    if unit_search:
+        search_norm = unit_search.strip().lower()
+        for idx, asset in enumerate(lookup_assets):
+            if asset.asset_id.lower() == search_norm:
+                default_index = idx
+                break
+
+    selected_key = st.selectbox(
+        "Coordinate actions",
+        list(by_key.keys()),
+        index=default_index,
+        format_func=lambda key: labels.get(key, key),
+        key="gps_map_coordinate_actions",
+        help="Use this instead of hunting through the sidebar: select a visible unit, copy coordinates, or open Google Maps.",
+    )
+    selected = by_key[selected_key]
+    _render_coordinate_action_card(selected)
+
+
+def _render_coordinate_action_card(asset: Asset) -> None:
+    coords = _coords(asset)
+    maps_url = _maps_url(asset)
+    coords_js = coords.replace("\\", "\\\\").replace("'", "\\'")
+    unit_label = escape(f"{asset.asset_type.title()} {asset.asset_id}")
+    status = escape(_location_status(asset))
+    note = escape(_location_note(asset))
+    provider = escape(_provider_display(asset.provider))
+    division = escape(_division_display(asset.division))
+    last_ping = escape(_last_ping_text(asset) or "No ping time")
+    ping_age = escape(_ping_age_text(asset))
+    coords_escaped = escape(coords)
+    maps_href = escape(maps_url, quote=True)
+
+    html = f"""
+    <style>
+      body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }}
+      .card {{ border: 1px solid #334155; border-radius: 12px; padding: 12px 14px; background: #0f172a; color: #f8fafc; }}
+      .top {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }}
+      .unit {{ font-weight: 800; font-size: 16px; }}
+      .status {{ color: #fbbf24; font-weight: 700; }}
+      .meta {{ margin-top: 6px; color: #cbd5e1; font-size: 13px; }}
+      .coords {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #dbeafe; }}
+      .actions {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
+      button, a.btn {{ border: 0; border-radius: 8px; padding: 7px 10px; color: white; font-weight: 800; text-decoration: none; cursor: pointer; }}
+      button {{ background: #2563eb; }}
+      a.btn {{ background: #16a34a; }}
+    </style>
+    <script>
+      async function copyCoords(coords, btn) {{
+        try {{
+          await navigator.clipboard.writeText(coords);
+          const old = btn.innerText;
+          btn.innerText = 'Copied';
+          setTimeout(() => btn.innerText = old, 1200);
+        }} catch (err) {{
+          btn.innerText = 'Select coords';
+        }}
+      }}
+    </script>
+    <div class="card">
+      <div class="top">
+        <div>
+          <span class="unit">{unit_label}</span>
+          <span class="status"> · {status}</span>
+        </div>
+        <div class="actions">
+          <span class="coords">{coords_escaped}</span>
+          <button onclick="copyCoords('{coords_js}', this)">📋 Copy</button>
+          <a class="btn" href="{maps_href}" target="_blank" rel="noopener">🗺️ Google Maps</a>
+        </div>
+      </div>
+      <div class="meta">Ping: <b>{last_ping}</b> ({ping_age}) · GPS: <b>{provider}</b> · Division: <b>{division}</b></div>
+      <div class="meta">{note}</div>
+    </div>
+    """
+    components.html(html, height=118, scrolling=False)
+
+
 def _has_coords(asset: Asset) -> bool:
     if asset.lat is None or asset.lon is None:
         return False
@@ -922,6 +1087,55 @@ def _has_coords(asset: Asset) -> bool:
     except (TypeError, ValueError):
         return False
     return not (lat == 0 and lon == 0)
+
+
+def _asset_matches_search(asset: Asset, search: str) -> bool:
+    search_norm = (search or "").strip().lower()
+    if not search_norm:
+        return True
+    fields = [
+        asset.asset_type,
+        asset.asset_id,
+        asset.division,
+        asset.provider,
+        asset.address,
+        asset.zip,
+        _coords(asset),
+        _location_status(asset),
+        _raw_value(asset, "sheetId", "deviceId", "vehicleId", "vin", "VIN", "apiAccountName"),
+    ]
+    return search_norm in " ".join(str(v).lower() for v in fields if v)
+
+
+def _is_historical_last_known(asset: Asset) -> bool:
+    raw = asset.raw or {}
+    return bool(raw.get("historicalLastKnown")) or str(raw.get("locationStatus") or "") == "Historical last known"
+
+
+def _location_status(asset: Asset) -> str:
+    raw = asset.raw or {}
+    status = str(raw.get("locationStatus") or "").strip()
+    if status:
+        return status
+    return "Current GPS" if _has_coords(asset) else "No coordinates"
+
+
+def _location_note(asset: Asset) -> str:
+    raw = asset.raw or {}
+    reason = str(raw.get("historicalLookupReason") or "").strip()
+    if _is_historical_last_known(asset):
+        source = str(raw.get("historySource") or "").strip()
+        source_note = f" · source: {source}" if source else ""
+        return (reason or "Using latest historical ping because current GPS is stale/missing") + source_note
+    if reason:
+        return reason
+    return "Live/current row from assets_current"
+
+
+def _asset_marker_color(asset: Asset, base_color: list[int]) -> list[int]:
+    if _is_historical_last_known(asset):
+        return [245, 158, 11, 220]  # amber = stale/historical last known
+    return base_color
 
 
 def _division_color_map(divisions: list[str]) -> dict[str, list[int]]:
@@ -966,7 +1180,10 @@ def _provider_display(provider: str | None) -> str:
 
 
 def _render_map_legend(division_colors: dict[str, list[int]]) -> None:
-    legend_items = ["<span style='display:inline-block;width:12px;height:12px;border-radius:50%;background:rgb(255,140,0);border:1px solid #fff;margin-right:4px;'></span>Trailers"]
+    legend_items = [
+        "<span style='display:inline-block;width:12px;height:12px;border-radius:50%;background:rgb(255,140,0);border:1px solid #fff;margin-right:4px;'></span>Trailers",
+        "<span style='display:inline-block;width:12px;height:12px;border-radius:50%;background:rgb(245,158,11);border:1px solid #fff;margin-right:4px;'></span>Historical last-known",
+    ]
     for division, color in division_colors.items():
         legend_items.append(
             f"<span style='display:inline-block;width:12px;height:12px;border-radius:50%;background:rgba({color[0]},{color[1]},{color[2]},{color[3] / 255:.2f});border:1px solid #fff;margin-right:4px;'></span>Truck: {escape(_division_display(division))}"
@@ -1107,6 +1324,8 @@ def _build_unit_rows(
             "Map": _maps_url(asset),
             "Lat": float(asset.lat) if _has_coords(asset) else None,
             "Lon": float(asset.lon) if _has_coords(asset) else None,
+            "Location Status": _location_status(asset),
+            "Location Note": _location_note(asset),
             "Matched Unit": matched_unit,
             "Match Status": match_status,
             "Board Assigned": board_unit,
@@ -1150,8 +1369,11 @@ def _render_copy_grid(rows: list[dict[str, object]]) -> None:
         coords = str(row.get("Coords") or "")
         disabled = "" if coords else "disabled"
         button_label = "Copy" if coords else "No coords"
+        map_url = escape(str(row.get("Map") or ""), quote=True)
         unit = escape(str(row.get("Unit") or ""))
         unit_type = escape(str(row.get("Type") or ""))
+        location_status = escape(str(row.get("Location Status") or ""))
+        location_note = escape(str(row.get("Location Note") or ""))
         matched = escape(str(row.get("Matched Unit") or ""))
         status = escape(str(row.get("Match Status") or ""))
         provider = escape(str(row.get("Provider") or ""))
@@ -1170,7 +1392,9 @@ def _render_copy_grid(rows: list[dict[str, object]]) -> None:
             f"<td><span class='pill {unit_type.lower()}'>{unit_type}</span></td>"
             f"<td class='unit'>{unit}</td>"
             f"<td><button {disabled} onclick=\"copyCoords('{coords_js}', this)\">{button_label}</button></td>"
+            f"<td><a class='map-link' href='{map_url}' target='_blank' rel='noopener'>🗺️ Maps</a></td>"
             f"<td class='coords'>{coords_escaped}</td>"
+            f"<td title='{location_note}'>{location_status}</td>"
             f"<td>{matched}</td>"
             f"<td>{status}</td>"
             f"<td>{division}</td>"
@@ -1195,6 +1419,7 @@ def _render_copy_grid(rows: list[dict[str, object]]) -> None:
       tr:hover {{ background: #172033; }}
       button {{ cursor: pointer; border: 0; border-radius: 6px; padding: 5px 9px; background: #2563eb; color: white; font-weight: 600; }}
       button:disabled {{ cursor: not-allowed; opacity: .45; background: #64748b; }}
+    .map-link {{ display: inline-block; border-radius: 6px; padding: 5px 9px; background: #16a34a; color: white; font-weight: 700; text-decoration: none; }}
       .unit {{ font-weight: 700; color: #ffffff; }}
       .coords {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
       .pill {{ display: inline-block; border-radius: 999px; padding: 2px 8px; font-weight: 700; font-size: 12px; }}
@@ -1217,7 +1442,7 @@ def _render_copy_grid(rows: list[dict[str, object]]) -> None:
       <table>
         <thead>
           <tr>
-            <th>Type</th><th>Unit</th><th>Copy</th><th>Coords</th><th>Matched</th>
+                        <th>Type</th><th>Unit</th><th>Copy</th><th>Map</th><th>Coords</th><th>Location</th><th>Matched</th>
             <th>Status</th><th>Division</th><th>Last Ping</th><th>Age</th><th>VIN</th><th>Yard</th><th>History</th>
             <th>Provider</th><th>Identifying Info</th><th>Address</th>
           </tr>

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
@@ -46,6 +47,59 @@ def load_current_assets(division: str | None = None) -> list[Asset]:
 
     rows = client.select("assets_current", filters=filters, order="asset_type.asc,asset_id.asc")
     return [_row_to_asset(r) for r in rows]
+
+
+def load_current_assets_with_last_known(
+    division: str | None = None,
+    *,
+    stale_after_days: int = 30,
+    asset_types: tuple[str, ...] = ("truck", "trailer"),
+) -> list[Asset]:
+    """Load active/current assets and enrich missing/stale map rows from assets_history.
+
+    `assets_current` is still the roster of active units shown on the dispatcher
+    map. If an active unit has no usable coordinates or its ping is older than
+    `stale_after_days`, this function looks up that unit's latest historical
+    ping in `assets_history` and uses it as a map-only fallback.
+
+    Important: this is intentionally *not* used by dense matching/evidence. It
+    is only a dispatcher visibility aid for dead batteries / stale trailer GPS.
+    """
+    assets = load_current_assets(division=division)
+    if not assets:
+        return []
+
+    try:
+        client = _get_client()
+    except Exception as e:
+        logger.info("Last-known GPS lookup unavailable: %s", e)
+        return assets
+
+    now = datetime.now(timezone.utc)
+    stale_after_days = max(1, int(stale_after_days))
+    eligible_types = {t.lower() for t in asset_types}
+    enriched: list[Asset] = []
+
+    for asset in assets:
+        if asset.asset_type.lower() not in eligible_types:
+            enriched.append(asset)
+            continue
+
+        missing_coords = not _asset_has_coords(asset)
+        stale_ping = _asset_is_stale(asset, now=now, stale_after_days=stale_after_days)
+        if not missing_coords and not stale_ping:
+            enriched.append(_mark_location_status(asset, "Current GPS"))
+            continue
+
+        historical = _load_latest_history_point(client, asset.asset_type, asset.asset_id)
+        if historical is None:
+            reason = "Missing coordinates" if missing_coords else f"Stale > {stale_after_days} days"
+            enriched.append(_mark_location_status(asset, "No historical location found", reason=reason))
+            continue
+
+        enriched.append(_merge_last_known(asset, historical, stale_after_days=stale_after_days, now=now))
+
+    return enriched
 
 
 def load_asset_history(hours: int = 48, division: str | None = None) -> list[Asset]:
@@ -458,6 +512,100 @@ def _history_row_to_asset(row: dict[str, Any]) -> Asset:
         provider=row.get("provider", ""),
         raw=raw,
     )
+
+
+def _load_latest_history_point(client: Any, asset_type: str, asset_id: str) -> Asset | None:
+    """Return the newest historical point with usable coordinates for one asset."""
+    if not asset_type or not asset_id:
+        return None
+    try:
+        rows = client.select(
+            "assets_history",
+            select=(
+                "asset_type,asset_id,division,lat,lon,address,zip,speed,heading_deg,"
+                "provider,recorded_at,source,raw"
+            ),
+            filters={"asset_type": f"eq.{asset_type}", "asset_id": f"eq.{asset_id}"},
+            order="recorded_at.desc",
+            limit=25,
+        )
+    except Exception as e:
+        logger.info("Latest history lookup failed for %s %s: %s", asset_type, asset_id, e)
+        return None
+
+    for row in rows:
+        asset = _history_row_to_asset(row)
+        if _asset_has_coords(asset) and asset.last_ping is not None:
+            raw = dict(asset.raw or {})
+            raw["historySource"] = row.get("source") or ""
+            asset = replace(asset, raw=raw)
+            return asset
+    return None
+
+
+def _merge_last_known(current: Asset, historical: Asset, *, stale_after_days: int, now: datetime) -> Asset:
+    """Overlay latest historical coordinates onto an active current-roster asset."""
+    current_has_coords = _asset_has_coords(current)
+    historical_is_newer = (
+        historical.last_ping is not None
+        and (current.last_ping is None or historical.last_ping > current.last_ping)
+    )
+    use_history_position = not current_has_coords or historical_is_newer
+    reason = "Missing current coordinates" if not current_has_coords else f"Current ping is > {stale_after_days} days old"
+
+    raw = dict(current.raw or {})
+    raw.update({
+        "historicalLastKnown": True,
+        "locationStatus": "Historical last known",
+        "historicalLookupReason": reason,
+        "currentLastPing": current.last_ping.isoformat() if current.last_ping else "",
+        "historyLastPing": historical.last_ping.isoformat() if historical.last_ping else "",
+        "historySource": (historical.raw or {}).get("historySource", ""),
+    })
+
+    if not use_history_position:
+        return replace(current, raw=raw)
+
+    return replace(
+        current,
+        lat=historical.lat,
+        lon=historical.lon,
+        speed=historical.speed if historical.speed is not None else current.speed,
+        heading_deg=historical.heading_deg if historical.heading_deg is not None else current.heading_deg,
+        last_ping=historical.last_ping or current.last_ping,
+        address=historical.address or current.address,
+        zip=historical.zip or current.zip,
+        provider=historical.provider or current.provider,
+        division=current.division or historical.division,
+        raw=raw,
+    )
+
+
+def _mark_location_status(asset: Asset, status: str, *, reason: str = "") -> Asset:
+    raw = dict(asset.raw or {})
+    raw["locationStatus"] = status
+    raw["historicalLastKnown"] = status == "Historical last known"
+    if reason:
+        raw["historicalLookupReason"] = reason
+    return replace(asset, raw=raw)
+
+
+def _asset_is_stale(asset: Asset, *, now: datetime, stale_after_days: int) -> bool:
+    if asset.last_ping is None:
+        return True
+    ping = asset.last_ping.astimezone(timezone.utc)
+    return now - ping > timedelta(days=stale_after_days)
+
+
+def _asset_has_coords(asset: Asset) -> bool:
+    if asset.lat is None or asset.lon is None:
+        return False
+    try:
+        lat = float(asset.lat)
+        lon = float(asset.lon)
+    except (TypeError, ValueError):
+        return False
+    return not (lat == 0 and lon == 0)
 
 
 def _parse_raw(value: Any) -> dict[str, Any]:
