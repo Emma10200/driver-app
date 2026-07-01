@@ -39,7 +39,7 @@ import requests
 # Configuration
 # ---------------------------------------------------------------------------
 ANYTREK_TX_URL = "https://api.anytrek.com/v2/api/transactions.json"
-CHUNK_DAYS = 3  # Pull in 3-day chunks (Anytrek caps at 10K per call)
+CHUNK_DAYS = 1  # Pull in 1-day chunks; Anytrek can time out on larger historical windows.
 MAX_COUNT_PER_CALL = 10000
 SUPABASE_BATCH_SIZE = 500
 YARD_FENCES = {
@@ -620,10 +620,22 @@ def fetch_anytrek_chunk(api_key: str, start: datetime, end: datetime) -> list[di
     url = f"{ANYTREK_TX_URL}?{urlencode(params)}"
     print(f"  Fetching {start.date()} → {end.date()} ...", end=" ", flush=True)
 
-    resp = requests.post(url, timeout=60)
-    if resp.status_code != 200:
-        print(f"HTTP {resp.status_code}")
-        return []
+    last_error = ""
+    for attempt in range(1, 4):
+        try:
+            resp = requests.post(url, timeout=180)
+            if resp.status_code != 200:
+                print(f"HTTP {resp.status_code}")
+                return []
+            break
+        except requests.RequestException as exc:
+            last_error = str(exc)
+            if attempt < 3:
+                print(f"timeout/error attempt {attempt}; retrying...", end=" ", flush=True)
+                time.sleep(2 * attempt)
+                continue
+            print(f"failed after retries: {last_error[:180]}")
+            return []
 
     data = resp.json()
     if not isinstance(data, list):
@@ -715,6 +727,37 @@ def upsert_to_supabase(
     return total
 
 
+def source_rows_exist(
+    supabase_url: str,
+    supabase_key: str,
+    source: str,
+    start: datetime,
+    end: datetime,
+) -> bool:
+    """Return True if a dense backfill source already has rows in a time chunk."""
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Accept": "application/json",
+    }
+    resp = requests.get(
+        f"{supabase_url}/rest/v1/assets_history",
+        headers=headers,
+        params={
+            "select": "id",
+            "source": f"eq.{source}",
+            "and": f"(recorded_at.gte.{start.isoformat()},recorded_at.lte.{end.isoformat()})",
+            "limit": "1",
+        },
+        timeout=30,
+    )
+    if not resp.ok:
+        print(f"    WARNING: existing-row check failed: HTTP {resp.status_code} {resp.text[:120]}")
+        return False
+    rows = resp.json()
+    return isinstance(rows, list) and bool(rows)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backfill GPS history to Supabase (Anytrek trailers + GPSTab trucks)")
     parser.add_argument("--days", type=int, default=60, help="How many days back to pull (default: 60)")
@@ -753,6 +796,11 @@ def main() -> None:
             chunk_start = start
             while chunk_start < now:
                 chunk_end = min(chunk_start + timedelta(days=CHUNK_DAYS), now)
+                if source_rows_exist(supabase_url, supabase_key, "anytrek_backfill", chunk_start, chunk_end):
+                    print(f"  Skipping {chunk_start.date()} → {chunk_end.date()} (Anytrek rows already exist)")
+                    chunk_start = chunk_end
+                    continue
+
                 transactions = fetch_anytrek_chunk(api_key, chunk_start, chunk_end)
                 total_fetched += len(transactions)
 

@@ -76,8 +76,10 @@ def load_asset_history_range(
     start = _ensure_aware(start)
     end = _ensure_aware(end)
     # PostgREST range filter — single 'and' key avoids dict duplicate-key issues
+    # Only use dense backfill sources (not sparse dispatch board snapshots)
     filters: dict[str, Any] = {
         "and": f"(recorded_at.gte.{start.isoformat()},recorded_at.lte.{end.isoformat()})",
+        "or": "(source.eq.gpstab_backfill,source.eq.anytrek_backfill,source.eq.track888_backfill,source.eq.eroad_backfill)",
     }
 
     rows = client.select_all(
@@ -126,6 +128,7 @@ def load_unit_timeline_history(
     end = _ensure_aware(end)
     filters: dict[str, Any] = {
         "and": f"(recorded_at.gte.{start.isoformat()},recorded_at.lte.{end.isoformat()})",
+        "or": "(source.eq.gpstab_backfill,source.eq.anytrek_backfill,source.eq.track888_backfill,source.eq.eroad_backfill)",
     }
 
     rows = client.select_all(
