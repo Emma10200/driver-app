@@ -757,7 +757,13 @@ def _render_unmatched_trailers_alert(start_dt: datetime, end_dt: datetime) -> No
     trailer_coverage = load_asset_hour_coverage("trailer", alert_trailers, start_dt, end_dt)
     truck_coverage = load_asset_hour_coverage("truck", alert_dispatch_trucks, start_dt, end_dt)
 
-    with st.expander(f"⚠️ Unmatched Moving Trailers ({len(alerts)})", expanded=False):
+    active_route_tid = str(st.session_state.get("active_unmatched_route_trailer") or "")
+    alert_ids = {str(a["trailer_id"]) for a in alerts}
+    if active_route_tid and active_route_tid not in alert_ids:
+        st.session_state.pop("active_unmatched_route_trailer", None)
+        active_route_tid = ""
+
+    with st.expander(f"⚠️ Unmatched Moving Trailers ({len(alerts)})", expanded=bool(active_route_tid)):
         st.caption(
             "Trailers with significant GPS movement but few or no matched truck hours. "
             "GPS evidence is the primary source of truth — trailers paired in GPS data "
@@ -806,7 +812,8 @@ def _render_unmatched_trailers_alert(start_dt: datetime, end_dt: datetime) -> No
                 header_parts.append(f"→ Dispatch truck: **{dispatch_truck}**")
             header_parts.append(f"{a['unmatched_moving_hours']}h unmatched, {round(a['miles_moved'], 1)} mi")
 
-            with st.expander(" · ".join(header_parts), expanded=False):
+            route_is_active = active_route_tid == str(tid)
+            with st.expander(" · ".join(header_parts), expanded=route_is_active):
                 # Quick-confirm button if dispatch board has a truck
                 if dispatch_truck:
                     st.info(
@@ -836,8 +843,20 @@ def _render_unmatched_trailers_alert(start_dt: datetime, end_dt: datetime) -> No
                         "No truck assigned — investigate whether GPS is missing or the trailer is unassigned."
                     )
 
-                # Expandable GPS trail map
-                if st.button(f"🗺️ Show travel route for {tid}", key=f"trail_btn_{idx}_{tid}"):
+                # Persistent GPS trail panel. Buttons are momentary in Streamlit;
+                # storing the active trailer prevents the route/overlay widgets
+                # from disappearing when typing a custom truck ID reruns the app.
+                c_show, c_hide = st.columns([1, 1])
+                with c_show:
+                    if st.button(f"🗺️ Show travel route for {tid}", key=f"trail_btn_{idx}_{tid}"):
+                        st.session_state["active_unmatched_route_trailer"] = str(tid)
+                        st.rerun()
+                with c_hide:
+                    if route_is_active and st.button("Hide route", key=f"hide_trail_btn_{idx}_{tid}"):
+                        st.session_state.pop("active_unmatched_route_trailer", None)
+                        st.rerun()
+
+                if route_is_active:
                     suggested_trucks = [t for t in [dispatch_truck, a.get("evidence_truck", "")] if t]
                     _render_unmatched_trailer_trail(tid, start_dt, end_dt, suggested_trucks=suggested_trucks)
 
