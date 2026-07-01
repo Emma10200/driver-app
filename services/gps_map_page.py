@@ -20,6 +20,7 @@ import streamlit.components.v1 as components
 from services.gps_data import (
     build_yard_mode_timeline,
     deactivate_manual_pair_assignment,
+    load_asset_hour_coverage,
     load_assignments,
     load_current_assets_with_last_known,
     load_evidence_truck_map,
@@ -30,6 +31,7 @@ from services.gps_data import (
     load_trailer_drop_events,
     load_trailer_activity_summary,
     load_trailer_gps_trail,
+    load_trailer_unmatched_windows,
     load_truck_gps_trail,
     load_usage_daily_summary,
     load_yard_proximity_pings,
@@ -746,11 +748,21 @@ def _render_unmatched_trailers_alert(start_dt: datetime, end_dt: datetime) -> No
 
     alerts.sort(key=lambda r: r["unmatched_moving_hours"], reverse=True)
 
+    alert_trailers = [str(a["trailer_id"]) for a in alerts]
+    alert_dispatch_trucks = [
+        trailer_to_truck.get(str(a["trailer_id"]), "")
+        for a in alerts
+        if trailer_to_truck.get(str(a["trailer_id"]), "")
+    ]
+    trailer_coverage = load_asset_hour_coverage("trailer", alert_trailers, start_dt, end_dt)
+    truck_coverage = load_asset_hour_coverage("truck", alert_dispatch_trucks, start_dt, end_dt)
+
     with st.expander(f"⚠️ Unmatched Moving Trailers ({len(alerts)})", expanded=False):
         st.caption(
             "Trailers with significant GPS movement but few or no matched truck hours. "
             "GPS evidence is the primary source of truth — trailers paired in GPS data "
-            "are excluded even if the truck was deactivated from the dispatch board."
+            "are excluded even if the truck was deactivated from the dispatch board. "
+            "The GPS coverage columns help identify whether the trailer side or board-assigned truck side is missing GPS data."
         )
         display_rows = []
         for a in alerts:
@@ -760,9 +772,14 @@ def _render_unmatched_trailers_alert(start_dt: datetime, end_dt: datetime) -> No
             truck_display = dispatch_truck
             if evidence_truck and evidence_truck != dispatch_truck:
                 truck_display = f"{evidence_truck} (GPS)" if not dispatch_truck or dispatch_truck == "—" else f"{dispatch_truck} / {evidence_truck} (GPS)"
+            trailer_cov = trailer_coverage.get(str(a["trailer_id"]), {})
+            truck_cov = truck_coverage.get(str(dispatch_truck), {}) if dispatch_truck and dispatch_truck != "—" else {}
             display_rows.append({
                 "Trailer": a["trailer_id"],
                 "Truck": truck_display,
+                "GPS Gap": _gps_gap_label(trailer_cov, truck_cov, dispatch_truck),
+                "Trailer GPS": _coverage_summary(trailer_cov),
+                "Truck GPS": _coverage_summary(truck_cov),
                 "Moving Hours": a["moving_hours"],
                 "Paired Hours": a["paired_hours"],
                 "Unmatched Hours": a["unmatched_moving_hours"],
@@ -821,11 +838,16 @@ def _render_unmatched_trailers_alert(start_dt: datetime, end_dt: datetime) -> No
 
                 # Expandable GPS trail map
                 if st.button(f"🗺️ Show travel route for {tid}", key=f"trail_btn_{idx}_{tid}"):
-                    _render_unmatched_trailer_trail(tid, start_dt, end_dt)
+                    suggested_trucks = [t for t in [dispatch_truck, a.get("evidence_truck", "")] if t]
+                    _render_unmatched_trailer_trail(tid, start_dt, end_dt, suggested_trucks=suggested_trucks)
 
 
 def _render_unmatched_trailer_trail(
-    trailer_id: str, start_dt: datetime, end_dt: datetime
+    trailer_id: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    *,
+    suggested_trucks: list[str] | None = None,
 ) -> None:
     """Show GPS trail for an unmatched trailer on a pydeck map, with timestamps."""
     try:
@@ -834,12 +856,27 @@ def _render_unmatched_trailer_trail(
         st.warning("pydeck not available for map rendering.")
         return
 
-    with st.spinner(f"Loading GPS trail for {trailer_id}..."):
-        trail = load_trailer_gps_trail(trailer_id, start_dt, end_dt)
+    with st.spinner(f"Loading unmatched GPS trail for {trailer_id}..."):
+        unmatched_windows = load_trailer_unmatched_windows(trailer_id, start_dt, end_dt)
+        raw_trail = load_trailer_gps_trail(trailer_id, start_dt, end_dt)
+        trail_segments = _trail_segments_for_windows(raw_trail, unmatched_windows)
+        trail = [row for segment in trail_segments for row in segment]
 
     if not trail:
-        st.info(f"No GPS pings found for trailer {trailer_id} in the selected date range.")
+        st.info(f"No unmatched-window GPS pings found for trailer {trailer_id} in the selected date range.")
         return
+
+    if unmatched_windows:
+        st.caption(
+            f"Showing **unmatched moving windows only**: {len(unmatched_windows)} segment(s), "
+            f"{sum(int(w.get('hours') or 0) for w in unmatched_windows)} hour(s). "
+            "Overlay trucks use these same exact windows."
+        )
+    else:
+        st.warning(
+            "Could not derive compact unmatched-hour windows, so this route falls back to the selected date range. "
+            "Run the asset-hour-track/drop-event jobs if this persists."
+        )
 
     # Parse timestamps for display
     timestamps = []
@@ -853,7 +890,9 @@ def _render_unmatched_trailer_trail(
     first_ts = min(timestamps) if timestamps else None
     last_ts = max(timestamps) if timestamps else None
 
-    points = _dedupe_path_points([(r["lat"], r["lon"]) for r in trail])
+    segment_points = [_dedupe_path_points([(r["lat"], r["lon"]) for r in segment]) for segment in trail_segments]
+    segment_points = [segment for segment in segment_points if len(segment) >= 2]
+    points = [point for segment in segment_points for point in segment]
     if len(points) < 2:
         st.info(f"Only {len(points)} unique GPS point(s) — not enough for a route.")
         return
@@ -869,12 +908,15 @@ def _render_unmatched_trailer_trail(
         st.caption(f"{len(points)} GPS points for trailer {trailer_id}")
 
     # Build timestamped point data for tooltips
-    path_data = [{
-        "trailer": trailer_id,
-        "path": [[lon, lat] for lat, lon in points],
-        "color": [249, 115, 22, 200],
-        "label": f"Trailer {trailer_id} — {len(points)} pts, {len(trail)} pings",
-    }]
+    path_data = [
+        {
+            "trailer": trailer_id,
+            "path": [[lon, lat] for lat, lon in segment],
+            "color": [249, 115, 22, 200],
+            "label": f"Trailer {trailer_id} unmatched segment {i + 1} — {len(segment)} pts",
+        }
+        for i, segment in enumerate(segment_points)
+    ]
     point_data = []
     for i, row in enumerate(trail):
         lat, lon = row.get("lat"), row.get("lon")
@@ -914,17 +956,39 @@ def _render_unmatched_trailer_trail(
     if maps_url:
         st.markdown(f"[Open route in Google Maps]({maps_url})")
 
-    # --- Truck Guess Lookup ---
+    # --- Overlay Truck GPS Lookup ---
     st.markdown("---")
-    st.markdown("**Guess which truck pulled this trailer**")
-    st.caption("Enter a truck number to overlay its GPS route on the same time window.")
-    guess_truck = st.text_input(
-        "Truck #",
-        key=f"truck_guess_{trailer_id}",
-        placeholder="e.g. 1987",
-    ).strip()
-    if guess_truck and st.button(f"Show truck {guess_truck} route", key=f"truck_guess_btn_{trailer_id}"):
-        _render_truck_guess_overlay(guess_truck, trailer_id, start_dt, end_dt, points, first_ts, last_ts)
+    st.markdown("**Overlay unit GPS**")
+    st.caption("Select the board/suggested truck or enter a custom truck. The overlay uses the trailer's unmatched windows only.")
+    suggested_trucks = _unique_nonblank([t for t in (suggested_trucks or []) if t and t != "—"])
+    overlay_enabled = st.toggle(
+        "Overlay truck GPS for the same unmatched windows",
+        value=False,
+        key=f"overlay_enabled_{trailer_id}",
+    )
+    if overlay_enabled:
+        options = ["Custom truck #"] + [f"Suggested: {truck}" for truck in suggested_trucks]
+        default_idx = 1 if suggested_trucks else 0
+        selected = st.selectbox("Overlay truck", options, index=default_idx, key=f"overlay_select_{trailer_id}")
+        custom_truck = st.text_input(
+            "Custom truck #",
+            key=f"truck_guess_{trailer_id}",
+            placeholder="e.g. 39",
+            disabled=not selected.startswith("Custom"),
+        ).strip()
+        overlay_truck = custom_truck if selected.startswith("Custom") else selected.replace("Suggested: ", "").strip()
+        if overlay_truck:
+            _render_truck_guess_overlay(
+                overlay_truck,
+                trailer_id,
+                start_dt,
+                end_dt,
+                points,
+                first_ts,
+                last_ts,
+                unmatched_windows=unmatched_windows,
+                trailer_segment_points=segment_points,
+            )
 
     with st.expander(f"Copy coordinates ({len(points)} points)", expanded=False):
         st.code(_format_path_points(points), language="text")
@@ -938,6 +1002,9 @@ def _render_truck_guess_overlay(
     trailer_points: list[tuple[float, float]],
     trailer_first_ts: datetime | None,
     trailer_last_ts: datetime | None,
+    *,
+    unmatched_windows: list[dict[str, Any]] | None = None,
+    trailer_segment_points: list[list[tuple[float, float]]] | None = None,
 ) -> None:
     """Overlay a guessed truck's GPS trail on the unmatched trailer trail."""
     try:
@@ -947,13 +1014,17 @@ def _render_truck_guess_overlay(
         return
 
     with st.spinner(f"Loading GPS trail for truck {truck_id}..."):
-        truck_trail = load_truck_gps_trail(truck_id, start_dt, end_dt)
+        raw_truck_trail = load_truck_gps_trail(truck_id, start_dt, end_dt)
+        truck_segments = _trail_segments_for_windows(raw_truck_trail, unmatched_windows or [])
+        truck_trail = [row for segment in truck_segments for row in segment]
 
     if not truck_trail:
-        st.warning(f"No GPS pings found for truck **{truck_id}** in this date range.")
+        st.warning(f"No GPS pings found for truck **{truck_id}** in the trailer's unmatched windows.")
         return
 
-    truck_points = _dedupe_path_points([(r["lat"], r["lon"]) for r in truck_trail])
+    truck_segment_points = [_dedupe_path_points([(r["lat"], r["lon"]) for r in segment]) for segment in truck_segments]
+    truck_segment_points = [segment for segment in truck_segment_points if len(segment) >= 2]
+    truck_points = [point for segment in truck_segment_points for point in segment]
     truck_timestamps = []
     for r in truck_trail:
         ts = r.get("recorded_at")
@@ -987,16 +1058,16 @@ def _render_truck_guess_overlay(
 
     # Build combined map
     layers = [
-        # Trailer path (orange)
+        # Trailer path (orange) — segmented to avoid drawing through matched gaps.
         pdk.Layer("PathLayer", data=[{
-            "path": [[lon, lat] for lat, lon in trailer_points],
+            "path": [[lon, lat] for lat, lon in segment],
             "color": [249, 115, 22, 200],
-        }], get_path="path", get_color="color", width_min_pixels=3, pickable=False),
-        # Truck path (blue)
+        } for segment in (trailer_segment_points or [trailer_points])], get_path="path", get_color="color", width_min_pixels=3, pickable=False),
+        # Truck path (blue) for the same unmatched windows.
         pdk.Layer("PathLayer", data=[{
-            "path": [[lon, lat] for lat, lon in truck_points],
+            "path": [[lon, lat] for lat, lon in segment],
             "color": [59, 130, 246, 200],
-        }], get_path="path", get_color="color", width_min_pixels=3, pickable=False),
+        } for segment in truck_segment_points], get_path="path", get_color="color", width_min_pixels=3, pickable=False),
     ]
 
     # Truck waypoints with timestamps
@@ -1037,6 +1108,71 @@ def _render_truck_guess_overlay(
         tooltip={"text": "{label}"},
         map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
     ))
+
+
+def _coverage_summary(coverage: dict[str, Any]) -> str:
+    if not coverage:
+        return "0h / 0 pings"
+    hours = int(coverage.get("gps_hours") or 0)
+    moving = int(coverage.get("moving_hours") or 0)
+    pings = int(coverage.get("ping_count") or 0)
+    miles = float(coverage.get("miles_traveled") or 0)
+    return f"{hours}h / {pings} pings / {moving} moving / {miles:.1f} mi"
+
+
+def _gps_gap_label(trailer_cov: dict[str, Any], truck_cov: dict[str, Any], dispatch_truck: str) -> str:
+    trailer_hours = int((trailer_cov or {}).get("gps_hours") or 0)
+    trailer_moving = int((trailer_cov or {}).get("moving_hours") or 0)
+    truck_hours = int((truck_cov or {}).get("gps_hours") or 0)
+    truck_moving = int((truck_cov or {}).get("moving_hours") or 0)
+    has_dispatch_truck = bool(dispatch_truck and dispatch_truck != "—")
+
+    if trailer_hours <= 0:
+        return "Trailer GPS missing"
+    if not has_dispatch_truck:
+        return "No board truck"
+    if truck_hours <= 0:
+        return "Truck GPS missing"
+    if trailer_moving > 0 and truck_moving <= 0:
+        return "Truck GPS stationary/sparse"
+    return "Both have GPS — inspect overlay"
+
+
+def _trail_segments_for_windows(
+    trail: list[dict[str, Any]],
+    windows: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    if not trail:
+        return []
+    if not windows:
+        return [trail]
+
+    segments: list[list[dict[str, Any]]] = []
+    for window in windows:
+        start = _parse_ui_dt(window.get("start"))
+        end = _parse_ui_dt(window.get("end"))
+        if start is None or end is None:
+            continue
+        segment: list[dict[str, Any]] = []
+        for row in trail:
+            ts = _parse_ui_dt(row.get("recorded_at"))
+            if ts is not None and start <= ts <= end:
+                segment.append(row)
+        if segment:
+            segments.append(segment)
+    return segments
+
+
+def _unique_nonblank(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text == "—" or text in seen:
+            continue
+        seen.add(text)
+        out.append(text)
+    return out
 
 
 def _render_manual_assignments_section() -> None:

@@ -845,6 +845,164 @@ def load_trailer_activity_summary(start: datetime, end: datetime) -> list[dict[s
         return []
 
 
+def load_asset_hour_coverage(
+    asset_type: str,
+    asset_ids: list[str],
+    start: datetime,
+    end: datetime,
+) -> dict[str, dict[str, Any]]:
+    """Return compact GPS-hour coverage for units from ``asset_hour_tracks``.
+
+    Used by the unmatched/mismatch dashboard to show whether the board-assigned
+    truck or trailer is the side lacking usable GPS data during the selected
+    evidence window.
+    """
+    ids = [str(asset_id).strip() for asset_id in asset_ids if str(asset_id or "").strip()]
+    if not ids:
+        return {}
+    try:
+        client = _get_client()
+    except Exception as e:
+        logger.warning("Asset-hour coverage unavailable: %s", e)
+        return {}
+
+    start = _ensure_aware(start)
+    end = _ensure_aware(end)
+    safe_ids = "in.(" + ",".join(quote(asset_id, safe="") for asset_id in sorted(set(ids))) + ")"
+    filters: dict[str, Any] = {
+        "asset_type": f"eq.{asset_type}",
+        "asset_id": safe_ids,
+        "and": f"(hour_start.gte.{start.isoformat()},hour_start.lte.{end.isoformat()})",
+    }
+    try:
+        rows = client.select_all(
+            "asset_hour_tracks",
+            select="asset_id,hour_start,ping_count,miles_traveled,moving,first_ping,last_ping,provider,source",
+            filters=filters,
+            order="asset_id.asc,hour_start.asc",
+            page_size=1000,
+            hard_cap=100000,
+        )
+    except Exception as e:
+        logger.info("Asset-hour coverage query unavailable: %s", e)
+        return {}
+
+    result: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        asset_id = str(row.get("asset_id") or "")
+        if not asset_id:
+            continue
+        acc = result.setdefault(asset_id, {
+            "asset_id": asset_id,
+            "gps_hours": 0,
+            "moving_hours": 0,
+            "ping_count": 0,
+            "miles_traveled": 0.0,
+            "first_ping": None,
+            "last_ping": None,
+            "providers": set(),
+        })
+        acc["gps_hours"] += 1
+        if row.get("moving"):
+            acc["moving_hours"] += 1
+        acc["ping_count"] += int(row.get("ping_count") or 0)
+        acc["miles_traveled"] += float(row.get("miles_traveled") or 0)
+        first_ping = _parse_dt(row.get("first_ping")) or _parse_dt(row.get("hour_start"))
+        last_ping = _parse_dt(row.get("last_ping")) or _parse_dt(row.get("hour_start"))
+        if first_ping and (acc["first_ping"] is None or first_ping < acc["first_ping"]):
+            acc["first_ping"] = first_ping
+        if last_ping and (acc["last_ping"] is None or last_ping > acc["last_ping"]):
+            acc["last_ping"] = last_ping
+        provider = str(row.get("provider") or "").strip()
+        if provider:
+            acc["providers"].add(provider)
+
+    for acc in result.values():
+        acc["miles_traveled"] = round(float(acc["miles_traveled"] or 0), 1)
+        acc["providers"] = ", ".join(sorted(acc["providers"]))
+    return result
+
+
+def load_trailer_unmatched_windows(
+    trailer_id: str,
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, Any]]:
+    """Return merged moving-hour windows where a trailer lacks paired evidence."""
+    trailer_id = str(trailer_id or "").strip()
+    if not trailer_id:
+        return []
+    try:
+        client = _get_client()
+    except Exception as e:
+        logger.warning("Unmatched-window lookup unavailable: %s", e)
+        return []
+
+    start = _ensure_aware(start)
+    end = _ensure_aware(end)
+
+    track_filters: dict[str, Any] = {
+        "asset_type": "eq.trailer",
+        "asset_id": f"eq.{trailer_id}",
+        "moving": "eq.true",
+        "and": f"(hour_start.gte.{start.isoformat()},hour_start.lte.{end.isoformat()})",
+    }
+    try:
+        track_rows = client.select_all(
+            "asset_hour_tracks",
+            select="hour_start,first_ping,last_ping,ping_count,miles_traveled",
+            filters=track_filters,
+            order="hour_start.asc",
+            page_size=1000,
+            hard_cap=50000,
+        )
+    except Exception as e:
+        logger.info("Trailer moving-hour query unavailable: %s", e)
+        return []
+    if not track_rows:
+        return []
+
+    pair_filters: dict[str, Any] = {
+        "trailer_id": f"eq.{trailer_id}",
+        "source": "eq.auto",
+        "status": "eq.paired",
+        "and": f"(hour_start.gte.{start.isoformat()},hour_start.lte.{end.isoformat()})",
+    }
+    try:
+        pair_rows = client.select_all(
+            "asset_pair_hourly_evidence",
+            select="hour_start,truck_id",
+            filters=pair_filters,
+            order="hour_start.asc",
+            page_size=1000,
+            hard_cap=50000,
+        )
+    except Exception as e:
+        logger.info("Paired-hour query unavailable for unmatched windows: %s", e)
+        pair_rows = []
+
+    paired_hours = {
+        _hour_key(_parse_dt(row.get("hour_start")))
+        for row in pair_rows
+        if _parse_dt(row.get("hour_start")) is not None
+    }
+
+    unmatched: list[dict[str, Any]] = []
+    for row in track_rows:
+        hour_start = _parse_dt(row.get("hour_start"))
+        if hour_start is None or _hour_key(hour_start) in paired_hours:
+            continue
+        unmatched.append({
+            "start": hour_start,
+            "end": hour_start + timedelta(hours=1),
+            "first_ping": _parse_dt(row.get("first_ping")) or hour_start,
+            "last_ping": _parse_dt(row.get("last_ping")) or (hour_start + timedelta(hours=1)),
+            "ping_count": int(row.get("ping_count") or 0),
+            "miles_traveled": float(row.get("miles_traveled") or 0),
+        })
+    return _merge_hour_windows(unmatched)
+
+
 def load_manual_pair_assignments(active_only: bool = True) -> list[dict[str, Any]]:
     """Load manual truck/trailer pair assignments."""
     try:
@@ -951,6 +1109,36 @@ def _load_asset_gps_trail(
     except Exception as e:
         logger.info("GPS trail query failed: %s", e)
         return []
+
+
+def _hour_key(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    return value.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0).isoformat()
+
+
+def _merge_hour_windows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    rows = sorted(rows, key=lambda row: row["start"])
+    merged: list[dict[str, Any]] = []
+    for row in rows:
+        if not merged or row["start"] > merged[-1]["end"] + timedelta(minutes=1):
+            merged.append({
+                "start": row["start"],
+                "end": row["end"],
+                "ping_count": int(row.get("ping_count") or 0),
+                "miles_traveled": float(row.get("miles_traveled") or 0),
+                "hours": 1,
+            })
+            continue
+        merged[-1]["end"] = max(merged[-1]["end"], row["end"])
+        merged[-1]["ping_count"] += int(row.get("ping_count") or 0)
+        merged[-1]["miles_traveled"] += float(row.get("miles_traveled") or 0)
+        merged[-1]["hours"] += 1
+    for row in merged:
+        row["miles_traveled"] = round(float(row.get("miles_traveled") or 0), 1)
+    return merged
 
 
 def _row_to_asset(row: dict[str, Any]) -> Asset:
