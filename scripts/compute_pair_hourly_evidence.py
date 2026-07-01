@@ -50,8 +50,11 @@ YARD_GEOFENCES = {
     "California Yard": (34.09686, -117.47642, 0.25),
     "Illinois Yard": (41.896873, -87.86982, 0.25),
 }
-# Only use dense backfill data for pairing — ignore sparse dispatch board snapshots.
-DENSE_SOURCES = ("gpstab_backfill", "anytrek_backfill", "track888_backfill", "eroad_backfill")
+# Accepted historical GPS evidence sources for pairing.
+# Includes dense backfills plus blank-source historical imports that contain
+# useful older 888/dispatch-board history for trucks like 129. Explicitly do
+# NOT include sparse live publisher snapshots (truck_publish/trailer_publish).
+MATCHING_SOURCES = ("gpstab_backfill", "anytrek_backfill", "track888_backfill", "eroad_backfill", "")
 
 
 @dataclass(frozen=True)
@@ -499,8 +502,8 @@ class SupabaseClient:
     def load_history(self, start: datetime, end: datetime, *, hard_cap: int) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         offset = 0
-        # Filter to dense backfill sources only (exclude sparse dispatch board snapshots)
-        source_filter = ",".join(f"source.eq.{s}" for s in DENSE_SOURCES)
+        # Filter to accepted historical sources only (exclude sparse dispatch board snapshots)
+        source_filter = ",".join(f"source.eq.{s}" for s in MATCHING_SOURCES)
         params_base = {
             "select": "asset_type,asset_id,division,lat,lon,provider,recorded_at,address",
             "and": f"(recorded_at.gte.{start.isoformat()},recorded_at.lte.{end.isoformat()})",

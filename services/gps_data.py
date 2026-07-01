@@ -75,11 +75,12 @@ def load_asset_history_range(
 
     start = _ensure_aware(start)
     end = _ensure_aware(end)
-    # PostgREST range filter — single 'and' key avoids dict duplicate-key issues
-    # Only use dense backfill sources (not sparse dispatch board snapshots)
+    # PostgREST range filter — single 'and' key avoids dict duplicate-key issues.
+    # Use accepted historical sources only: dense backfills plus blank-source
+    # historical imports, but not sparse live publisher snapshots.
     filters: dict[str, Any] = {
         "and": f"(recorded_at.gte.{start.isoformat()},recorded_at.lte.{end.isoformat()})",
-        "or": "(source.eq.gpstab_backfill,source.eq.anytrek_backfill,source.eq.track888_backfill,source.eq.eroad_backfill)",
+        "or": "(source.eq.gpstab_backfill,source.eq.anytrek_backfill,source.eq.track888_backfill,source.eq.eroad_backfill,source.eq.)",
     }
 
     rows = client.select_all(
@@ -128,7 +129,7 @@ def load_unit_timeline_history(
     end = _ensure_aware(end)
     filters: dict[str, Any] = {
         "and": f"(recorded_at.gte.{start.isoformat()},recorded_at.lte.{end.isoformat()})",
-        "or": "(source.eq.gpstab_backfill,source.eq.anytrek_backfill,source.eq.track888_backfill,source.eq.eroad_backfill)",
+        "or": "(source.eq.gpstab_backfill,source.eq.anytrek_backfill,source.eq.track888_backfill,source.eq.eroad_backfill,source.eq.)",
     }
 
     rows = client.select_all(
