@@ -312,6 +312,52 @@ def load_hourly_evidence_timeline(
     return segments
 
 
+def load_usage_daily_summary(start: datetime, end: datetime) -> list[dict[str, Any]]:
+    """Load precomputed dense truck↔trailer daily usage summaries."""
+    try:
+        client = _get_client()
+    except Exception as e:
+        logger.warning("Daily usage summary unavailable: %s", e)
+        return []
+
+    start = _ensure_aware(start)
+    end = _ensure_aware(end)
+    filters: dict[str, Any] = {
+        "service_date": f"gte.{start.date().isoformat()}",
+        "and": f"(service_date.lte.{end.date().isoformat()},source.eq.auto)",
+    }
+    try:
+        return client.select_all(
+            "asset_pair_daily_summary",
+            filters=filters,
+            order="service_date.desc,trailer_id.asc,truck_id.asc",
+            page_size=1000,
+            hard_cap=100000,
+        )
+    except Exception as e:
+        logger.info("Daily usage summary query unavailable: %s", e)
+        return []
+
+
+def load_latest_pairing_job() -> dict[str, Any] | None:
+    """Return the latest dense hourly-evidence job metadata."""
+    try:
+        client = _get_client()
+    except Exception:
+        return None
+    try:
+        rows = client.select(
+            "gps_pairing_job_runs",
+            filters={"job_type": "eq.hourly_evidence"},
+            order="started_at.desc",
+            limit=1,
+        )
+    except Exception as e:
+        logger.info("Pairing job metadata unavailable: %s", e)
+        return None
+    return rows[0] if rows else None
+
+
 def load_match_reviews(match_ids: list[str]) -> dict[str, dict[str, Any]]:
     """Load saved review decisions keyed by match_id."""
     if not match_ids:

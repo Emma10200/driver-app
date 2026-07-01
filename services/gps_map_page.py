@@ -16,16 +16,15 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from services.gps_data import (
-    load_all_unit_ids,
     load_assignments,
-    load_asset_pairing_timeline,
     load_asset_history,
     load_asset_history_range,
     load_current_assets,
     load_hourly_evidence_timeline,
+    load_latest_pairing_job,
     load_match_reviews,
     load_recent_match_reviews,
-    load_unit_timeline_history,
+    load_usage_daily_summary,
     save_match_reviews,
 )
 from services.gps_matching import (
@@ -34,7 +33,6 @@ from services.gps_matching import (
     TimelineSegment,
     compute_historical_usage,
     compute_matches,
-    compute_unit_timeline,
     in_yard,
     YARD_BOXES,
 )
@@ -110,17 +108,12 @@ def render_gps_map_page() -> None:
     _render_map(visible_trucks, visible_trailers, divisions, assignments)
 
     # --- Tabs for heavy content ---
-    tab_fleet, tab_timeline, tab_matches, tab_history, tab_review = st.tabs([
-        "Fleet Overview", "Unit Timeline", "Auto-Matches", "Historical Usage", "Match Review",
+    tab_usage, tab_timeline, tab_matches, tab_history, tab_review = st.tabs([
+        "Trailer Usage Dashboard", "Unit Timeline", "Auto-Matches", "Historical Usage", "Match Review",
     ])
 
-    with tab_fleet:
-        with st.expander("All Found Units", expanded=True):
-            unit_rows = _build_unit_rows(visible_assets, [], assignments, None, unit_search)
-            if unit_rows:
-                _render_copy_grid(unit_rows)
-            else:
-                st.info("No units match the current filters.")
+    with tab_usage:
+        _render_usage_dashboard(visible_assets, assignments, unit_search)
 
     with tab_timeline:
         _render_timeline_tab(visible_assets, max_dist)
@@ -217,12 +210,269 @@ def _render_map(
     _render_map_legend(division_colors)
 
 
+def _render_usage_dashboard(assets: list[Asset], assignments: dict[str, str], unit_search: str) -> None:
+    """Main dense-evidence dashboard for trailer usage and truck usage."""
+    st.subheader("Trailer Usage Dashboard")
+    st.caption(
+        "Dense timestamp-matched usage from `asset_pair_daily_summary` and `asset_pair_hourly_evidence`. "
+        "This does not use legacy asset_pairings or live map snapshots."
+    )
+
+    latest_job = load_latest_pairing_job()
+    if latest_job:
+        status = str(latest_job.get("status") or "unknown")
+        finished = _format_dt_text(latest_job.get("finished_at"))
+        st.info(
+            f"Dense evidence job: **{status}** · hourly rows: **{int(latest_job.get('hourly_rows') or 0):,}** · "
+            f"daily rows: **{int(latest_job.get('daily_rows') or 0):,}** · finished: **{finished or '—'}**"
+        )
+
+    today = date.today()
+    default_start = today.replace(day=1)
+    c1, c2, c3, c4 = st.columns([1, 1, 1.2, 1.2])
+    with c1:
+        usage_start = st.date_input("Usage from", value=default_start, key="usage_dash_start")
+    with c2:
+        usage_end = st.date_input("Usage to", value=today, key="usage_dash_end")
+    with c3:
+        view_mode = st.radio("Group by", ["Truck", "Trailer"], horizontal=True, key="usage_dash_mode")
+    with c4:
+        sort_by = st.selectbox(
+            "Sort",
+            ["Paired hours", "Billable hours", "Unique partners", "Avg confidence", "Unit"],
+            key="usage_dash_sort",
+        )
+
+    min_hours = st.slider("Minimum paired hours to show", 0, 200, 0, 1, key="usage_dash_min_hours")
+    start_dt = datetime.combine(usage_start, time.min, tzinfo=timezone.utc)
+    end_dt = datetime.combine(usage_end, time.max, tzinfo=timezone.utc)
+    if end_dt < start_dt:
+        start_dt, end_dt = end_dt, start_dt
+
+    with st.spinner("Loading dense usage summaries..."):
+        daily_rows = load_usage_daily_summary(start_dt, end_dt)
+
+    if not daily_rows:
+        st.warning("No dense usage summary rows found for this date range yet.")
+        with st.expander("All Found Units / Coordinates", expanded=False):
+            unit_rows = _build_unit_rows(assets, [], assignments, None, unit_search)
+            _render_copy_grid(unit_rows) if unit_rows else st.info("No units match the current filters.")
+        return
+
+    primary_type = "truck" if view_mode == "Truck" else "trailer"
+    partner_type = "trailer" if primary_type == "truck" else "truck"
+    overview_rows, pair_rows_by_unit = _aggregate_usage_rows(daily_rows, primary_type=primary_type)
+    overview_rows = [r for r in overview_rows if r["Paired Hours"] >= min_hours]
+    overview_rows = _sort_usage_overview(overview_rows, sort_by)
+
+    paired_hours = sum(float(r.get("paired_hours") or 0) for r in daily_rows)
+    billable_hours = sum(float(r.get("billable_candidate_hours") or 0) for r in daily_rows)
+    unique_trucks = len({str(r.get("truck_id") or "") for r in daily_rows if r.get("truck_id")})
+    unique_trailers = len({str(r.get("trailer_id") or "") for r in daily_rows if r.get("trailer_id")})
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Paired Hours", f"{paired_hours:,.0f}")
+    m2.metric("Billable Candidate", f"{billable_hours:,.0f}")
+    m3.metric("Trucks", unique_trucks)
+    m4.metric("Trailers", unique_trailers)
+
+    st.markdown(f"#### {view_mode} usage ranking")
+    if overview_rows:
+        st.dataframe(
+            overview_rows,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Paired Hours": st.column_config.NumberColumn(format="%.1f"),
+                "Billable Hours": st.column_config.NumberColumn(format="%.1f"),
+                "Near Hours": st.column_config.NumberColumn(format="%.1f"),
+                "Avg Confidence": st.column_config.NumberColumn(format="%.1f%%"),
+            },
+        )
+    else:
+        st.info("No units meet the current filters.")
+        return
+
+    unit_options = [str(r["Unit"]) for r in overview_rows]
+    selected_unit = st.selectbox(f"Inspect {view_mode.lower()}", unit_options, key="usage_dash_selected_unit")
+    detail_rows = pair_rows_by_unit.get(selected_unit, [])
+    st.markdown(f"#### {view_mode} {selected_unit} → {partner_type.title()} breakdown")
+    if detail_rows:
+        st.dataframe(
+            detail_rows,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Paired Hours": st.column_config.NumberColumn(format="%.1f"),
+                "Billable Hours": st.column_config.NumberColumn(format="%.1f"),
+                "Near Hours": st.column_config.NumberColumn(format="%.1f"),
+                "Avg Confidence": st.column_config.NumberColumn(format="%.1f%%"),
+            },
+        )
+
+    with st.expander(f"Timeline runs for {view_mode} {selected_unit}", expanded=True):
+        segments = load_hourly_evidence_timeline(selected_unit, primary_type, start_dt, end_dt)
+        if segments:
+            _render_timeline_visual(_consolidate_timeline(segments))
+        else:
+            st.info("No hourly evidence timeline rows found for this unit/range.")
+
+    with st.expander("All Found Units / Coordinates", expanded=False):
+        unit_rows = _build_unit_rows(assets, [], assignments, None, unit_search)
+        if unit_rows:
+            _render_copy_grid(unit_rows)
+        else:
+            st.info("No units match the current filters.")
+
+
+def _aggregate_usage_rows(
+    daily_rows: list[dict[str, Any]],
+    *,
+    primary_type: str,
+) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    primary_col = "truck_id" if primary_type == "truck" else "trailer_id"
+    partner_col = "trailer_id" if primary_type == "truck" else "truck_id"
+
+    pair_acc: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in daily_rows:
+        primary = str(row.get(primary_col) or "")
+        partner = str(row.get(partner_col) or "")
+        if not primary or not partner:
+            continue
+        key = (primary, partner)
+        acc = pair_acc.setdefault(key, {
+            "primary": primary,
+            "partner": partner,
+            "paired_hours": 0.0,
+            "billable_hours": 0.0,
+            "near_hours": 0.0,
+            "same_yard_hours": 0.0,
+            "evidence_days": set(),
+            "first": None,
+            "last": None,
+            "confidence_weighted": 0.0,
+            "confidence_hours": 0.0,
+            "min_distance": None,
+        })
+        paired = float(row.get("paired_hours") or 0)
+        billable = float(row.get("billable_candidate_hours") or 0)
+        near = float(row.get("near_hours") or 0)
+        same_yard = float(row.get("same_yard_hours") or 0)
+        evidence = float(row.get("evidence_hours") or 0)
+        acc["paired_hours"] += paired
+        acc["billable_hours"] += billable
+        acc["near_hours"] += near
+        acc["same_yard_hours"] += same_yard
+        if row.get("service_date"):
+            acc["evidence_days"].add(str(row.get("service_date")))
+        conf = float(row.get("avg_confidence") or 0)
+        weight = max(paired, evidence, 1.0)
+        acc["confidence_weighted"] += conf * weight
+        acc["confidence_hours"] += weight
+        min_dist = row.get("min_distance_miles")
+        if min_dist is not None:
+            min_dist_f = float(min_dist)
+            acc["min_distance"] = min_dist_f if acc["min_distance"] is None else min(acc["min_distance"], min_dist_f)
+        first = _parse_ui_dt(row.get("first_evidence_at"))
+        last = _parse_ui_dt(row.get("last_evidence_at"))
+        if first and (acc["first"] is None or first < acc["first"]):
+            acc["first"] = first
+        if last and (acc["last"] is None or last > acc["last"]):
+            acc["last"] = last
+
+    pair_rows_by_unit: dict[str, list[dict[str, Any]]] = {}
+    overview_acc: dict[str, dict[str, Any]] = {}
+    for acc in pair_acc.values():
+        avg_conf = (acc["confidence_weighted"] / acc["confidence_hours"] * 100.0) if acc["confidence_hours"] else 0.0
+        detail = {
+            "Partner": acc["partner"],
+            "Paired Hours": round(acc["paired_hours"], 1),
+            "Billable Hours": round(acc["billable_hours"], 1),
+            "Near Hours": round(acc["near_hours"], 1),
+            "Yard Hours": round(acc["same_yard_hours"], 1),
+            "Evidence Days": len(acc["evidence_days"]),
+            "Avg Confidence": round(avg_conf, 1),
+            "Min Distance": round(float(acc["min_distance"] or 0), 3) if acc["min_distance"] is not None else None,
+            "First Seen": acc["first"].strftime("%m/%d %H:%M") if acc["first"] else "—",
+            "Last Seen": acc["last"].strftime("%m/%d %H:%M") if acc["last"] else "—",
+        }
+        pair_rows_by_unit.setdefault(acc["primary"], []).append(detail)
+
+        ov = overview_acc.setdefault(acc["primary"], {
+            "Unit": acc["primary"],
+            "Paired Hours": 0.0,
+            "Billable Hours": 0.0,
+            "Near Hours": 0.0,
+            "Unique Partners": set(),
+            "Evidence Days": set(),
+            "confidence_weighted": 0.0,
+            "confidence_hours": 0.0,
+            "Top Partner": "",
+            "top_partner_hours": -1.0,
+        })
+        ov["Paired Hours"] += acc["paired_hours"]
+        ov["Billable Hours"] += acc["billable_hours"]
+        ov["Near Hours"] += acc["near_hours"]
+        ov["Unique Partners"].add(acc["partner"])
+        ov["Evidence Days"].update(acc["evidence_days"])
+        ov["confidence_weighted"] += acc["confidence_weighted"]
+        ov["confidence_hours"] += acc["confidence_hours"]
+        if acc["paired_hours"] > ov["top_partner_hours"]:
+            ov["top_partner_hours"] = acc["paired_hours"]
+            ov["Top Partner"] = acc["partner"]
+
+    overview_rows: list[dict[str, Any]] = []
+    for ov in overview_acc.values():
+        avg_conf = (ov["confidence_weighted"] / ov["confidence_hours"] * 100.0) if ov["confidence_hours"] else 0.0
+        overview_rows.append({
+            "Unit": ov["Unit"],
+            "Paired Hours": round(ov["Paired Hours"], 1),
+            "Billable Hours": round(ov["Billable Hours"], 1),
+            "Near Hours": round(ov["Near Hours"], 1),
+            "Unique Partners": len(ov["Unique Partners"]),
+            "Evidence Days": len(ov["Evidence Days"]),
+            "Avg Confidence": round(avg_conf, 1),
+            "Top Partner": ov["Top Partner"],
+        })
+
+    for rows in pair_rows_by_unit.values():
+        rows.sort(key=lambda row: (row["Paired Hours"], row["Avg Confidence"]), reverse=True)
+    return overview_rows, pair_rows_by_unit
+
+
+def _sort_usage_overview(rows: list[dict[str, Any]], sort_by: str) -> list[dict[str, Any]]:
+    if sort_by == "Billable hours":
+        return sorted(rows, key=lambda r: (r["Billable Hours"], r["Paired Hours"]), reverse=True)
+    if sort_by == "Unique partners":
+        return sorted(rows, key=lambda r: (r["Unique Partners"], r["Paired Hours"]), reverse=True)
+    if sort_by == "Avg confidence":
+        return sorted(rows, key=lambda r: (r["Avg Confidence"], r["Paired Hours"]), reverse=True)
+    if sort_by == "Unit":
+        return sorted(rows, key=lambda r: _unit_sort_key(str(r["Unit"])))
+    return sorted(rows, key=lambda r: r["Paired Hours"], reverse=True)
+
+
+def _parse_ui_dt(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        text = str(value).replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _format_dt_text(value: object) -> str:
+    parsed = _parse_ui_dt(value)
+    return parsed.strftime("%m/%d %H:%M UTC") if parsed else ""
+
+
 def _render_timeline_tab(assets: list[Asset], max_dist: float) -> None:
     """Unit timeline: select a unit and see who it was paired with over time."""
     st.subheader("Unit Assignment Timeline")
     st.caption(
         "Select a truck or trailer to see its historical pairings. "
-        "Yard visits act as assignment boundaries — entering the yard ends one pairing."
+        "This uses dense timestamp-matched hourly evidence only — no legacy asset_pairings fallback."
     )
 
     # Unit selector
@@ -252,13 +502,6 @@ def _render_timeline_tab(assets: list[Asset], max_dist: float) -> None:
     with col2:
         tl_end = st.date_input("To", value=today, key="tl_end")
 
-    use_raw_fallback = st.checkbox(
-        "If no precomputed pairings are found, compute from raw GPS pings (slow)",
-        value=False,
-        key="tl_raw_fallback",
-        help="Normally leave this off. Raw computation can load hundreds of thousands of GPS points.",
-    )
-
     if st.button("Load Timeline", type="primary", key="tl_compute"):
         start_dt = datetime.combine(tl_start, time.min, tzinfo=timezone.utc)
         end_dt = datetime.combine(tl_end, time.max, tzinfo=timezone.utc)
@@ -269,34 +512,10 @@ def _render_timeline_tab(assets: list[Asset], max_dist: float) -> None:
         with st.spinner("Loading hourly evidence..."):
             segments = load_hourly_evidence_timeline(unit_id, unit_type, start_dt, end_dt)
 
-        # Fallback 1: old asset_pairings (strict continuous segments)
-        if not segments:
-            with st.spinner("No hourly evidence found. Checking legacy pairings..."):
-                segments = load_asset_pairing_timeline(unit_id, unit_type, start_dt, end_dt)
-
-        # Fallback 2: raw GPS computation (slow, limited to 3 days)
-        if not segments and use_raw_fallback:
-            days = max(1, (end_dt - start_dt).days)
-            if days > 3:
-                st.warning(
-                    "Raw timeline fallback is intentionally limited to 3 days in the UI. "
-                    "For longer ranges, run `python scripts/compute_pair_hourly_evidence.py --days 7` locally first."
-                )
-                return
-            with st.spinner(f"No precomputed rows found. Loading raw GPS history for {unit_id} ({days} days)..."):
-                history = load_unit_timeline_history(unit_id, start_dt, end_dt)
-            if not history:
-                st.warning("No raw history found for this unit in the selected range.")
-                return
-            st.info(f"Loaded {len(history):,} history points. Computing raw timeline...")
-            segments = compute_unit_timeline(
-                unit_id, unit_type, history, max_distance_miles=max_dist,
-            )
-
         if not segments:
             st.info(
-                "No pairing evidence found for this unit/range yet. "
-                "Run `python scripts/compute_pair_hourly_evidence.py --days 60` locally to populate hourly evidence."
+                "No dense hourly evidence found for this unit/range yet. "
+                "Try a date range inside the latest dense evidence job window."
             )
             return
 
