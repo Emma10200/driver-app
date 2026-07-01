@@ -501,8 +501,9 @@ def build_yard_mode_timeline(
 
     # -- Parse pings --------------------------------------------------------
     unit_pings: list[dict[str, Any]] = []
-    # other_pings keyed by (asset_type, asset_id)
+    # other_pings keyed by (asset_type, asset_id) — only opposite type
     other_pings: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    opposite_type = "truck" if unit_type == "trailer" else "trailer"
 
     for row in yard_pings:
         lat = row.get("lat")
@@ -524,7 +525,7 @@ def build_yard_mode_timeline(
 
         if ping["asset_type"] == unit_type and ping["asset_id"] == unit_id:
             unit_pings.append(ping)
-        else:
+        elif ping["asset_type"] == opposite_type:
             key = (ping["asset_type"], ping["asset_id"])
             other_pings[key].append(ping)
 

@@ -42,12 +42,42 @@ from services.gps_matching import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Cached data loaders — avoid redundant Supabase round-trips within a session.
+# TTL keeps data fresh without re-fetching on every widget interaction.
+# ---------------------------------------------------------------------------
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_hourly_timeline(unit_id: str, unit_type: str, start_iso: str, end_iso: str):
+    """Cached wrapper for hourly evidence timeline (5-min TTL)."""
+    from datetime import datetime, timezone
+    start = datetime.fromisoformat(start_iso)
+    end = datetime.fromisoformat(end_iso)
+    return load_hourly_evidence_timeline(unit_id, unit_type, start, end)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_yard_pings(yard_name: str, start_iso: str, end_iso: str):
+    """Cached wrapper for yard proximity pings (5-min TTL)."""
+    from datetime import datetime, timezone
+    start = datetime.fromisoformat(start_iso)
+    end = datetime.fromisoformat(end_iso)
+    return load_yard_proximity_pings(yard_name, start, end)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_current_assets():
+    """Cached wrapper for current asset positions (1-min TTL)."""
+    return load_current_assets_with_last_known(stale_after_days=30)
+
+
 def render_gps_map_page() -> None:
     st.header("GPS Fleet Map")
 
     # --- Load FAST data first (current positions only) ---
     with st.spinner("Loading positions..."):
-        assets = load_current_assets_with_last_known(stale_after_days=30)
+        assets = _cached_current_assets()
         assignments = load_assignments()
 
     if not assets:
@@ -233,6 +263,7 @@ def _render_map(
     _render_map_legend(division_colors)
 
 
+@st.fragment
 def _render_fleet_overview_tab(assets: list[Asset], assignments: dict[str, str], unit_search: str) -> None:
     """Clean dispatcher-friendly fleet table with search, sort, and action buttons."""
     # Build reverse lookup: trailer → truck from dispatch board
@@ -349,6 +380,7 @@ def _render_fleet_overview_tab(assets: list[Asset], assignments: dict[str, str],
     )
 
 
+@st.fragment
 def _render_usage_dashboard(assets: list[Asset], assignments: dict[str, str], unit_search: str) -> None:
     """Main dense-evidence dashboard for trailer usage and truck usage."""
     st.subheader("Trailer Usage Dashboard")
@@ -1319,6 +1351,7 @@ def _evidence_review_flag(row: dict[str, Any]) -> str:
     return "Review"
 
 
+@st.fragment
 def _render_timeline_tab(assets: list[Asset]) -> None:
     """Unit timeline: select a unit and see who it was paired with over time."""
     st.subheader("Unit Assignment Timeline")
@@ -1378,7 +1411,7 @@ def _render_timeline_tab(assets: list[Asset]) -> None:
 
         # Primary: hourly evidence table (detailed hour-by-hour view)
         with st.spinner("Loading hourly evidence..."):
-            segments = load_hourly_evidence_timeline(unit_id, unit_type, start_dt, end_dt)
+            segments = _cached_hourly_timeline(unit_id, unit_type, start_dt.isoformat(), end_dt.isoformat())
 
         if not segments:
             st.info(
@@ -1450,7 +1483,7 @@ def _render_yard_mode_controls(
                         f"{span_days:.0f} days — results may be slow or truncated.")
 
         with st.spinner("Loading ALL yard pings (every provider, no filters)..."):
-            raw_pings = load_yard_proximity_pings(yard_name, start_dt, end_dt)
+            raw_pings = _cached_yard_pings(yard_name, start_dt.isoformat(), end_dt.isoformat())
 
         if not raw_pings:
             st.warning(
