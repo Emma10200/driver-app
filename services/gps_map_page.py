@@ -39,7 +39,6 @@ from services.gps_data import (
 )
 from services.gps_matching import (
     Asset,
-    MatchResult,
     TimelineSegment,
     YARD_GEOFENCES,
     in_yard,
@@ -564,7 +563,7 @@ These parameters are applied automatically by the hourly evidence rebuild script
     if not daily_rows:
         st.warning("No dense usage summary rows found for this date range yet.")
         with st.expander("All Found Units / Coordinates", expanded=False):
-            unit_rows = _build_unit_rows(assets, [], assignments, None, unit_search)
+            unit_rows = _build_unit_rows(assets, assignments, None, unit_search)
             _render_copy_grid(unit_rows) if unit_rows else st.info("No units match the current filters.")
         return
 
@@ -663,7 +662,7 @@ These parameters are applied automatically by the hourly evidence rebuild script
             st.info("No raw hourly evidence rows found for this selected unit/range.")
 
     with st.expander("All Found Units / Coordinates", expanded=False):
-        unit_rows = _build_unit_rows(assets, [], assignments, None, unit_search)
+        unit_rows = _build_unit_rows(assets, assignments, None, unit_search)
         if unit_rows:
             _render_copy_grid(unit_rows)
         else:
@@ -3020,13 +3019,10 @@ def _ping_age_text(asset: Asset) -> str:
 
 def _build_unit_rows(
     assets: list[Asset],
-    matches: list[MatchResult],
     assignments: dict[str, str],
     selected_div: str | None,
     search: str,
 ) -> list[dict[str, object]]:
-    match_by_trailer = {m.trailer.asset_id: m for m in matches}
-    match_by_truck = {m.truck.asset_id: m for m in matches}
     board_by_trailer = {trailer_id: truck_id for truck_id, trailer_id in assignments.items() if trailer_id}
     search_norm = (search or "").strip().lower()
 
@@ -3035,28 +3031,14 @@ def _build_unit_rows(
         if selected_div and asset.division != selected_div:
             continue
 
-        auto_match = match_by_trailer.get(asset.asset_id) if asset.asset_type == "trailer" else match_by_truck.get(asset.asset_id)
         board_unit = board_by_trailer.get(asset.asset_id, "") if asset.asset_type == "trailer" else assignments.get(asset.asset_id, "")
-        matched_unit = ""
-        match_status = "Unmatched"
+        matched_unit = board_unit
+        match_status = "Board only" if board_unit else "Unmatched"
         distance = None
         confidence = ""
         history_hits = 0
         history_score = ""
         segment_info = ""
-
-        if auto_match:
-            matched_unit = auto_match.truck.asset_id if asset.asset_type == "trailer" else auto_match.trailer.asset_id
-            distance = auto_match.distance_miles
-            confidence = f"{auto_match.confidence:.0%}"
-            history_hits = auto_match.history_hits
-            history_score = f"{auto_match.history_score:.0%}" if auto_match.history_score else ""
-            match_status = "Auto + Board" if auto_match.on_board else "Auto"
-            if auto_match.segment_count:
-                segment_info = f"{auto_match.segment_count} trip{'s' if auto_match.segment_count > 1 else ''} ({auto_match.segment_hours:.1f}h)"
-        elif board_unit:
-            matched_unit = board_unit
-            match_status = "Board only"
 
         row = {
             "Type": asset.asset_type.title(),
