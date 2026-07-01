@@ -30,6 +30,7 @@ from services.gps_data import (
     load_match_reviews,
     load_recent_match_reviews,
     load_trailer_activity_summary,
+    load_trailer_gps_trail,
     load_usage_daily_summary,
     save_manual_pair_assignment,
     save_match_reviews,
@@ -438,6 +439,13 @@ def _render_unmatched_trailers_alert(start_dt: datetime, end_dt: datetime) -> No
     manual_assignments = load_manual_pair_assignments(active_only=True)
     manually_assigned_trailers = {str(a.get("trailer_id") or "") for a in manual_assignments}
 
+    # Load dispatch board assignments for cross-reference (trailer → truck)
+    dispatch_map = load_assignments()  # truck_id -> trailer_id
+    trailer_to_truck: dict[str, str] = {}
+    for truck, trailer in dispatch_map.items():
+        if trailer:
+            trailer_to_truck[str(trailer)] = str(truck)
+
     # Aggregate per trailer across the date range
     trailer_agg: dict[str, dict[str, Any]] = {}
     for row in activity_rows:
@@ -481,8 +489,10 @@ def _render_unmatched_trailers_alert(start_dt: datetime, end_dt: datetime) -> No
         display_rows = []
         for a in alerts:
             match_pct = (a["paired_hours"] / max(1, a["moving_hours"])) * 100.0
+            dispatch_truck = trailer_to_truck.get(a["trailer_id"], "—")
             display_rows.append({
                 "Trailer": a["trailer_id"],
+                "Dispatch Truck": dispatch_truck,
                 "Moving Hours": a["moving_hours"],
                 "Paired Hours": a["paired_hours"],
                 "Unmatched Hours": a["unmatched_moving_hours"],
@@ -499,6 +509,117 @@ def _render_unmatched_trailers_alert(start_dt: datetime, end_dt: datetime) -> No
                 "Match %": st.column_config.NumberColumn(format="%.1f%%"),
             },
         )
+
+        # --- One-click confirm & expandable trail per trailer ---
+        for idx, a in enumerate(alerts):
+            tid = a["trailer_id"]
+            dispatch_truck = trailer_to_truck.get(tid, "")
+            header_parts = [f"**{tid}**"]
+            if dispatch_truck:
+                header_parts.append(f"→ Dispatch truck: **{dispatch_truck}**")
+            header_parts.append(f"{a['unmatched_moving_hours']}h unmatched, {round(a['miles_moved'], 1)} mi")
+
+            with st.expander(" · ".join(header_parts), expanded=False):
+                # Quick-confirm button if dispatch board has a truck
+                if dispatch_truck:
+                    st.info(
+                        f"Trailer **{tid}** is assigned to truck **{dispatch_truck}** on the dispatch board. "
+                        "If this is a paper-log driver, confirm below to suppress future alerts."
+                    )
+                    if st.button(
+                        f"✅ Confirm {tid} ↔ {dispatch_truck}",
+                        key=f"confirm_unmatched_{idx}_{tid}",
+                    ):
+                        ok = save_manual_pair_assignment({
+                            "truck_id": dispatch_truck,
+                            "trailer_id": tid,
+                            "start_date": start_dt.date().isoformat(),
+                            "assigned_by": "dispatch_board_confirm",
+                            "notes": f"One-click confirmed from unmatched alert. Dispatch board shows {dispatch_truck}↔{tid}.",
+                            "active": True,
+                        })
+                        if ok:
+                            st.success(f"Confirmed! {tid} ↔ {dispatch_truck} saved. It will be excluded from future alerts.")
+                            st.rerun()
+                        else:
+                            st.error("Failed to save confirmation. Check logs.")
+                else:
+                    st.warning(
+                        f"Trailer **{tid}** is **not on the dispatch board**. "
+                        "No truck assigned — investigate whether GPS is missing or the trailer is unassigned."
+                    )
+
+                # Expandable GPS trail map
+                if st.button(f"🗺️ Show travel route for {tid}", key=f"trail_btn_{idx}_{tid}"):
+                    _render_unmatched_trailer_trail(tid, start_dt, end_dt)
+
+
+def _render_unmatched_trailer_trail(
+    trailer_id: str, start_dt: datetime, end_dt: datetime
+) -> None:
+    """Show GPS trail for an unmatched trailer on a pydeck map."""
+    try:
+        import pydeck as pdk
+    except ImportError:
+        st.warning("pydeck not available for map rendering.")
+        return
+
+    with st.spinner(f"Loading GPS trail for {trailer_id}..."):
+        trail = load_trailer_gps_trail(trailer_id, start_dt, end_dt)
+
+    if not trail:
+        st.info(f"No GPS pings found for trailer {trailer_id} in the selected date range.")
+        return
+
+    points = _dedupe_path_points([(r["lat"], r["lon"]) for r in trail])
+    if len(points) < 2:
+        st.info(f"Only {len(points)} unique GPS point(s) — not enough for a route.")
+        return
+
+    st.caption(f"{len(points)} GPS points for trailer {trailer_id}")
+
+    # Build pydeck layers
+    path_data = [{
+        "trailer": trailer_id,
+        "path": [[lon, lat] for lat, lon in points],
+        "color": [249, 115, 22, 200],
+        "label": f"Trailer {trailer_id} — {len(points)} pts, {len(trail)} pings",
+    }]
+    point_data = []
+    for i, (lat, lon) in enumerate(points):
+        is_start = i == 0
+        is_end = i == len(points) - 1
+        color = [34, 197, 94, 240] if is_start else ([239, 68, 68, 240] if is_end else [249, 115, 22, 180])
+        tag = "START" if is_start else ("END" if is_end else f"#{i + 1}")
+        point_data.append({
+            "lat": lat, "lon": lon,
+            "label": f"{trailer_id} {tag}",
+            "color": color,
+        })
+
+    center_lat = sum(lat for lat, _ in points) / len(points)
+    center_lon = sum(lon for _, lon in points) / len(points)
+
+    layers = [
+        pdk.Layer("PathLayer", data=path_data, get_path="path", get_color="color",
+                  width_min_pixels=3, pickable=True),
+        pdk.Layer("ScatterplotLayer", data=point_data, get_position=["lon", "lat"],
+                  get_radius=400, radius_min_pixels=4, radius_max_pixels=12,
+                  get_fill_color="color", pickable=True),
+    ]
+    st.pydeck_chart(pdk.Deck(
+        layers=layers,
+        initial_view_state=pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=7, pitch=0),
+        tooltip={"text": "{label}"},
+        map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+    ))
+
+    # Google Maps link + copy coords
+    maps_url = _google_maps_route_url(points)
+    if maps_url:
+        st.markdown(f"[Open route in Google Maps]({maps_url})")
+    with st.expander(f"Copy coordinates ({len(points)} points)", expanded=False):
+        st.code(_format_path_points(points), language="text")
 
 
 def _render_manual_assignments_section() -> None:
@@ -798,6 +919,10 @@ def _render_match_path_points(rows: list[dict[str, Any]], *, primary_type: str) 
             "selected_points": points,
             "partner_points": partner_points,
             "coords_text": coords_text,
+            "hours": len(group),
+            "miles": round(miles, 1),
+            "start_label": start_label,
+            "end_label": end_label,
         })
 
     if not route_rows:
@@ -805,10 +930,24 @@ def _render_match_path_points(rows: list[dict[str, Any]], *, primary_type: str) 
 
     st.markdown("##### Physical path points")
     st.caption(
-        "Approximate route from the hourly matched coordinates. Google Maps links use the first/last point plus sampled waypoints; "
-        "the coordinate list shows the actual points available from the dense evidence rows."
+        "Approximate route from the hourly matched coordinates. "
+        "Select a trip below to highlight it on the map, or show all."
     )
-    _render_path_points_map(path_groups)
+
+    # Per-trip selector
+    trip_options = ["All trips"] + [g["partner"] for g in path_groups]
+    selected_trip = st.selectbox(
+        "Highlight trip",
+        trip_options,
+        index=0,
+        key="path_trip_selector",
+    )
+    if selected_trip == "All trips":
+        visible_groups = path_groups
+    else:
+        visible_groups = [g for g in path_groups if g["partner"] == selected_trip]
+
+    _render_path_points_map(visible_groups)
     st.dataframe(
         route_rows,
         use_container_width=True,
@@ -845,10 +984,14 @@ def _render_path_points_map(path_groups: list[dict[str, Any]]) -> None:
             continue
         color = colors[idx % len(colors)]
         all_points.extend(points)
+        label = f"{group['partner']} — {group.get('hours', '?')}h, {group.get('miles', '?')} mi"
+        if group.get("start_label"):
+            label += f"\n{group['start_label']} → {group.get('end_label', '')}"
         path_data.append({
             "partner": group["partner"],
             "path": [[lon, lat] for lat, lon in points],
             "color": color,
+            "label": label,
         })
         for point_idx, (lat, lon) in enumerate(points):
             point_data.append({

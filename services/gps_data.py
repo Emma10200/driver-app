@@ -587,6 +587,40 @@ def deactivate_manual_pair_assignment(assignment_id: int) -> bool:
         return False
 
 
+def load_trailer_gps_trail(
+    trailer_id: str, start: datetime, end: datetime
+) -> list[dict[str, Any]]:
+    """Load raw GPS pings for a single trailer from assets_history.
+
+    Returns lightweight dicts with lat, lon, recorded_at for route plotting.
+    """
+    try:
+        client = _get_client()
+    except Exception as e:
+        logger.warning("Trailer GPS trail unavailable: %s", e)
+        return []
+    start = _ensure_aware(start)
+    end = _ensure_aware(end)
+    filters: dict[str, Any] = {
+        "asset_id": f"eq.{trailer_id}",
+        "asset_type": "eq.trailer",
+        "and": f"(recorded_at.gte.{start.isoformat()},recorded_at.lte.{end.isoformat()})",
+    }
+    try:
+        rows = client.select_all(
+            "assets_history",
+            select="lat,lon,recorded_at,speed",
+            filters=filters,
+            order="recorded_at.asc",
+            page_size=1000,
+            hard_cap=20000,
+        )
+        return [r for r in rows if r.get("lat") and r.get("lon")]
+    except Exception as e:
+        logger.info("Trailer GPS trail query failed: %s", e)
+        return []
+
+
 def _row_to_asset(row: dict[str, Any]) -> Asset:
     last_ping = None
     raw_ping = row.get("last_ping")
