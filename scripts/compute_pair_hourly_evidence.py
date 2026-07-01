@@ -628,6 +628,96 @@ def apply_billable_candidate_rules(
         for row in rows:
             row["billable_candidate"] = True
 
+    # --- CA Yard idle-reset rule ---
+    # If a pair is billable but ALL their evidence is inside the California Yard
+    # (or they've been idle in CA yard for 3+ consecutive days), retroactively
+    # un-mark the idle period. Only paired hours where the unit actually LEAVES
+    # the CA yard with the same partner count as billable.
+    _apply_ca_yard_idle_reset(hourly_rows, ca_idle_days=3)
+
+
+def _apply_ca_yard_idle_reset(hourly_rows: list[dict[str, Any]], ca_idle_days: int = 3) -> None:
+    """CA Yard billing exception: revoke billable on idle CA-yard-only pairs.
+
+    Logic per truck+trailer group:
+    1. Identify consecutive runs of CA-yard hours with no movement (miles_traveled == 0).
+    2. If an idle run lasts >= ca_idle_days, un-mark the billable flag on the
+       preceding (ca_idle_days - 1) days retroactively.
+    3. If a pair ONLY has CA-yard hours (never leaves together), none are billable.
+    4. If the pair leaves the CA yard together (has non-yard billable hours),
+       the departure day's hours stay billable.
+    """
+    CA_YARD = "California Yard"
+    # Build per-pair, date-ordered views of ALL rows (billable or not)
+    from collections import defaultdict
+
+    pair_rows: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in hourly_rows:
+        key = (str(row.get("truck_id") or ""), str(row.get("trailer_id") or ""))
+        pair_rows[key].append(row)
+
+    for (truck_id, trailer_id), rows in pair_rows.items():
+        # Only process pairs that have at least one billable hour
+        billable_rows = [r for r in rows if r.get("billable_candidate")]
+        if not billable_rows:
+            continue
+
+        # Check if this pair has any non-yard billable hours (proof they travel together)
+        non_yard_billable = [
+            r for r in billable_rows
+            if not r.get("truck_yard") and not r.get("trailer_yard")
+        ]
+
+        # All evidence rows in the CA yard for this pair
+        ca_yard_rows = [
+            r for r in rows
+            if r.get("truck_yard") == CA_YARD or r.get("trailer_yard") == CA_YARD
+        ]
+
+        if not ca_yard_rows:
+            continue  # Not relevant to CA yard logic
+
+        # Group CA yard rows by service_date
+        ca_dates: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for r in ca_yard_rows:
+            d = str(r.get("service_date") or "")
+            if d:
+                ca_dates[d].append(r)
+
+        # Check for consecutive idle days in CA yard
+        sorted_dates = sorted(ca_dates.keys())
+        consecutive_idle = 0
+        idle_streak_dates: list[str] = []
+
+        for d in sorted_dates:
+            day_rows = ca_dates[d]
+            # Consider a day "idle" if total miles_traveled for all rows is ~0
+            day_miles = sum(float(r.get("miles_traveled") or 0) for r in day_rows)
+            if day_miles < 1.0:  # Less than 1 mile = effectively idle
+                consecutive_idle += 1
+                idle_streak_dates.append(d)
+            else:
+                # Moving day resets the streak
+                consecutive_idle = 0
+                idle_streak_dates = []
+
+            # If idle streak hits threshold, revoke billable on preceding days
+            if consecutive_idle >= ca_idle_days:
+                # Revoke the (ca_idle_days - 1) days before the trigger day
+                revoke_dates = set(idle_streak_dates[:-1])  # All except the trigger day
+                for r in rows:
+                    if (
+                        r.get("billable_candidate")
+                        and str(r.get("service_date") or "") in revoke_dates
+                        and (r.get("truck_yard") == CA_YARD or r.get("trailer_yard") == CA_YARD)
+                    ):
+                        r["billable_candidate"] = False
+
+        # If pair NEVER leaves CA yard together, no hours should be billable
+        if not non_yard_billable:
+            for r in billable_rows:
+                r["billable_candidate"] = False
+
 
 def dedupe_hourly_rows(hourly_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Remove duplicate hourly rows before batch upsert/summarization.

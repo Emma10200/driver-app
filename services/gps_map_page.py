@@ -129,12 +129,15 @@ def render_gps_map_page() -> None:
     _render_map(visible_trucks, visible_trailers, divisions, assignments, focus_asset=focused_asset)
 
     # --- Tabs: dispatcher-friendly first, audit behind ---
-    tab_fleet, tab_timeline, tab_usage = st.tabs([
-        "🚛 Fleet Overview", "📍 Unit Timeline", "📊 Trailer Usage & Billing",
+    tab_fleet, tab_history, tab_timeline, tab_usage = st.tabs([
+        "🚛 Fleet Overview", "🗺️ Unit History", "📍 Unit Timeline", "📊 Trailer Usage & Billing",
     ])
 
     with tab_fleet:
         _render_fleet_overview_tab(visible_assets, assignments, unit_search)
+
+    with tab_history:
+        _render_unit_history_tab(visible_assets)
 
     with tab_timeline:
         _render_timeline_tab(visible_assets)
@@ -1497,6 +1500,355 @@ def _evidence_review_flag(row: dict[str, Any]) -> str:
     if status == "near":
         return "Near review"
     return "Review"
+
+
+# ---------------------------------------------------------------------------
+# Unit History Tab — trip-by-trip view with route map and day navigation
+# ---------------------------------------------------------------------------
+
+@st.fragment
+def _render_unit_history_tab(assets: list[Asset]) -> None:
+    """Unit History: type a unit ID, pick a date, see trip segments + route map."""
+    st.subheader("Unit History")
+    st.caption(
+        "Enter any truck or trailer number to see its GPS history trip-by-trip. "
+        "Shows driving/idle segments, distances, locations, and a route map."
+    )
+
+    # Unit input
+    all_ids = sorted(
+        [(a.asset_type, a.asset_id) for a in assets],
+        key=lambda x: (x[0], _unit_sort_key(x[1])),
+    )
+    unit_options = [""] + [f"{atype.title()}: {aid}" for atype, aid in all_ids]
+
+    col_unit, col_type = st.columns([3, 1])
+    with col_unit:
+        selected = st.selectbox(
+            "Select or search unit",
+            unit_options,
+            key="history_unit_select",
+            placeholder="Type unit # ...",
+        )
+    with col_type:
+        manual_type = st.selectbox("Type", ["truck", "trailer"], key="history_unit_type")
+
+    if selected:
+        parts = selected.split(": ", 1)
+        unit_type = parts[0].lower()
+        unit_id = parts[1]
+    else:
+        unit_id = ""
+        unit_type = manual_type
+
+    # Freeform unit input for units not in current list
+    typed_id = st.text_input(
+        "Or type unit # directly",
+        key="history_unit_typed",
+        placeholder="e.g. 575005, 1987, 4907-15",
+    ).strip()
+    if typed_id:
+        unit_id = typed_id
+
+    if not unit_id:
+        st.info("Select or type a unit number above to begin.")
+        return
+
+    # Date navigation
+    today = date.today()
+    col_d1, col_d2, col_d3 = st.columns([1, 2, 1])
+    with col_d1:
+        if st.button("← Prev Day", key="hist_prev_day"):
+            current = st.session_state.get("history_date", today)
+            st.session_state["history_date"] = current - timedelta(days=1)
+    with col_d2:
+        hist_date = st.date_input(
+            "Date",
+            value=st.session_state.get("history_date", today),
+            key="history_date_input",
+        )
+        st.session_state["history_date"] = hist_date
+    with col_d3:
+        if st.button("Next Day →", key="hist_next_day"):
+            current = st.session_state.get("history_date", today)
+            st.session_state["history_date"] = current + timedelta(days=1)
+
+    hist_date = st.session_state.get("history_date", today)
+
+    # Optional custom range
+    use_range = st.toggle("Custom date range", value=False, key="hist_use_range")
+    if use_range:
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            range_start = st.date_input("From", value=hist_date - timedelta(days=3), key="hist_range_start")
+        with rc2:
+            range_end = st.date_input("To", value=hist_date, key="hist_range_end")
+    else:
+        range_start = hist_date
+        range_end = hist_date
+
+    # Load data
+    if st.button("Load History", type="primary", key="hist_load"):
+        start_dt = datetime.combine(range_start, time.min).replace(tzinfo=timezone.utc)
+        end_dt = datetime.combine(range_end, time(23, 59, 59)).replace(tzinfo=timezone.utc)
+
+        with st.spinner(f"Loading GPS history for {unit_type} {unit_id}..."):
+            if unit_type == "trailer":
+                trail = load_trailer_gps_trail(unit_id, start_dt, end_dt)
+            else:
+                trail = load_truck_gps_trail(unit_id, start_dt, end_dt)
+
+        if not trail:
+            st.warning(f"No GPS pings found for **{unit_type} {unit_id}** on {range_start} — {range_end}.")
+            return
+
+        # Build trip segments from raw pings
+        trips = _build_trip_segments(trail)
+        st.session_state["history_trail"] = trail
+        st.session_state["history_trips"] = trips
+        st.session_state["history_meta"] = {
+            "unit_id": unit_id,
+            "unit_type": unit_type,
+            "date_label": str(range_start) if range_start == range_end else f"{range_start} — {range_end}",
+            "ping_count": len(trail),
+        }
+
+    # Display results
+    if "history_trips" in st.session_state:
+        meta = st.session_state["history_meta"]
+        trail = st.session_state["history_trail"]
+        trips = st.session_state["history_trips"]
+        _render_unit_history_results(trail, trips, meta)
+
+
+def _render_unit_history_results(
+    trail: list[dict[str, Any]],
+    trips: list[dict[str, Any]],
+    meta: dict[str, Any],
+) -> None:
+    """Render history trail: metrics, map, trip table."""
+    try:
+        import pydeck as pdk
+    except ImportError:
+        st.warning("pydeck not available.")
+        return
+
+    unit_id = meta["unit_id"]
+    unit_type = meta["unit_type"]
+
+    # Metrics
+    total_distance = sum(t["distance_mi"] for t in trips)
+    driving_trips = [t for t in trips if t["status"] == "Driving"]
+    idle_trips = [t for t in trips if t["status"] == "Idle"]
+    driving_time = sum(t["duration_min"] for t in driving_trips)
+    idle_time = sum(t["duration_min"] for t in idle_trips)
+    providers = sorted({p.get("provider", "") for p in trail if p.get("provider")})
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Pings", f"{meta['ping_count']:,}")
+    c2.metric("Trips", len(trips))
+    c3.metric("Distance", f"{total_distance:.1f} mi")
+    c4.metric("Driving", f"{driving_time / 60:.1f}h")
+    c5.metric("Idle", f"{idle_time / 60:.1f}h")
+
+    if providers:
+        st.caption(f"GPS sources: **{', '.join(providers)}** · {meta['date_label']}")
+
+    # Route map
+    points = [(float(r["lat"]), float(r["lon"])) for r in trail if r.get("lat") and r.get("lon")]
+    if len(points) >= 2:
+        deduped = _dedupe_path_points(points)
+        path_data = [{
+            "path": [[lon, lat] for lat, lon in deduped],
+            "color": [59, 130, 246, 200] if unit_type == "truck" else [249, 115, 22, 200],
+        }]
+
+        # Start/end markers
+        marker_data = [
+            {"lat": deduped[0][0], "lon": deduped[0][1], "label": "START", "color": [34, 197, 94, 240]},
+            {"lat": deduped[-1][0], "lon": deduped[-1][1], "label": "END", "color": [239, 68, 68, 240]},
+        ]
+
+        # Add trip-start waypoints with timestamps
+        for trip in trips:
+            if trip["start_lat"] and trip["start_lon"] and trip["status"] == "Driving":
+                marker_data.append({
+                    "lat": trip["start_lat"], "lon": trip["start_lon"],
+                    "label": f"{trip['start_time']} — {trip['status']} {trip['distance_mi']:.1f}mi",
+                    "color": [59, 130, 246, 180] if unit_type == "truck" else [249, 115, 22, 180],
+                })
+
+        center_lat = sum(lat for lat, _ in deduped) / len(deduped)
+        center_lon = sum(lon for _, lon in deduped) / len(deduped)
+
+        layers = [
+            pdk.Layer("PathLayer", data=path_data, get_path="path", get_color="color",
+                      width_min_pixels=3, pickable=False),
+            pdk.Layer("ScatterplotLayer", data=marker_data, get_position=["lon", "lat"],
+                      get_radius=500, radius_min_pixels=5, radius_max_pixels=14,
+                      get_fill_color="color", pickable=True),
+        ]
+
+        st.pydeck_chart(pdk.Deck(
+            layers=layers,
+            initial_view_state=pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=6, pitch=0),
+            tooltip={"text": "{label}"},
+            map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+        ))
+
+        maps_url = _google_maps_route_url(deduped[:25])  # Google Maps limit
+        if maps_url:
+            st.markdown(f"[Open route in Google Maps]({maps_url})")
+
+    # Trip segments table
+    st.subheader("Trip Segments")
+    table_data = []
+    for i, trip in enumerate(trips, 1):
+        status_icon = "🚗" if trip["status"] == "Driving" else "⏸️"
+        table_data.append({
+            "#": i,
+            "": status_icon,
+            "Start Time": trip["start_time"],
+            "End Time": trip["end_time"],
+            "Duration": _format_duration(trip["duration_min"]),
+            "Distance": f"{trip['distance_mi']:.1f}mi" if trip["distance_mi"] > 0 else "0.0mi",
+            "Status": trip["status"],
+            "Provider": trip["provider"],
+            "Location": trip["location"],
+        })
+    st.dataframe(table_data, use_container_width=True, hide_index=True)
+
+
+def _build_trip_segments(trail: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build trip segments (driving/idle) from raw GPS pings.
+
+    A 'trip' is a continuous period of driving or idling. Status changes when:
+    - Speed goes from 0 to >0 (idle→driving)
+    - Speed goes from >0 to 0 for >5 minutes (driving→idle)
+    """
+    from services.gps_matching import haversine_miles
+
+    if not trail:
+        return []
+
+    segments: list[dict[str, Any]] = []
+    current_status = None
+    seg_start_idx = 0
+
+    IDLE_THRESHOLD = 1.0  # speed below this = idle (accounts for GPS drift)
+
+    for i, ping in enumerate(trail):
+        speed = float(ping.get("speed") or 0)
+        status = "Driving" if speed > IDLE_THRESHOLD else "Idle"
+
+        if current_status is None:
+            current_status = status
+            seg_start_idx = i
+            continue
+
+        if status != current_status:
+            # Close current segment
+            segments.append(_finalize_segment(trail, seg_start_idx, i - 1, current_status))
+            current_status = status
+            seg_start_idx = i
+
+    # Close final segment
+    if trail:
+        segments.append(_finalize_segment(trail, seg_start_idx, len(trail) - 1, current_status or "Idle"))
+
+    # Merge very short idle segments (< 5 min) into surrounding driving
+    merged = []
+    for seg in segments:
+        if (
+            merged
+            and seg["status"] == "Idle"
+            and seg["duration_min"] < 5
+            and merged[-1]["status"] == "Driving"
+        ):
+            # Absorb into previous driving segment
+            merged[-1] = _merge_segments(merged[-1], seg)
+        elif (
+            merged
+            and seg["status"] == "Driving"
+            and merged[-1]["status"] == "Driving"
+        ):
+            # Merge consecutive driving after absorption
+            merged[-1] = _merge_segments(merged[-1], seg)
+        else:
+            merged.append(seg)
+
+    return merged
+
+
+def _finalize_segment(
+    trail: list[dict[str, Any]], start_idx: int, end_idx: int, status: str
+) -> dict[str, Any]:
+    """Build a single trip segment dict from a range of trail pings."""
+    from services.gps_matching import haversine_miles
+
+    start_ping = trail[start_idx]
+    end_ping = trail[end_idx]
+
+    start_ts = _parse_history_ts(start_ping.get("recorded_at"))
+    end_ts = _parse_history_ts(end_ping.get("recorded_at"))
+    duration_min = (end_ts - start_ts).total_seconds() / 60 if start_ts and end_ts else 0
+
+    # Calculate total distance along the path
+    total_dist = 0.0
+    for i in range(start_idx, end_idx):
+        p1 = trail[i]
+        p2 = trail[i + 1]
+        if p1.get("lat") and p1.get("lon") and p2.get("lat") and p2.get("lon"):
+            total_dist += haversine_miles(
+                float(p1["lat"]), float(p1["lon"]),
+                float(p2["lat"]), float(p2["lon"]),
+            )
+
+    start_lat = float(start_ping["lat"]) if start_ping.get("lat") else None
+    start_lon = float(start_ping["lon"]) if start_ping.get("lon") else None
+
+    # Collect providers in this segment
+    providers = sorted({str(trail[j].get("provider", "")) for j in range(start_idx, end_idx + 1) if trail[j].get("provider")})
+
+    fmt = "%m/%d %I:%M %p"
+    return {
+        "status": status,
+        "start_time": start_ts.strftime(fmt) if start_ts else "?",
+        "end_time": end_ts.strftime(fmt) if end_ts else "?",
+        "duration_min": round(duration_min, 1),
+        "distance_mi": round(total_dist, 1),
+        "start_lat": start_lat,
+        "start_lon": start_lon,
+        "location": str(start_ping.get("address") or end_ping.get("address") or ""),
+        "provider": ", ".join(providers),
+    }
+
+
+def _merge_segments(seg_a: dict[str, Any], seg_b: dict[str, Any]) -> dict[str, Any]:
+    """Merge two adjacent segments into one."""
+    return {
+        **seg_a,
+        "end_time": seg_b["end_time"],
+        "duration_min": round(seg_a["duration_min"] + seg_b["duration_min"], 1),
+        "distance_mi": round(seg_a["distance_mi"] + seg_b["distance_mi"], 1),
+    }
+
+
+def _parse_history_ts(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _format_duration(minutes: float) -> str:
+    if minutes < 60:
+        return f"{minutes:.0f}min"
+    hours = int(minutes // 60)
+    mins = int(minutes % 60)
+    return f"{hours}h{mins:02d}m"
 
 
 @st.fragment

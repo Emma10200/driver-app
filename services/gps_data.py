@@ -877,7 +877,7 @@ def _load_asset_gps_trail(
     try:
         rows = client.select_all(
             "assets_history",
-            select="lat,lon,recorded_at,speed,provider",
+            select="lat,lon,recorded_at,speed,provider,address,source",
             filters=filters,
             order="recorded_at.asc",
             page_size=1000,
