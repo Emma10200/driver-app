@@ -7,25 +7,31 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from html import escape
 from io import StringIO
 from typing import Any
 from urllib.parse import quote_plus
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 import streamlit.components.v1 as components
 
 from services.gps_data import (
+    deactivate_manual_pair_assignment,
     load_assignments,
     load_asset_history,
     load_asset_history_range,
     load_current_assets_with_last_known,
+    load_hourly_evidence_rows,
     load_hourly_evidence_timeline,
     load_latest_pairing_job,
+    load_manual_pair_assignments,
     load_match_reviews,
     load_recent_match_reviews,
+    load_trailer_activity_summary,
     load_usage_daily_summary,
+    save_manual_pair_assignment,
     save_match_reviews,
 )
 from services.gps_matching import (
@@ -96,18 +102,12 @@ def render_gps_map_page() -> None:
     visible_trailers = [t for t in trailers if _visible(t)]
     visible_assets = [a for a in assets if _visible(a)]
 
-    # --- Metrics (instant) ---
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Trucks", len(visible_trucks))
-    col2.metric("Trailers", len(visible_trailers))
-    col3.metric("Last-Known", sum(1 for a in visible_assets if _is_historical_last_known(a)))
-    col4.metric("No Coordinates", sum(1 for a in visible_assets if not _has_coords(a)))
-    col5.metric("Providers", len(active_providers))
+    _render_sidebar_fleet_metrics(visible_trucks, visible_trailers, visible_assets, active_providers)
 
-    _render_map_lookup_panel(visible_assets, unit_search)
+    focused_asset = _render_map_lookup_panel(visible_assets, unit_search)
 
     # --- Map (renders FIRST with just current positions) ---
-    _render_map(visible_trucks, visible_trailers, divisions, assignments)
+    _render_map(visible_trucks, visible_trailers, divisions, assignments, focus_asset=focused_asset)
 
     # --- Tabs for heavy content ---
     tab_usage, tab_timeline, tab_matches, tab_history, tab_review = st.tabs([
@@ -141,6 +141,8 @@ def _render_map(
     trailers: list[Asset],
     divisions: list[str],
     assignments: dict[str, str],
+    *,
+    focus_asset: Asset | None = None,
 ) -> None:
     """Render the pydeck map with current positions only (fast)."""
     try:
@@ -151,6 +153,7 @@ def _render_map(
 
     layers = []
     division_colors = _division_color_map(divisions)
+    focus_key = f"{focus_asset.asset_type}:{focus_asset.asset_id}" if focus_asset and _has_coords(focus_asset) else ""
 
     truck_data = [
         {
@@ -160,7 +163,8 @@ def _render_map(
             "last_ping": _last_ping_text(t), "ping_age": _ping_age_text(t),
             "location_status": _location_status(t), "status_note": _location_note(t),
             "maps_url": _maps_url(t),
-            "color": _asset_marker_color(t, _truck_color(t.division, division_colors)),
+            "color": [34, 197, 94, 245] if f"truck:{t.asset_id}" == focus_key else _asset_marker_color(t, _truck_color(t.division, division_colors)),
+            "radius": 1150 if f"truck:{t.asset_id}" == focus_key else 700,
             "asset_type": "Truck",
         }
         for t in trucks if _has_coords(t)
@@ -168,7 +172,7 @@ def _render_map(
     if truck_data:
         layers.append(pdk.Layer(
             "ScatterplotLayer", data=truck_data,
-            get_position=["lon", "lat"], get_radius=700,
+            get_position=["lon", "lat"], get_radius="radius",
             radius_min_pixels=14, radius_max_pixels=42,
             get_fill_color="color", stroked=True,
             get_line_color=[255, 255, 255, 220], get_line_width=2,
@@ -191,14 +195,16 @@ def _render_map(
             "location_status": _location_status(t), "status_note": _location_note(t),
             "maps_url": _maps_url(t),
             "in_yard": in_yard(t.lat, t.lon) or "",
-            "color": _asset_marker_color(t, [255, 140, 0, 230]), "asset_type": "Trailer",
+            "color": [34, 197, 94, 245] if f"trailer:{t.asset_id}" == focus_key else _asset_marker_color(t, [255, 140, 0, 230]),
+            "radius": 1100 if f"trailer:{t.asset_id}" == focus_key else 650,
+            "asset_type": "Trailer",
         }
         for t in trailers if _has_coords(t)
     ]
     if trailer_data:
         layers.append(pdk.Layer(
             "ScatterplotLayer", data=trailer_data,
-            get_position=["lon", "lat"], get_radius=650,
+            get_position=["lon", "lat"], get_radius="radius",
             radius_min_pixels=13, radius_max_pixels=40,
             get_fill_color="color", stroked=True,
             get_line_color=[255, 255, 255, 220], get_line_width=2,
@@ -213,15 +219,21 @@ def _render_map(
         ))
 
     all_coords = truck_data + trailer_data
-    if all_coords:
+    if focus_asset and _has_coords(focus_asset):
+        center_lat = float(focus_asset.lat)
+        center_lon = float(focus_asset.lon)
+        zoom = 13
+    elif all_coords:
         center_lat = sum(d["lat"] for d in all_coords) / len(all_coords)
         center_lon = sum(d["lon"] for d in all_coords) / len(all_coords)
+        zoom = 5
     else:
         center_lat, center_lon = 39.8, -89.6
+        zoom = 5
 
     deck = pdk.Deck(
         layers=layers,
-        initial_view_state=pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=5, pitch=0),
+        initial_view_state=pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=zoom, pitch=0),
         tooltip={
             "html": (
                 "<div style='font-size:13px;line-height:1.35;'>"
@@ -252,6 +264,15 @@ def _render_usage_dashboard(assets: list[Asset], assignments: dict[str, str], un
         "Dense timestamp-matched usage from `asset_pair_daily_summary` and `asset_pair_hourly_evidence`. "
         "This does not use legacy asset_pairings or live map snapshots."
     )
+    st.caption(
+        "Billable Candidate is stricter than Paired Hours: it only counts non-yard paired hours with enough confidence "
+        "and a repeated truck/trailer pattern across multiple service dates. Near-yard and same-yard evidence stays visible for review, "
+        "but should not drive billing."
+    )
+    st.caption(
+        "Times below are shown in this machine/user's local timezone; hourly evidence details also include approximate "
+        "local time at the truck/trailer coordinates. Stored Supabase timestamps remain UTC."
+    )
 
     latest_job = load_latest_pairing_job()
     if latest_job:
@@ -279,8 +300,13 @@ def _render_usage_dashboard(assets: list[Asset], assignments: dict[str, str], un
         )
 
     min_hours = st.slider("Minimum paired hours to show", 0, 200, 0, 1, key="usage_dash_min_hours")
-    start_dt = datetime.combine(usage_start, time.min, tzinfo=timezone.utc)
-    end_dt = datetime.combine(usage_end, time.max, tzinfo=timezone.utc)
+    show_near_only = st.checkbox(
+        "Show near-only review rows",
+        value=False,
+        help="Off = assignment/dashboard views only show actual paired evidence. Near rows remain in hourly evidence details.",
+        key="usage_dash_show_near_only",
+    )
+    start_dt, end_dt = _local_date_range_to_utc(usage_start, usage_end)
     if end_dt < start_dt:
         start_dt, end_dt = end_dt, start_dt
 
@@ -297,6 +323,12 @@ def _render_usage_dashboard(assets: list[Asset], assignments: dict[str, str], un
     primary_type = "truck" if view_mode == "Truck" else "trailer"
     partner_type = "trailer" if primary_type == "truck" else "truck"
     overview_rows, pair_rows_by_unit = _aggregate_usage_rows(daily_rows, primary_type=primary_type)
+    if not show_near_only:
+        overview_rows = [r for r in overview_rows if r["Paired Hours"] > 0]
+        pair_rows_by_unit = {
+            unit: [row for row in rows if row["Paired Hours"] > 0]
+            for unit, rows in pair_rows_by_unit.items()
+        }
     overview_rows = [r for r in overview_rows if r["Paired Hours"] >= min_hours]
     overview_rows = _sort_usage_overview(overview_rows, sort_by)
 
@@ -344,12 +376,43 @@ def _render_usage_dashboard(assets: list[Asset], assignments: dict[str, str], un
             },
         )
 
+    hourly_rows = load_hourly_evidence_rows(selected_unit, primary_type, start_dt, end_dt)
+
     with st.expander(f"Timeline runs for {view_mode} {selected_unit}", expanded=True):
         segments = load_hourly_evidence_timeline(selected_unit, primary_type, start_dt, end_dt)
         if segments:
             _render_timeline_visual(_consolidate_timeline(segments))
+            _render_match_path_points(hourly_rows, primary_type=primary_type)
         else:
-            st.info("No hourly evidence timeline rows found for this unit/range.")
+            st.info("No paired timeline runs found for this unit/range. Near/review rows are still available below.")
+
+    with st.expander(f"Hourly coordinate evidence for {view_mode} {selected_unit}", expanded=False):
+        detail_rows = _build_hourly_evidence_detail_rows(hourly_rows, primary_type=primary_type)
+        if detail_rows:
+            st.caption(
+                "This is the row-level evidence behind the dashboard. Use review flags, local times, coords, yards, addresses, "
+                "distance, and ping gap to verify whether a pairing was road evidence, an anomaly, or just yard/near-yard noise."
+            )
+            st.dataframe(
+                detail_rows,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Confidence": st.column_config.NumberColumn(format="%.1f%%"),
+                    "Distance (mi)": st.column_config.NumberColumn(format="%.3f"),
+                    "Ping Gap (min)": st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
+            csv_data = _rows_to_csv(detail_rows)
+            st.download_button(
+                "Download hourly evidence CSV",
+                data=csv_data,
+                file_name=f"hourly_evidence_{primary_type}_{selected_unit}_{usage_start}_{usage_end}.csv",
+                mime="text/csv",
+                key=f"usage_hourly_evidence_download_{primary_type}_{selected_unit}",
+            )
+        else:
+            st.info("No raw hourly evidence rows found for this selected unit/range.")
 
     with st.expander("All Found Units / Coordinates", expanded=False):
         unit_rows = _build_unit_rows(assets, [], assignments, None, unit_search)
@@ -357,6 +420,179 @@ def _render_usage_dashboard(assets: list[Asset], assignments: dict[str, str], un
             _render_copy_grid(unit_rows)
         else:
             st.info("No units match the current filters.")
+
+    # --- Unmatched Moving Trailers Alert ---
+    _render_unmatched_trailers_alert(start_dt, end_dt)
+
+    # --- Manual Pair Assignments ---
+    _render_manual_assignments_section()
+
+
+def _render_unmatched_trailers_alert(start_dt: datetime, end_dt: datetime) -> None:
+    """Collapsible warning section for trailers moving without matches."""
+    activity_rows = load_trailer_activity_summary(start_dt, end_dt)
+    if not activity_rows:
+        return
+
+    # Load manual assignments to exclude manually-paired trailers
+    manual_assignments = load_manual_pair_assignments(active_only=True)
+    manually_assigned_trailers = {str(a.get("trailer_id") or "") for a in manual_assignments}
+
+    # Aggregate per trailer across the date range
+    trailer_agg: dict[str, dict[str, Any]] = {}
+    for row in activity_rows:
+        tid = str(row.get("trailer_id") or "")
+        if not tid:
+            continue
+        if tid in manually_assigned_trailers:
+            continue
+        acc = trailer_agg.setdefault(tid, {
+            "trailer_id": tid,
+            "active_hours": 0,
+            "moving_hours": 0,
+            "miles_moved": 0.0,
+            "paired_hours": 0,
+            "unmatched_moving_hours": 0,
+            "in_yard_hours": 0,
+        })
+        acc["active_hours"] += int(row.get("active_hours") or 0)
+        acc["moving_hours"] += int(row.get("moving_hours") or 0)
+        acc["miles_moved"] += float(row.get("miles_moved") or 0)
+        acc["paired_hours"] += int(row.get("paired_hours") or 0)
+        acc["unmatched_moving_hours"] += int(row.get("unmatched_moving_hours") or 0)
+        acc["in_yard_hours"] += int(row.get("in_yard_hours") or 0)
+
+    # Filter: only show trailers with significant unmatched movement
+    alerts = [
+        v for v in trailer_agg.values()
+        if v["unmatched_moving_hours"] >= 3 and v["miles_moved"] >= 10.0
+    ]
+    if not alerts:
+        return
+
+    alerts.sort(key=lambda r: r["unmatched_moving_hours"], reverse=True)
+
+    with st.expander(f"⚠️ Unmatched Moving Trailers ({len(alerts)})", expanded=False):
+        st.caption(
+            "Trailers with significant GPS movement but few or no matched truck hours. "
+            "These may be pulled by paper-log drivers or have GPS pairing gaps. "
+            "Excludes trailers in yard suppression zones and manually-assigned trailers."
+        )
+        display_rows = []
+        for a in alerts:
+            match_pct = (a["paired_hours"] / max(1, a["moving_hours"])) * 100.0
+            display_rows.append({
+                "Trailer": a["trailer_id"],
+                "Moving Hours": a["moving_hours"],
+                "Paired Hours": a["paired_hours"],
+                "Unmatched Hours": a["unmatched_moving_hours"],
+                "Miles Moved": round(a["miles_moved"], 1),
+                "Match %": round(match_pct, 1),
+                "Yard Hours": a["in_yard_hours"],
+            })
+        st.dataframe(
+            display_rows,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Miles Moved": st.column_config.NumberColumn(format="%.1f"),
+                "Match %": st.column_config.NumberColumn(format="%.1f%%"),
+            },
+        )
+
+
+def _render_manual_assignments_section() -> None:
+    """UI for viewing and creating manual truck/trailer pair assignments."""
+    with st.expander("📋 Manual Pair Assignments (Paper-Log Drivers)", expanded=False):
+        st.caption(
+            "Manually assign trailers to trucks for paper-log drivers or GPS-blind units. "
+            "This suppresses unmatched-trailer alerts and provides a history trail."
+        )
+
+        assignments = load_manual_pair_assignments(active_only=False)
+        active = [a for a in assignments if a.get("active")]
+        inactive = [a for a in assignments if not a.get("active")]
+
+        if active:
+            st.markdown("**Active Assignments**")
+            active_display = []
+            for a in active:
+                active_display.append({
+                    "ID": int(a.get("id") or 0),
+                    "Truck": str(a.get("truck_id") or ""),
+                    "Trailer": str(a.get("trailer_id") or ""),
+                    "Start": str(a.get("start_date") or ""),
+                    "End": str(a.get("end_date") or "—"),
+                    "Assigned By": str(a.get("assigned_by") or ""),
+                    "Notes": str(a.get("notes") or ""),
+                })
+            st.dataframe(active_display, use_container_width=True, hide_index=True)
+
+            # Unassign button
+            unassign_id = st.selectbox(
+                "Select assignment to deactivate",
+                options=[0] + [int(a.get("id") or 0) for a in active],
+                format_func=lambda x: "— Select —" if x == 0 else f"ID {x}",
+                key="manual_unassign_id",
+            )
+            if unassign_id and st.button("Deactivate Assignment", key="btn_deactivate_assignment"):
+                if deactivate_manual_pair_assignment(int(unassign_id)):
+                    st.success(f"Assignment {unassign_id} deactivated.")
+                    st.rerun()
+                else:
+                    st.error("Failed to deactivate assignment.")
+
+        # New assignment form
+        st.markdown("**Create New Assignment**")
+        col1, col2 = st.columns(2)
+        with col1:
+            new_truck = st.text_input("Truck ID", key="manual_new_truck")
+        with col2:
+            new_trailer = st.text_input("Trailer ID", key="manual_new_trailer")
+        col3, col4 = st.columns(2)
+        with col3:
+            new_start = st.date_input("Start Date", value=date.today(), key="manual_new_start")
+        with col4:
+            new_end = st.date_input("End Date (optional)", value=None, key="manual_new_end")
+        col5, col6 = st.columns(2)
+        with col5:
+            new_by = st.text_input("Assigned By", key="manual_new_by")
+        with col6:
+            new_notes = st.text_input("Notes", key="manual_new_notes")
+
+        if st.button("Save Assignment", key="btn_save_manual_assignment"):
+            if not new_truck or not new_trailer:
+                st.error("Truck ID and Trailer ID are required.")
+            else:
+                row = {
+                    "truck_id": new_truck.strip(),
+                    "trailer_id": new_trailer.strip(),
+                    "start_date": new_start.isoformat() if new_start else date.today().isoformat(),
+                    "end_date": new_end.isoformat() if new_end else None,
+                    "assigned_by": new_by.strip() or "unknown",
+                    "notes": new_notes.strip(),
+                    "active": True,
+                }
+                if save_manual_pair_assignment(row):
+                    st.success(f"Assigned trailer {new_trailer} to truck {new_truck}.")
+                    st.rerun()
+                else:
+                    st.error("Failed to save assignment.")
+
+        if inactive:
+            with st.expander("History (inactive assignments)", expanded=False):
+                hist_display = []
+                for a in inactive:
+                    hist_display.append({
+                        "Truck": str(a.get("truck_id") or ""),
+                        "Trailer": str(a.get("trailer_id") or ""),
+                        "Start": str(a.get("start_date") or ""),
+                        "End": str(a.get("end_date") or "—"),
+                        "Assigned By": str(a.get("assigned_by") or ""),
+                        "Unassigned": str(a.get("unassigned_at") or ""),
+                        "Notes": str(a.get("notes") or ""),
+                    })
+                st.dataframe(hist_display, use_container_width=True, hide_index=True)
 
 
 def _aggregate_usage_rows(
@@ -381,6 +617,7 @@ def _aggregate_usage_rows(
             "billable_hours": 0.0,
             "near_hours": 0.0,
             "same_yard_hours": 0.0,
+            "miles_traveled": 0.0,
             "evidence_days": set(),
             "first": None,
             "last": None,
@@ -397,6 +634,7 @@ def _aggregate_usage_rows(
         acc["billable_hours"] += billable
         acc["near_hours"] += near
         acc["same_yard_hours"] += same_yard
+        acc["miles_traveled"] += float(row.get("miles_traveled") or 0)
         if row.get("service_date"):
             acc["evidence_days"].add(str(row.get("service_date")))
         conf = float(row.get("avg_confidence") or 0)
@@ -422,13 +660,14 @@ def _aggregate_usage_rows(
             "Partner": acc["partner"],
             "Paired Hours": round(acc["paired_hours"], 1),
             "Billable Hours": round(acc["billable_hours"], 1),
+            "Miles Traveled": round(acc["miles_traveled"], 1),
             "Near Hours": round(acc["near_hours"], 1),
             "Yard Hours": round(acc["same_yard_hours"], 1),
             "Evidence Days": len(acc["evidence_days"]),
             "Avg Confidence": round(avg_conf, 1),
             "Min Distance": round(float(acc["min_distance"] or 0), 3) if acc["min_distance"] is not None else None,
-            "First Seen": acc["first"].strftime("%m/%d %H:%M") if acc["first"] else "—",
-            "Last Seen": acc["last"].strftime("%m/%d %H:%M") if acc["last"] else "—",
+            "First Seen": _format_dt_text(acc["first"]) if acc["first"] else "—",
+            "Last Seen": _format_dt_text(acc["last"]) if acc["last"] else "—",
         }
         pair_rows_by_unit.setdefault(acc["primary"], []).append(detail)
 
@@ -474,6 +713,247 @@ def _aggregate_usage_rows(
     return overview_rows, pair_rows_by_unit
 
 
+def _build_hourly_evidence_detail_rows(rows: list[dict[str, Any]], *, primary_type: str) -> list[dict[str, Any]]:
+    partner_col = "trailer_id" if primary_type == "truck" else "truck_id"
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        truck_tz = _timezone_for_coords(row.get("truck_lat"), row.get("truck_lon"))
+        trailer_tz = _timezone_for_coords(row.get("trailer_lat"), row.get("trailer_lon"))
+        truck_coords = _format_coords(row.get("truck_lat"), row.get("truck_lon"))
+        trailer_coords = _format_coords(row.get("trailer_lat"), row.get("trailer_lon"))
+        out.append({
+            "Hour (User Local)": _format_dt_text(row.get("hour_start")) or str(row.get("hour_start") or ""),
+            "Hour (Truck Local)": _format_dt_text(row.get("hour_start"), tz=truck_tz),
+            "Hour (Trailer Local)": _format_dt_text(row.get("hour_start"), tz=trailer_tz),
+            "Partner": str(row.get(partner_col) or ""),
+            "Review Flag": _evidence_review_flag(row),
+            "Status": str(row.get("status") or ""),
+            "Billable?": "Yes" if row.get("billable_candidate") else "No",
+            "Confidence": round(float(row.get("confidence") or 0) * 100.0, 1),
+            "Distance (mi)": float(row.get("best_distance_miles") or 0),
+            "Miles Traveled": float(row.get("miles_traveled") or 0),
+            "Ping Gap (min)": float(row.get("best_ping_gap_minutes") or 0),
+            "Truck Coords": truck_coords,
+            "Trailer Coords": trailer_coords,
+            "Truck Ping Window": _format_time_window(row.get("truck_first_ping"), row.get("truck_last_ping"), tz=truck_tz),
+            "Trailer Ping Window": _format_time_window(row.get("trailer_first_ping"), row.get("trailer_last_ping"), tz=trailer_tz),
+            "Truck Yard": str(row.get("truck_yard") or ""),
+            "Trailer Yard": str(row.get("trailer_yard") or ""),
+            "Truck Address": str(row.get("truck_address") or ""),
+            "Trailer Address": str(row.get("trailer_address") or ""),
+            "Truck Pings": int(row.get("truck_pings") or 0),
+            "Trailer Pings": int(row.get("trailer_pings") or 0),
+        })
+    return out
+
+
+
+def _render_match_path_points(rows: list[dict[str, Any]], *, primary_type: str) -> None:
+    """Render copyable/visual physical path points for paired timeline runs."""
+    paired_rows = [r for r in rows if str(r.get("status") or "") == "paired"]
+    if not paired_rows:
+        return
+
+    coord_prefix = "truck" if primary_type == "truck" else "trailer"
+    partner_col = "trailer_id" if primary_type == "truck" else "truck_id"
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in paired_rows:
+        partner = str(row.get(partner_col) or "")
+        if not partner:
+            continue
+        groups.setdefault(partner, []).append(row)
+
+    path_groups: list[dict[str, Any]] = []
+    route_rows: list[dict[str, Any]] = []
+    for partner, group in sorted(groups.items(), key=lambda item: _unit_sort_key(item[0])):
+        group.sort(key=lambda r: str(r.get("hour_start") or ""))
+        points = _dedupe_path_points([
+            (row.get(f"{coord_prefix}_lat"), row.get(f"{coord_prefix}_lon"))
+            for row in group
+        ])
+        if not points:
+            continue
+        partner_points = _dedupe_path_points([
+            (row.get("trailer_lat" if coord_prefix == "truck" else "truck_lat"), row.get("trailer_lon" if coord_prefix == "truck" else "truck_lon"))
+            for row in group
+        ])
+        start_label = _format_dt_text(group[0].get("hour_start")) or str(group[0].get("hour_start") or "")
+        end_label = _format_dt_text(group[-1].get("hour_start")) or str(group[-1].get("hour_start") or "")
+        miles = sum(float(row.get("miles_traveled") or 0) for row in group)
+        maps_url = _google_maps_route_url(points)
+        coords_text = _format_path_points(points)
+        route_rows.append({
+            "Partner": partner,
+            "Hours": len(group),
+            "Miles": round(miles, 1),
+            "Start": start_label,
+            "End": end_label,
+            "Start Point": _format_point(points[0]),
+            "End Point": _format_point(points[-1]),
+            "Google Maps Route": maps_url,
+            "Coordinate Points": coords_text,
+        })
+        path_groups.append({
+            "partner": partner,
+            "selected_points": points,
+            "partner_points": partner_points,
+            "coords_text": coords_text,
+        })
+
+    if not route_rows:
+        return
+
+    st.markdown("##### Physical path points")
+    st.caption(
+        "Approximate route from the hourly matched coordinates. Google Maps links use the first/last point plus sampled waypoints; "
+        "the coordinate list shows the actual points available from the dense evidence rows."
+    )
+    _render_path_points_map(path_groups)
+    st.dataframe(
+        route_rows,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Miles": st.column_config.NumberColumn(format="%.1f"),
+            "Google Maps Route": st.column_config.LinkColumn(display_text="Open route"),
+        },
+    )
+    for group in path_groups:
+        with st.expander(f"Copy coordinates for partner {group['partner']}", expanded=False):
+            st.code(group["coords_text"], language="text")
+            if group["partner_points"]:
+                st.caption("Partner GPS points for the same matched hours:")
+                st.code(_format_path_points(group["partner_points"]), language="text")
+
+
+def _render_path_points_map(path_groups: list[dict[str, Any]]) -> None:
+    try:
+        import pydeck as pdk
+    except ImportError:
+        return
+
+    colors = [
+        [59, 130, 246, 220], [16, 185, 129, 220], [139, 92, 246, 220],
+        [236, 72, 153, 220], [249, 115, 22, 220], [6, 182, 212, 220],
+    ]
+    path_data = []
+    point_data = []
+    all_points: list[tuple[float, float]] = []
+    for idx, group in enumerate(path_groups):
+        points = group["selected_points"]
+        if not points:
+            continue
+        color = colors[idx % len(colors)]
+        all_points.extend(points)
+        path_data.append({
+            "partner": group["partner"],
+            "path": [[lon, lat] for lat, lon in points],
+            "color": color,
+        })
+        for point_idx, (lat, lon) in enumerate(points):
+            point_data.append({
+                "partner": group["partner"],
+                "lat": lat,
+                "lon": lon,
+                "label": f"{group['partner']} #{point_idx + 1}",
+                "color": [34, 197, 94, 240] if point_idx == 0 else ([239, 68, 68, 240] if point_idx == len(points) - 1 else color),
+            })
+
+    if not all_points:
+        return
+    center_lat = sum(lat for lat, _lon in all_points) / len(all_points)
+    center_lon = sum(lon for _lat, lon in all_points) / len(all_points)
+    layers = []
+    if path_data:
+        layers.append(pdk.Layer(
+            "PathLayer",
+            data=path_data,
+            get_path="path",
+            get_color="color",
+            width_min_pixels=3,
+            pickable=True,
+        ))
+    if point_data:
+        layers.append(pdk.Layer(
+            "ScatterplotLayer",
+            data=point_data,
+            get_position=["lon", "lat"],
+            get_radius=500,
+            radius_min_pixels=5,
+            radius_max_pixels=14,
+            get_fill_color="color",
+            pickable=True,
+        ))
+    st.pydeck_chart(pdk.Deck(
+        layers=layers,
+        initial_view_state=pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=6, pitch=0),
+        tooltip={"text": "{label}"},
+        map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+    ))
+
+
+def _dedupe_path_points(raw_points: list[tuple[object, object]]) -> list[tuple[float, float]]:
+    points: list[tuple[float, float]] = []
+    for lat_raw, lon_raw in raw_points:
+        try:
+            lat = float(lat_raw)
+            lon = float(lon_raw)
+        except (TypeError, ValueError):
+            continue
+        if abs(lat) < 0.000001 and abs(lon) < 0.000001:
+            continue
+        rounded = (round(lat, 6), round(lon, 6))
+        if not points or rounded != points[-1]:
+            points.append(rounded)
+    return points
+
+
+def _format_point(point: tuple[float, float]) -> str:
+    return f"{point[0]:.6f},{point[1]:.6f}"
+
+
+def _format_path_points(points: list[tuple[float, float]]) -> str:
+    return "\n".join(_format_point(point) for point in points)
+
+
+def _google_maps_route_url(points: list[tuple[float, float]]) -> str:
+    if not points:
+        return ""
+    if len(points) == 1:
+        return f"https://www.google.com/maps/search/?api=1&query={quote_plus(_format_point(points[0]))}"
+    origin = _format_point(points[0])
+    destination = _format_point(points[-1])
+    middle = _sample_route_waypoints(points[1:-1], max_points=8)
+    url = (
+        "https://www.google.com/maps/dir/?api=1"
+        f"&origin={quote_plus(origin)}"
+        f"&destination={quote_plus(destination)}"
+        "&travelmode=driving"
+    )
+    if middle:
+        waypoint_text = "|".join(_format_point(point) for point in middle)
+        url += f"&waypoints={quote_plus(waypoint_text)}"
+    return url
+
+
+def _sample_route_waypoints(points: list[tuple[float, float]], *, max_points: int) -> list[tuple[float, float]]:
+    if len(points) <= max_points:
+        return points
+    if max_points <= 0:
+        return []
+    step = (len(points) - 1) / max(1, max_points - 1)
+    sampled: list[tuple[float, float]] = []
+    for i in range(max_points):
+        sampled.append(points[round(i * step)])
+    return _dedupe_path_points(sampled)
+
+def _format_coords(lat: object, lon: object) -> str:
+    try:
+        return f"{float(lat):.6f}, {float(lon):.6f}"
+    except (TypeError, ValueError):
+        return ""
+
+
 def _sort_usage_overview(rows: list[dict[str, Any]], sort_by: str) -> list[dict[str, Any]]:
     if sort_by == "Billable hours":
         return sorted(rows, key=lambda r: (r["Billable Hours"], r["Paired Hours"]), reverse=True)
@@ -497,9 +977,91 @@ def _parse_ui_dt(value: object) -> datetime | None:
         return None
 
 
-def _format_dt_text(value: object) -> str:
+def _format_dt_text(value: object, *, tz: timezone | ZoneInfo | None = None) -> str:
     parsed = _parse_ui_dt(value)
-    return parsed.strftime("%m/%d %H:%M UTC") if parsed else ""
+    if not parsed:
+        return ""
+    display_tz = tz or _user_timezone()
+    return parsed.astimezone(display_tz).strftime("%m/%d %I:%M %p %Z")
+
+
+def _format_time_window(start: object, end: object, *, tz: timezone | ZoneInfo | None = None) -> str:
+    start_dt = _format_dt_text(start, tz=tz)
+    end_dt = _format_dt_text(end, tz=tz)
+    if not start_dt and not end_dt:
+        return ""
+    if start_dt == end_dt or not end_dt:
+        return start_dt
+    if not start_dt:
+        return end_dt
+    return f"{start_dt} → {end_dt}"
+
+
+def _local_date_range_to_utc(start_date: date, end_date: date) -> tuple[datetime, datetime]:
+    local_tz = _user_timezone()
+    start_local = datetime.combine(start_date, time.min, tzinfo=local_tz)
+    end_local = datetime.combine(end_date, time.max, tzinfo=local_tz)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+
+
+def _user_timezone() -> tzinfo:
+    tz = datetime.now().astimezone().tzinfo
+    return tz or timezone.utc
+
+
+def _timezone_for_coords(lat: object, lon: object) -> ZoneInfo | timezone:
+    """Best-effort location timezone from coordinates without adding a heavy dependency.
+
+    This intentionally favors clear dispatcher display over perfect border-level
+    timezone lookup. The stored evidence remains UTC.
+    """
+    try:
+        lat_f = float(lat)
+        lon_f = float(lon)
+    except (TypeError, ValueError):
+        return _user_timezone()
+    if not (-90 <= lat_f <= 90 and -180 <= lon_f <= 180):
+        return _user_timezone()
+
+    try:
+        if 18 <= lat_f <= 23 and -161 <= lon_f <= -154:
+            return ZoneInfo("Pacific/Honolulu")
+        if 51 <= lat_f <= 72 and -170 <= lon_f <= -130:
+            return ZoneInfo("America/Anchorage")
+        if 31 <= lat_f <= 37.5 and -115 <= lon_f <= -109:
+            return ZoneInfo("America/Phoenix")
+        if lon_f <= -114:
+            return ZoneInfo("America/Los_Angeles")
+        if lon_f <= -101:
+            return ZoneInfo("America/Denver")
+        if lon_f <= -86:
+            return ZoneInfo("America/Chicago")
+        return ZoneInfo("America/New_York")
+    except Exception:
+        return _user_timezone()
+
+
+def _evidence_review_flag(row: dict[str, Any]) -> str:
+    status = str(row.get("status") or "")
+    billable = bool(row.get("billable_candidate"))
+    truck_yard = str(row.get("truck_yard") or "")
+    trailer_yard = str(row.get("trailer_yard") or "")
+    truck_pings = int(row.get("truck_pings") or 0)
+    trailer_pings = int(row.get("trailer_pings") or 0)
+    confidence = float(row.get("confidence") or 0)
+    if billable:
+        return "Billable pattern"
+    if status == "paired" and not truck_yard and not trailer_yard:
+        if min(truck_pings, trailer_pings) >= 2 or confidence >= 0.65:
+            return "Review anomaly: repeated non-yard paired pings"
+        return "Review anomaly: non-yard paired evidence"
+    if status == "same_yard":
+        return "Yard only"
+    if truck_yard or trailer_yard:
+        return "Near/yard-edge review"
+    if status == "near":
+        return "Near review"
+    return "Review"
 
 
 def _render_timeline_tab(assets: list[Asset], max_dist: float) -> None:
@@ -538,8 +1100,7 @@ def _render_timeline_tab(assets: list[Asset], max_dist: float) -> None:
         tl_end = st.date_input("To", value=today, key="tl_end")
 
     if st.button("Load Timeline", type="primary", key="tl_compute"):
-        start_dt = datetime.combine(tl_start, time.min, tzinfo=timezone.utc)
-        end_dt = datetime.combine(tl_end, time.max, tzinfo=timezone.utc)
+        start_dt, end_dt = _local_date_range_to_utc(tl_start, tl_end)
         if end_dt < start_dt:
             start_dt, end_dt = end_dt, start_dt
 
@@ -720,7 +1281,7 @@ def _render_timeline_visual(segments: list[TimelineSegment]) -> None:
             color = partner_color_map.get(seg.partner_id, "#3b82f6")
             label = seg.partner_id
 
-        title = f"{seg.partner_id}: {seg.start.strftime('%m/%d %H:%M')}–{seg.end.strftime('%H:%M')} ({seg.duration_minutes:.0f}min)"
+        title = f"{seg.partner_id}: {_format_dt_text(seg.start)}–{_format_dt_text(seg.end)} ({seg.duration_minutes:.0f}min)"
         bar_items.append(
             f"<div style='flex:{pct};background:{color};padding:2px 4px;overflow:hidden;"
             f"white-space:nowrap;font-size:11px;color:#fff;border-right:1px solid #0e1117;'"
@@ -769,8 +1330,8 @@ def _render_timeline_visual(segments: list[TimelineSegment]) -> None:
         table_rows.append({
             "": icon,
             "Partner": partner_label,
-            "Start": seg.start.strftime("%m/%d %H:%M"),
-            "End": seg.end.strftime("%m/%d %H:%M"),
+            "Start": _format_dt_text(seg.start),
+            "End": _format_dt_text(seg.end),
             "Duration": f"{seg.duration_minutes:.0f} min" if seg.duration_minutes < 120 else f"{seg.duration_minutes / 60:.1f} h",
             "Avg Dist (mi)": f"{seg.avg_distance_miles:.3f}" if seg.avg_distance_miles > 0 else "—",
             "Confidence": f"{seg.confidence:.0%}" if seg.confidence > 0 else "—",
@@ -856,8 +1417,7 @@ def _render_history_tab(max_dist: float, active_divs: set[str]) -> None:
         usage_min_hits = st.slider("Min hours co-located", 1, 10, 2, 1, key="hist_min_hits")
 
     if st.button("Compute Historical Usage", type="primary", key="hist_compute_btn"):
-        usage_start_dt = datetime.combine(usage_start, time.min, tzinfo=timezone.utc)
-        usage_end_dt = datetime.combine(usage_end, time.max, tzinfo=timezone.utc)
+        usage_start_dt, usage_end_dt = _local_date_range_to_utc(usage_start, usage_end)
         if usage_end_dt < usage_start_dt:
             usage_start_dt, usage_end_dt = usage_end_dt, usage_start_dt
 
@@ -985,38 +1545,47 @@ def _render_map_controls(
     )
 
 
-def _render_map_lookup_panel(assets: list[Asset], unit_search: str) -> None:
-    """Render a compact copy/Google Maps action panel for the currently visible map units."""
+def _render_sidebar_fleet_metrics(
+    visible_trucks: list[Asset],
+    visible_trailers: list[Asset],
+    visible_assets: list[Asset],
+    active_providers: set[str],
+) -> None:
+    """Render compact fleet counts in the sidebar to keep mobile map layout clean."""
+    with st.sidebar.expander("Fleet snapshot", expanded=True):
+        st.metric("Trucks", len(visible_trucks))
+        st.metric("Trailers", len(visible_trailers))
+        st.metric("Last-Known", sum(1 for a in visible_assets if _is_historical_last_known(a)))
+        st.metric("No Coordinates", sum(1 for a in visible_assets if not _has_coords(a)))
+        st.metric("Providers", len(active_providers))
+
+
+def _render_map_lookup_panel(assets: list[Asset], unit_search: str) -> Asset | None:
+    """Render one search-driven copy/Google Maps/map-focus card for visible map units."""
     lookup_assets = [a for a in assets if _has_coords(a)]
     if not lookup_assets:
         st.info("No visible units have coordinates with the current filters.")
-        return
+        return None
+
+    if not unit_search:
+        st.caption("Search a unit above to show its copy/paste card and center the map.")
+        return None
 
     lookup_assets = sorted(lookup_assets, key=lambda a: (a.asset_type, _unit_sort_key(a.asset_id)))
-    by_key = {f"{a.asset_type}:{a.asset_id}": a for a in lookup_assets}
-    labels = {
-        key: f"{asset.asset_type.title()} {asset.asset_id} · {_location_status(asset)} · {_ping_age_text(asset)}"
-        for key, asset in by_key.items()
-    }
+    search_norm = unit_search.strip().lower()
+    exact_matches = [a for a in lookup_assets if a.asset_id.lower() == search_norm]
+    selected = exact_matches[0] if exact_matches else lookup_assets[0]
 
-    default_index = 0
-    if unit_search:
-        search_norm = unit_search.strip().lower()
-        for idx, asset in enumerate(lookup_assets):
-            if asset.asset_id.lower() == search_norm:
-                default_index = idx
-                break
-
-    selected_key = st.selectbox(
-        "Coordinate actions",
-        list(by_key.keys()),
-        index=default_index,
-        format_func=lambda key: labels.get(key, key),
-        key="gps_map_coordinate_actions",
-        help="Use this instead of hunting through the sidebar: select a visible unit, copy coordinates, or open Google Maps.",
-    )
-    selected = by_key[selected_key]
+    st.session_state["gps_map_focus_key"] = f"{selected.asset_type}:{selected.asset_id}"
     _render_coordinate_action_card(selected)
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        if st.button("📍 Show on map", key=f"gps_focus_{selected.asset_type}_{selected.asset_id}"):
+            st.session_state["gps_map_focus_key"] = f"{selected.asset_type}:{selected.asset_id}"
+    with c2:
+        if len(lookup_assets) > 1:
+            st.caption(f"Showing best match of {len(lookup_assets)} visible search results. Narrow the search for an exact unit.")
+    return selected
 
 
 def _render_coordinate_action_card(asset: Asset) -> None:
@@ -1040,7 +1609,8 @@ def _render_coordinate_action_card(asset: Asset) -> None:
       .top {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }}
       .unit {{ font-weight: 800; font-size: 16px; }}
       .status {{ color: #fbbf24; font-weight: 700; }}
-      .meta {{ margin-top: 6px; color: #cbd5e1; font-size: 13px; }}
+    .meta {{ margin-top: 6px; color: #cbd5e1; font-size: 13px; }}
+    .updated {{ margin-top: 8px; color: #e0f2fe; font-size: 13px; }}
       .coords {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: #dbeafe; }}
       .actions {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
       button, a.btn {{ border: 0; border-radius: 8px; padding: 7px 10px; color: white; font-weight: 800; text-decoration: none; cursor: pointer; }}
@@ -1071,7 +1641,8 @@ def _render_coordinate_action_card(asset: Asset) -> None:
           <a class="btn" href="{maps_href}" target="_blank" rel="noopener">🗺️ Google Maps</a>
         </div>
       </div>
-      <div class="meta">Ping: <b>{last_ping}</b> ({ping_age}) · GPS: <b>{provider}</b> · Division: <b>{division}</b></div>
+            <div class="updated">Last updated: <b>{last_ping}</b> · <b>{ping_age}</b></div>
+            <div class="meta">GPS: <b>{provider}</b> · Division: <b>{division}</b></div>
       <div class="meta">{note}</div>
     </div>
     """
@@ -1255,7 +1826,7 @@ def _vin(asset: Asset) -> str:
 def _last_ping_text(asset: Asset) -> str:
     if asset.last_ping is None:
         return ""
-    return asset.last_ping.astimezone(timezone.utc).strftime("%m/%d/%Y %I:%M %p UTC")
+    return _format_dt_text(asset.last_ping, tz=_timezone_for_coords(asset.lat, asset.lon))
 
 
 def _ping_age_text(asset: Asset) -> str:
@@ -1761,8 +2332,8 @@ def _build_historical_usage_rows(
             "Hits": item.hits,
             "Days": ", ".join(item.days),
             "Trip Segments": seg_info,
-            "First Seen": item.first_seen.strftime("%Y-%m-%d %H:%M UTC") if item.first_seen else "",
-            "Last Seen": item.last_seen.strftime("%Y-%m-%d %H:%M UTC") if item.last_seen else "",
+            "First Seen": _format_dt_text(item.first_seen) if item.first_seen else "",
+            "Last Seen": _format_dt_text(item.last_seen) if item.last_seen else "",
             "Min Distance (mi)": item.min_distance_miles,
             "Avg Distance (mi)": item.avg_distance_miles,
             "Confidence": f"{item.confidence:.0%}",

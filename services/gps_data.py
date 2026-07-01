@@ -45,7 +45,7 @@ def load_current_assets(division: str | None = None) -> list[Asset]:
     if division:
         filters["division"] = f"eq.{division}"
 
-    rows = client.select("assets_current", filters=filters, order="asset_type.asc,asset_id.asc")
+    rows = client.select_all("assets_current", filters=filters, order="asset_type.asc,asset_id.asc", page_size=1000, hard_cap=50000)
     return [_row_to_asset(r) for r in rows]
 
 
@@ -158,7 +158,7 @@ def load_assignments() -> dict[str, str]:
     except Exception:
         return {}
 
-    rows = client.select("dispatch_assignments", select="truck_id,trailer_id")
+    rows = client.select_all("dispatch_assignments", select="truck_id,trailer_id", page_size=1000, hard_cap=50000)
     return {r["truck_id"]: r["trailer_id"] for r in rows if r.get("truck_id")}
 
 
@@ -204,7 +204,7 @@ def load_all_unit_ids() -> dict[str, list[str]]:
     except Exception:
         return {"truck": [], "trailer": []}
 
-    rows = client.select("assets_current", select="asset_type,asset_id")
+    rows = client.select_all("assets_current", select="asset_type,asset_id", page_size=1000, hard_cap=50000)
     result: dict[str, list[str]] = {"truck": [], "trailer": []}
     for r in rows:
         atype = r.get("asset_type", "")
@@ -313,6 +313,7 @@ def load_hourly_evidence_timeline(
     unit_col = "truck_id" if unit_type == "truck" else "trailer_id"
     filters: dict[str, Any] = {
         unit_col: f"eq.{unit_id}",
+        "source": "eq.auto",
         "and": f"(hour_start.gte.{start.isoformat()},hour_start.lte.{end.isoformat()})",
     }
 
@@ -351,6 +352,10 @@ def load_hourly_evidence_timeline(
             partner_type = "yard"
             yard = str(row.get("truck_yard") or row.get("trailer_yard") or "Yard")
             partner_id = yard
+        elif status != "paired":
+            # Near/review evidence should remain in the detail table, but it should
+            # not draw assignment timeline runs or make a truck look matched.
+            continue
 
         segments.append(TimelineSegment(
             unit_id=unit_id,
@@ -365,6 +370,41 @@ def load_hourly_evidence_timeline(
             confidence=round(float(row.get("confidence") or 0), 3),
         ))
     return segments
+
+
+def load_hourly_evidence_rows(
+    unit_id: str,
+    unit_type: str,
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, Any]]:
+    """Load raw hourly evidence rows for one unit, paged past PostgREST caps."""
+    try:
+        client = _get_client()
+    except Exception as e:
+        logger.warning("Hourly evidence details unavailable: %s", e)
+        return []
+
+    start = _ensure_aware(start)
+    end = _ensure_aware(end)
+    unit_col = "truck_id" if unit_type == "truck" else "trailer_id"
+    filters: dict[str, Any] = {
+        unit_col: f"eq.{unit_id}",
+        "source": "eq.auto",
+        "and": f"(hour_start.gte.{start.isoformat()},hour_start.lte.{end.isoformat()})",
+    }
+
+    try:
+        return client.select_all(
+            "asset_pair_hourly_evidence",
+            filters=filters,
+            order="hour_start.asc,trailer_id.asc,truck_id.asc",
+            page_size=1000,
+            hard_cap=50000,
+        )
+    except Exception as e:
+        logger.info("Hourly evidence detail query unavailable: %s", e)
+        return []
 
 
 def load_usage_daily_summary(start: datetime, end: datetime) -> list[dict[str, Any]]:
@@ -459,6 +499,92 @@ def load_recent_match_reviews(limit: int = 1000) -> list[dict[str, Any]]:
     except Exception as e:
         logger.info("GPS match review export unavailable: %s", e)
         return []
+
+
+def load_trailer_activity_summary(start: datetime, end: datetime) -> list[dict[str, Any]]:
+    """Load trailer activity summary rows for unmatched-moving-trailer alerting."""
+    try:
+        client = _get_client()
+    except Exception as e:
+        logger.warning("Trailer activity summary unavailable: %s", e)
+        return []
+    start = _ensure_aware(start)
+    end = _ensure_aware(end)
+    filters: dict[str, Any] = {
+        "service_date": f"gte.{start.date().isoformat()}",
+        "and": f"(service_date.lte.{end.date().isoformat()})",
+    }
+    try:
+        return client.select_all(
+            "trailer_activity_summary",
+            filters=filters,
+            order="service_date.desc,trailer_id.asc",
+            page_size=1000,
+            hard_cap=50000,
+        )
+    except Exception as e:
+        logger.info("Trailer activity summary query unavailable: %s", e)
+        return []
+
+
+def load_manual_pair_assignments(active_only: bool = True) -> list[dict[str, Any]]:
+    """Load manual truck/trailer pair assignments."""
+    try:
+        client = _get_client()
+    except Exception as e:
+        logger.warning("Manual pair assignments unavailable: %s", e)
+        return []
+    filters: dict[str, Any] = {}
+    if active_only:
+        filters["active"] = "eq.true"
+    try:
+        return client.select_all(
+            "manual_pair_assignments",
+            filters=filters,
+            order="assigned_at.desc",
+            page_size=500,
+            hard_cap=5000,
+        )
+    except Exception as e:
+        logger.info("Manual pair assignments query unavailable: %s", e)
+        return []
+
+
+def save_manual_pair_assignment(row: dict[str, Any]) -> bool:
+    """Upsert a manual pair assignment."""
+    try:
+        client = _get_client()
+    except Exception:
+        return False
+    try:
+        client.upsert(
+            "manual_pair_assignments",
+            [row],
+            on_conflict="truck_id,trailer_id,start_date",
+        )
+        return True
+    except Exception as e:
+        logger.warning("Failed to save manual pair assignment: %s", e)
+        return False
+
+
+def deactivate_manual_pair_assignment(assignment_id: int) -> bool:
+    """Mark a manual assignment as inactive (unassign)."""
+    try:
+        client = _get_client()
+    except Exception:
+        return False
+    try:
+        from datetime import datetime as dt, timezone as tz
+        client.patch(
+            "manual_pair_assignments",
+            {"active": False, "unassigned_at": dt.now(tz.utc).isoformat()},
+            filters={"id": f"eq.{assignment_id}"},
+        )
+        return True
+    except Exception as e:
+        logger.warning("Failed to deactivate manual pair assignment: %s", e)
+        return False
 
 
 def _row_to_asset(row: dict[str, Any]) -> Asset:

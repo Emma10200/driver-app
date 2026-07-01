@@ -111,6 +111,16 @@ def _gps_map_requested() -> bool:
     )
 
 
+def _dispatch_board_requested() -> bool:
+    """Local route check for the read-only dispatch board web UI."""
+    route = _query_param_value("route").strip().lower().replace("_", "-")
+    return (
+        _truthy_query_param(_query_param_value("dispatch"))
+        or _truthy_query_param(_query_param_value("board"))
+        or route in {"dispatch", "dispatch-board", "board", "load-board"}
+    )
+
+
 def _safety_upload_token() -> str:
     """Return a recipient-specific safety upload token, if present."""
     for key in ("safety_upload", "safety_token"):
@@ -194,6 +204,17 @@ if _gps_map_requested():
     from services.gps_map_page import render_gps_map_page
 
     render_gps_map_page()
+    render_version_footer()
+    st.stop()
+
+
+# Read-only web dispatch board mirror. Reachable via ?dispatch=1 or
+# ?route=dispatch-board. Google Sheets remains editable source of truth while
+# dispatchers can try the web view.
+if _dispatch_board_requested():
+    from services.dispatch_board_page import render_dispatch_board_page
+
+    render_dispatch_board_page()
     render_version_footer()
     st.stop()
 
