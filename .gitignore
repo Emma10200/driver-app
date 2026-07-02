@@ -21,5 +21,6 @@ submissions/
 *.log
 logs/
 gps_reports/
+rate_conf_samples/
 .DS_Store
 Thumbs.db
