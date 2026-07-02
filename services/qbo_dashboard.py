@@ -72,7 +72,6 @@ QBO_MISSING_VENDORS_KEY = "qbo_missing_vendors"
 QBO_RETRY_FILTER_KEY = "qbo_retry_filter"
 QBO_INVOICE_AUDIT_KEY = "qbo_invoice_audit"
 QBO_INVOICE_TARGET_COMPANY_KEY = "qbo_invoice_target_company"
-_DATE_USE_ROW = "Use row dates (or most recent Friday)"
 _TEMPLATE_OPTIONS = {
     "invoices": "Invoices",
     "driver_statements": "Driver Statements / Checks",
@@ -231,11 +230,22 @@ server_metadata_url = "https://accounts.google.com/.well-known/openid-configurat
         st.json(_streamlit_auth_diagnostics())
 
 
-def _date_options() -> list[str]:
-    today = datetime.now()
+def _default_driver_check_date(today: date | None = None) -> date:
+    """Default driver-statement check date to the most recent Friday."""
+    today = today or date.today()
     days_since_friday = (today.weekday() - 4) % 7
-    friday = today - timedelta(days=days_since_friday)
-    return [_DATE_USE_ROW] + [(friday - timedelta(days=7 * i)).strftime("%Y-%m-%d") for i in range(6)]
+    return today - timedelta(days=days_since_friday)
+
+
+def _check_date_override(value: date | datetime | str | None) -> str:
+    """Convert the calendar widget value to the QBO parser's YYYY-MM-DD override."""
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value or "").strip()
 
 
 def _format_amount(value: Any) -> str:
@@ -673,8 +683,13 @@ def _render_importer(
                     st.caption("Posts as CreditCard purchases. Only Fuel Card - EFS rows are imported.")
 
             if template_key == "driver_statements":
-                selected_date = st.selectbox("Check date", _date_options(), help="Optional override; otherwise row dates are used.")
-                override_date = "" if selected_date == _DATE_USE_ROW else selected_date
+                selected_date = st.date_input(
+                    "Check date",
+                    value=_default_driver_check_date(),
+                    key="qbo_driver_statement_check_date",
+                    help="Calendar date to use for every check in this driver statement import.",
+                )
+                override_date = _check_date_override(selected_date)
 
             uploaded = st.file_uploader("Source file", type=["csv", "xlsx", "xlsm", "xls"])
     retry_filter = _active_retry_filter(template_key)

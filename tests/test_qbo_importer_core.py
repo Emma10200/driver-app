@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date, datetime
+
 import pytest
 
 from qbo.duplicate_check import build_invoice_key, build_money_code_key
@@ -17,7 +19,9 @@ from services.qbo_driver_statement_preview import (
 from services.qbo_dashboard import (
     _apply_retry_filter,
     _build_preview,
+    _check_date_override,
     _create_missing_vendors,
+    _default_driver_check_date,
     _driver_statement_vendor_refs,
     _find_missing_driver_statement_vendors,
     _friendly_history_reason,
@@ -36,6 +40,19 @@ def test_qbo_allowed_emails_from_env(monkeypatch):
         "emma@prestige.inc",
         "owner@example.com",
     }
+
+
+def test_default_driver_check_date_is_most_recent_friday() -> None:
+    assert _default_driver_check_date(date(2026, 7, 2)) == date(2026, 6, 26)
+    assert _default_driver_check_date(date(2026, 7, 3)) == date(2026, 7, 3)
+    assert _default_driver_check_date(date(2026, 7, 4)) == date(2026, 7, 3)
+
+
+def test_check_date_override_formats_calendar_value() -> None:
+    assert _check_date_override(date(2026, 7, 15)) == "2026-07-15"
+    assert _check_date_override(datetime(2026, 7, 16, 8, 30)) == "2026-07-16"
+    assert _check_date_override("2026-07-17") == "2026-07-17"
+    assert _check_date_override(None) == ""
 
 
 def test_file_loader_reads_csv_bytes():
