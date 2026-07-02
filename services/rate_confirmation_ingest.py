@@ -34,6 +34,10 @@ DEFAULT_MAILBOX_FOLDER = "INBOX"
 
 RATE_CONF_TABLE = "rate_confirmation_documents"
 NOISE_DOMAINS = {"accounts.google.com", "google.com"}
+# User-requested sender exclusion: BOL chatter is not rate-confirmation input.
+# Do not exclude statements@prestigetransportation.com; statement messages may
+# still carry dispatch/accounting context the user wants retained.
+EXCLUDED_SENDER_EMAILS = {"bol@prestige.inc"}
 
 SOURCE_RANK = {"subject": 0, "filename": 1, "email_body": 2, "quoted_body": 3, "pdf_text": 4}
 LABEL_RANK = {"truck_label": 0, "number": 1, "trailer_label": 2}
@@ -396,13 +400,16 @@ def select_single_truck(
     """Return selected truck metadata plus alert fields.
 
     Resolution order:
-      1. **Dispatcher filter**: if the sender maps to a known dispatcher, narrow
-         candidates to that dispatcher's trucks. This is near-authoritative — a
-         dispatcher almost always sends rate-cons for their own trucks.
-      2. **Source cascade**: subject > filename > email_body > pdf_text.
-      3. **GPS active tie-break**: among remaining ties, prefer trucks with a
+        1. **Global exact evidence**: an exact truck label/subject/filename/body
+            match wins before dispatcher ownership. Dispatchers sometimes send
+            loads for trucks not assigned to them (e.g. coverage/helping another
+            board), so dispatcher is strong context but not a hard gate.
+        2. **Dispatcher filter**: if no clear global exact match exists, use the
+            sender's dispatcher assignment to resolve noisy/fuzzy candidates.
+        3. **Source cascade**: subject > filename > email_body > quoted_body > pdf_text.
+        4. **GPS active tie-break**: among remaining ties, prefer trucks with a
          recent GPS ping.
-      4. **Ambiguous**: only if all above fail.
+        5. **Ambiguous**: only if all above fail.
     """
     if not matches:
         return {
@@ -420,7 +427,14 @@ def select_single_truck(
 
     active = gps_active_trucks or set()
 
-    # Step 1: dispatcher pre-filter. If sender is a known dispatcher, try to
+    # Step 1: exact evidence before dispatcher ownership. This prevents a real
+    # exact truck (e.g. 9988) from being discarded just because the sender is
+    # temporarily covering another dispatcher's unit.
+    result = _global_exact_selection(list(matches), active)
+    if result:
+        return result
+
+    # Step 2: dispatcher pre-filter. If sender is a known dispatcher, try to
     # resolve using ONLY that dispatcher's trucks first.
     dispatcher_filtered = list(matches)
     used_dispatcher_filter = False
@@ -434,12 +448,12 @@ def select_single_truck(
             dispatcher_filtered = disp_matches
             used_dispatcher_filter = True
 
-    # Step 2: source cascade on the (possibly dispatcher-filtered) pool
+    # Step 3: source cascade on the (possibly dispatcher-filtered) pool
     result = _source_cascade(dispatcher_filtered, active, is_dispatcher_filtered=used_dispatcher_filter)
     if result:
         return result
 
-    # Step 3: if dispatcher filter produced nothing useful, retry with full pool
+    # Step 4: if dispatcher filter produced nothing useful, retry with full pool
     if used_dispatcher_filter:
         result = _source_cascade(list(matches), active, is_dispatcher_filtered=False)
         if result:
@@ -448,6 +462,53 @@ def select_single_truck(
     # Fallback
     best = matches[0]
     return _build_selected(best, [str(best["matched_truck"])])
+
+
+def _global_exact_selection(matches: list[dict[str, Any]], gps_active: set[str]) -> dict[str, Any] | None:
+    """Select clear exact matches before applying dispatcher ownership.
+
+    Dispatcher context is valuable, but exact evidence from the email itself is
+    stronger. If exact evidence ties across multiple trucks, return None so the
+    dispatcher/GPS/full cascade can resolve it instead of guessing too early.
+    """
+    exact_matches = [m for m in matches if str(m.get("match_type")) == "exact"]
+    if not exact_matches:
+        return None
+
+    # Explicit "TRUCK ###" anywhere is the strongest exact signal and should
+    # beat bare subject/body numbers.
+    labeled = [m for m in exact_matches if str(m.get("label")) == "truck_label"]
+    if labeled:
+        tied_trucks = sorted({str(m["matched_truck"]) for m in labeled})
+        if len(tied_trucks) == 1:
+            return _build_selected(labeled[0], tied_trucks)
+        active_matches = [m for m in labeled if str(m["matched_truck"]) in gps_active]
+        active_trucks = sorted({str(m["matched_truck"]) for m in active_matches})
+        if len(active_trucks) == 1:
+            return _build_selected(active_matches[0], active_trucks, tiebreak=True)
+        return None
+
+    # Then exact bare numbers by source priority. A unique exact body match can
+    # still win globally, but multiple exact body numbers are left for dispatcher
+    # narrowing because bodies are noisy.
+    for source in ("subject", "filename", "email_body", "quoted_body", "pdf_text"):
+        source_matches = [
+            m for m in exact_matches
+            if str(m.get("source")) == source and str(m.get("label")) == "number"
+        ]
+        if not source_matches:
+            continue
+        tied_trucks = sorted({str(m["matched_truck"]) for m in source_matches})
+        if len(tied_trucks) == 1:
+            return _build_selected(source_matches[0], tied_trucks, body_noise=source in {"email_body", "quoted_body", "pdf_text"})
+        active_matches = [m for m in source_matches if str(m["matched_truck"]) in gps_active]
+        active_trucks = sorted({str(m["matched_truck"]) for m in active_matches})
+        if len(active_trucks) == 1:
+            return _build_selected(active_matches[0], active_trucks, tiebreak=True)
+        return None
+    return None
+
+
 def _source_cascade(
     matches: list[dict[str, Any]],
     gps_active: set[str],
@@ -618,6 +679,7 @@ def build_document_rows_from_message(
     gps_active_trucks: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     from_name, from_addr = parseaddr(msg.get("From", ""))
+    from_addr_lower = from_addr.lower().strip()
     domain = from_addr.split("@", 1)[-1].lower() if "@" in from_addr else ""
     subject = _decode(msg.get("Subject"))
     message_id = str(msg.get("Message-ID") or "").strip()
@@ -626,13 +688,10 @@ def build_document_rows_from_message(
     body = message_body_text(msg)
     attachments = _attachment_parts(msg)
 
-    if domain in NOISE_DOMAINS:
+    if from_addr_lower in EXCLUDED_SENDER_EMAILS or domain in NOISE_DOMAINS:
         return []
 
     sender_dispatcher = resolve_sender_dispatcher(from_addr, _decode(from_name), board)
-
-    if domain in NOISE_DOMAINS:
-        return []
 
     # Attachment rows are the core unit. If there is no attachment but the message
     # is clearly an assignment/cancel/rate-con control email, create one message row.

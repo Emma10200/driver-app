@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from email.message import EmailMessage
+
 from services.rate_confirmation_ingest import (
     BoardTruck,
+    build_document_rows_from_message,
     candidate_matches,
     extract_number_mentions,
     select_single_truck,
@@ -97,6 +100,22 @@ def test_dispatcher_tiebreak_picks_dispatchers_truck() -> None:
     assert result["alert_level"] == ""
 
 
+def test_global_exact_match_beats_dispatcher_assignment() -> None:
+    """An exact truck match should win even if sender maps to another dispatcher."""
+    board = {
+        "333": BoardTruck(truck_id="333", dispatcher="Anna"),
+        "9988": BoardTruck(truck_id="9988", dispatcher="Matt"),
+    }
+    subject = extract_number_mentions("TRUCK 9988", "subject")
+    body = extract_number_mentions("ref 333", "email_body")
+    matches = candidate_matches(subject + body, board)
+    result = select_single_truck(matches, sender_dispatcher="Anna")
+
+    assert result["matched_truck_id"] == "9988"
+    assert result["match_status"] == "matched"
+    assert result["match_type"] == "exact"
+
+
 def test_gps_active_tiebreak() -> None:
     """When dispatcher can't break the tie, prefer the GPS-active truck."""
     board = {
@@ -176,3 +195,23 @@ def test_body_bare_number_near_match_not_allowed() -> None:
     matches = candidate_matches(mentions, board)
 
     assert not [m for m in matches if m["match_type"] == "one_digit_off"]
+
+
+def test_bol_sender_is_excluded_but_statements_sender_is_retained() -> None:
+    """Exclude only BOL chatter; do not broadly exclude statements emails."""
+    board = {"649": BoardTruck(truck_id="649", dispatcher="Carlos CA")}
+
+    bol_msg = EmailMessage()
+    bol_msg["From"] = "Bol Department <bol@prestige.inc>"
+    bol_msg["Subject"] = "TRUCK 649"
+    bol_msg.set_content("TRUCK 649")
+
+    statements_msg = EmailMessage()
+    statements_msg["From"] = "Statements <statements@prestigetransportation.com>"
+    statements_msg["Subject"] = "TRUCK 649"
+    statements_msg.set_content("TRUCK 649")
+
+    assert build_document_rows_from_message(bol_msg, board) == []
+    rows = build_document_rows_from_message(statements_msg, board)
+    assert len(rows) == 1
+    assert rows[0]["matched_truck_id"] == "649"
