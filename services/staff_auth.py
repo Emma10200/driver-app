@@ -109,7 +109,10 @@ def render_staff_login_gate(
     st.title(f"🔒 {title}")
     st.caption(caption)
 
-    st.caption("Access is limited to the contact-directory staff list.")
+    st.caption(
+        "Dispatcher emails listed in the Company Contacts / Info page have access. "
+        "Accounting and approved company contacts are included too."
+    )
 
     if not hasattr(st, "login") or not hasattr(st, "user"):
         st.error("This Streamlit version does not support native Google login.")
@@ -134,7 +137,9 @@ def render_staff_login_gate(
 
     email = google_user_email() or "unknown account"
     st.error(f"{email} is signed in but is not allowed to view this page.")
-    st.caption("Access is controlled by the contact directory plus the QBO accounting allowlist.")
+    st.caption(
+        "Access is controlled by the contacts page dispatcher emails plus the QBO accounting allowlist."
+    )
     if st.button("Sign out of Google", use_container_width=True):
         try:
             st.logout()
