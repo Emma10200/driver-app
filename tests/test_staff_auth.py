@@ -5,20 +5,54 @@ from types import SimpleNamespace
 from services import staff_auth
 
 
-def test_staff_allowed_emails_mirrors_qbo_allowlist(monkeypatch):
+def test_contact_directory_allowed_emails_include_company_dispatchers_and_deyana():
+    companies = [{"dispatch_email": "Dispatch@Prestige.Inc"}]
+    contacts = [
+        {"email": "dispatch7@prestige.inc"},
+        {"email": "dispatch@xpresstransinc.com"},
+        {"email": ""},
+    ]
+
+    assert staff_auth.contact_directory_allowed_emails(companies, contacts) == {
+        "dispatch@prestige.inc",
+        "dispatch7@prestige.inc",
+        "dispatch@xpresstransinc.com",
+        "deyana@prestigetransportation.com",
+    }
+
+
+def test_staff_allowed_emails_combines_qbo_contacts_and_accounts_default(monkeypatch):
     monkeypatch.setattr(
         staff_auth,
         "qbo_allowed_emails",
-        lambda: {"accounts@prestige.inc", "owner@example.com"},
+        lambda: {"owner@example.com"},
     )
+    monkeypatch.setattr(staff_auth, "_safe_contact_directory_allowed_emails", lambda: {"dispatch1@prestige.inc"})
 
-    assert staff_auth.staff_allowed_emails() == {"accounts@prestige.inc", "owner@example.com"}
+    assert staff_auth.staff_allowed_emails() == {
+        "accounts@prestige.inc",
+        "owner@example.com",
+        "dispatch1@prestige.inc",
+    }
 
 
 def test_staff_allowed_emails_defaults_to_accounts_when_qbo_secret_missing(monkeypatch):
     monkeypatch.setattr(staff_auth, "qbo_allowed_emails", lambda: set())
+    monkeypatch.setattr(staff_auth, "_safe_contact_directory_allowed_emails", lambda: set())
 
     assert staff_auth.staff_allowed_emails() == {"accounts@prestige.inc"}
+
+
+def test_staff_allowed_emails_include_dispatch_seed_and_deyana(monkeypatch):
+    monkeypatch.setattr(staff_auth, "qbo_allowed_emails", lambda: set())
+
+    allowed = staff_auth.staff_allowed_emails()
+
+    assert "accounts@prestige.inc" in allowed
+    assert "dispatch7@prestige.inc" in allowed
+    assert "dispatch7@prestigecalifornia.com" in allowed
+    assert "dispatch@xpresstransinc.com" in allowed
+    assert "deyana@prestigetransportation.com" in allowed
 
 
 def test_staff_access_granted_for_allowed_google_user(monkeypatch):

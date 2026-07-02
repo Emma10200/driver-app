@@ -6,11 +6,13 @@ from typing import Any
 
 import streamlit as st
 
+from services.dispatch_contacts import load_company_info, load_dispatcher_contacts
 from services.qbo_auth import qbo_allowed_emails
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_ALLOWED_EMAIL = "accounts@prestige.inc"
+_EXTRA_CONTACT_ALLOWED_EMAILS = {"deyana@prestigetransportation.com"}
 
 
 def _mapping_get(mapping: Any, key: str) -> Any:
@@ -22,14 +24,55 @@ def _mapping_get(mapping: Any, key: str) -> Any:
         return getattr(mapping, key, None)
 
 
+def _normalize_email(value: Any) -> str:
+    email = str(value or "").strip().lower()
+    return email if "@" in email and "." in email.rsplit("@", 1)[-1] else ""
+
+
+def contact_directory_allowed_emails(
+    companies: list[dict[str, Any]] | None = None,
+    contacts: list[dict[str, Any]] | None = None,
+) -> set[str]:
+    """Emails referenced by the dispatch-board contacts dialog.
+
+    Includes company dispatch inboxes, dispatcher/division emails, shared inboxes,
+    and explicitly approved internal contacts that are referenced operationally
+    but not stored as email fields in the source phone sheet.
+    """
+    emails = set(_EXTRA_CONTACT_ALLOWED_EMAILS)
+    if companies is None:
+        companies = load_company_info()
+    if contacts is None:
+        contacts = load_dispatcher_contacts()
+
+    for company in companies:
+        email = _normalize_email(company.get("dispatch_email"))
+        if email:
+            emails.add(email)
+    for contact in contacts:
+        email = _normalize_email(contact.get("email"))
+        if email:
+            emails.add(email)
+    return emails
+
+
+def _safe_contact_directory_allowed_emails() -> set[str]:
+    try:
+        return contact_directory_allowed_emails()
+    except Exception as exc:  # pragma: no cover - Supabase/config dependent
+        logger.warning("Contact-directory staff allowlist unavailable, using explicit extras: %s", exc)
+        return set(_EXTRA_CONTACT_ALLOWED_EMAILS)
+
+
 def staff_allowed_emails() -> set[str]:
     """Return the staff SSO allowlist used for sensitive internal pages.
 
-    For now this intentionally mirrors the QBO importer allowlist. If the QBO
-    secret is not present in a local/dev environment, keep the requested single
-    accounting login as the safe default instead of opening access broadly.
+    GPS and dispatch-board access is broader than QBO: it includes the QBO
+    accounting login plus every email referenced in the editable contacts page.
+    This keeps the page user list editable/visible without requiring a Secrets
+    deploy for each dispatcher email.
     """
-    return qbo_allowed_emails() or {_DEFAULT_ALLOWED_EMAIL}
+    return {_DEFAULT_ALLOWED_EMAIL} | qbo_allowed_emails() | _safe_contact_directory_allowed_emails()
 
 
 def google_user_is_logged_in() -> bool:
@@ -66,7 +109,7 @@ def render_staff_login_gate(
     st.title(f"🔒 {title}")
     st.caption(caption)
 
-    st.caption("Access is currently limited to the accounting allowlist.")
+    st.caption("Access is limited to the contact-directory staff list.")
 
     if not hasattr(st, "login") or not hasattr(st, "user"):
         st.error("This Streamlit version does not support native Google login.")
@@ -91,7 +134,7 @@ def render_staff_login_gate(
 
     email = google_user_email() or "unknown account"
     st.error(f"{email} is signed in but is not allowed to view this page.")
-    st.caption("Access is controlled by the QBO importer allowlist (`qbo.allowed_emails` / `QBO_ALLOWED_EMAILS`).")
+    st.caption("Access is controlled by the contact directory plus the QBO accounting allowlist.")
     if st.button("Sign out of Google", use_container_width=True):
         try:
             st.logout()

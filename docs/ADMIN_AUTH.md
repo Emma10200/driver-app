@@ -3,8 +3,8 @@
 The public driver application does not require login. Staff-only internal pages are protected separately depending on their audience.
 
 - The hidden admin dashboard route (`?dashboard=1`) uses the admin auth setup below.
-- The QuickBooks importer (`?qbo=1`), Safety Paperwork Portal (`?safety=1`), GPS Fleet Map (`?gps=1` / `?route=gps-map`), and Dispatch Board (`?dispatch=1` / `?route=dispatch-board`) use Google SSO with the QBO allowlist.
-- For the current rollout, the QBO/staff allowlist should contain only `accounts@prestige.inc` unless explicitly expanded later.
+- The QuickBooks importer (`?qbo=1`) and Safety Paperwork Portal (`?safety=1`) use Google SSO with the QBO allowlist.
+- The GPS Fleet Map (`?gps=1` / `?route=gps-map`) and Dispatch Board (`?dispatch=1` / `?route=dispatch-board`) use Google SSO with a broader staff allowlist: `accounts@prestige.inc`, every email shown in the dispatch contacts page, and `deyana@prestigetransportation.com`.
 
 ## Current rollout plan
 
@@ -40,7 +40,7 @@ For Google-only mode, `ADMIN_PASSWORD` can be omitted or blank.
 
 ## QBO/staff page allowlist
 
-These sensitive pages use the same approved-account list as the QuickBooks importer:
+QBO/accounting pages use this approved-account list:
 
 ```toml
 [qbo]
@@ -53,7 +53,9 @@ For local `.env` usage, the equivalent is:
 QBO_ALLOWED_EMAILS=accounts@prestige.inc
 ```
 
-Keep this list explicit. Do not rely on "any signed-in Google user" for the dispatch board or GPS map.
+The dispatch board and GPS map additionally allow every email referenced in the dispatch contacts page (company dispatch inboxes, dispatcher emails, and shared Xpress inbox) plus `deyana@prestigetransportation.com`. This is code-driven so adding a dispatcher contact does not require editing Streamlit Secrets.
+
+Keep all allowlists explicit. Do not rely on "any signed-in Google user" for internal pages.
 
 ## Google OAuth secrets
 
