@@ -650,7 +650,8 @@ def _render_alert_bell(alerts: list[dict[str, Any]]) -> None:
     count = len(alerts)
     with st.popover(f"🔔 {count} Alert{'s' if count != 1 else ''}" if count else "🔔 Alerts", use_container_width=True):
         if not alerts:
-            st.caption("No rate-confirmation alerts right now.")            return
+            st.caption("No rate-confirmation alerts right now.")
+            return
         category_counts: dict[str, int] = defaultdict(int)
         for doc in alerts:
             category_counts[_alert_category(doc)[0]] += 1
