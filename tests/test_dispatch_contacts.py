@@ -48,6 +48,24 @@ def test_shared_xpress_email_excluded_from_dispatcher_map() -> None:
     assert mapping["matt@prestige.inc"] == "Matt"
 
 
+def test_contact_seed_includes_operations_and_zack_but_not_art_or_arc() -> None:
+    grouped = group_contacts_by_dispatcher(SEED_DISPATCHER_CONTACTS)
+
+    assert "Operations" in grouped
+    assert grouped["Operations"][0]["division"] == "Xpress Trans Inc"
+    assert grouped["Operations"][0]["email"] == XPRESS_SHARED_EMAIL
+    assert grouped["Operations"][0]["phone"] == "224-341-6014"
+
+    assert "Zack" in grouped
+    assert grouped["Zack"][0]["division"] == "Xpress Trans Inc"
+    assert grouped["Zack"][0]["email"] == XPRESS_SHARED_EMAIL
+    assert grouped["Zack"][0]["phone"] == "224-522-1354"
+
+    normalized_names = {name.strip().lower() for name in grouped}
+    assert "art" not in normalized_names
+    assert "arc" not in normalized_names
+
+
 def test_company_seeds_have_mc_dot_fin() -> None:
     assert {c["division"] for c in SEED_COMPANIES} == {
         "Prestig Inc",
@@ -58,3 +76,6 @@ def test_company_seeds_have_mc_dot_fin() -> None:
         assert company["mc_number"].startswith("MC ")
         assert company["dot_number"].startswith("DOT ")
         assert company["fin_number"].startswith("FIN ")
+
+    xpress = next(c for c in SEED_COMPANIES if c["division"] == "Xpress Trans Inc")
+    assert xpress["setup_contact"] == "Dayana Sheytanova / Zack"

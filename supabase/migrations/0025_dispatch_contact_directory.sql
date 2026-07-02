@@ -63,7 +63,7 @@ insert into public.dispatch_company_info
 values
     ('Prestig Inc', 'MC 553373', 'DOT 1454866', 'FIN 20-4146962', 'dispatch@prestige.inc', '773-303-4616', '224-715-1371', 'Deyana Koleva', '3810 North Ave, Stone Park, IL 60165', 1),
     ('Prestige Transportation Inc', 'MC 814849', 'DOT 2374229', 'FIN 90-0930803', 'dispatch@prestigecalifornia.com', '877-549-9529', '224-545-2148', 'Lubomir Anguelov', '8622 Hemlock Ave, Fontana, CA 92335', 2),
-    ('Xpress Trans Inc', 'MC 715183', 'DOT 2038003', 'FIN 27-2631230', 'dispatch@xpresstransinc.com', '224-341-6014', '224-522-1354', 'Dayana Sheytanova / Zach', '2905 W Lake St, Melrose Park, IL 60160', 3)
+    ('Xpress Trans Inc', 'MC 715183', 'DOT 2038003', 'FIN 27-2631230', 'dispatch@xpresstransinc.com', '224-341-6014', '224-522-1354', 'Dayana Sheytanova / Zack', '2905 W Lake St, Melrose Park, IL 60160', 3)
 on conflict (division) do nothing;
 
 -- ---------------------------------------------------------------------------
@@ -78,11 +78,6 @@ from (values
     ('Anna',      'Prestige Transportation Inc',  'dispatch5@prestigecalifornia.com', '708-356-4413', '213', 2),
     ('Anna',      'Xpress Trans Inc',             'dispatch@xpresstransinc.com',      '708-356-4423', '203', 3),
     ('Anna',      'Personal Cell (internal)',     '',                                 '773-396-7011', '',    4),
-
-    ('Art',       'Prestig Inc',                  'dispatch2@prestige.inc',           '773-726-3354', '',    1),
-    ('Art',       'Prestige Transportation Inc',  'dispatch2@prestigecalifornia.com', '708-356-4422', '212', 2),
-    ('Art',       'Xpress Trans Inc',             'dispatch@xpresstransinc.com',      '',             '201', 3),
-    ('Art',       'Personal Cell (internal)',     '',                                 '773-603-5041', '',    4),
 
     ('Brittany',  'Prestig Inc',                  'dispatch3@prestige.inc',           '773-440-5468', '',    1),
     ('Brittany',  'Prestige Transportation Inc',  'dispatch3@prestigecalifornia.com', '',             '',    2),
@@ -112,6 +107,9 @@ from (values
     ('Sanjuana',  'Prestige Transportation Inc',  'dispatch6@prestigecalifornia.com', '909-302-0191', '315', 2),
     ('Sanjuana',  'Xpress Trans Inc',             'dispatch@xpresstransinc.com',      '909-302-0185', '305', 3),
 
-    ('Matt',      'Prestig Inc',                  'matt@prestige.inc',                '',             '',    1)
+    ('Matt',      'Prestig Inc',                  'matt@prestige.inc',                '',             '',    1),
+
+    ('Operations','Xpress Trans Inc',             'dispatch@xpresstransinc.com',      '224-341-6014', '',    1),
+    ('Zack',      'Xpress Trans Inc',             'dispatch@xpresstransinc.com',      '224-522-1354', '',    2)
 ) as seed(dispatcher_name, division, email, phone, extension, sort_order)
 where not exists (select 1 from public.dispatch_contact_entries);

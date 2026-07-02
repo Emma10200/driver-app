@@ -51,7 +51,7 @@ SEED_COMPANIES: list[dict[str, Any]] = [
         "dispatch_email": XPRESS_SHARED_EMAIL,
         "company_phone": "224-341-6014",
         "setup_phone": "224-522-1354",
-        "setup_contact": "Dayana Sheytanova / Zach",
+        "setup_contact": "Dayana Sheytanova / Zack",
         "address": "2905 W Lake St, Melrose Park, IL 60160",
         "sort_order": 3,
     },
@@ -72,10 +72,6 @@ SEED_DISPATCHER_CONTACTS: list[dict[str, Any]] = [
     _entry("Anna", "Prestige Transportation Inc", "dispatch5@prestigecalifornia.com", "708-356-4413", "213", 2),
     _entry("Anna", "Xpress Trans Inc", XPRESS_SHARED_EMAIL, "708-356-4423", "203", 3),
     _entry("Anna", "Personal Cell (internal)", "", "773-396-7011", "", 4),
-    _entry("Art", "Prestig Inc", "dispatch2@prestige.inc", "773-726-3354", "", 1),
-    _entry("Art", "Prestige Transportation Inc", "dispatch2@prestigecalifornia.com", "708-356-4422", "212", 2),
-    _entry("Art", "Xpress Trans Inc", XPRESS_SHARED_EMAIL, "", "201", 3),
-    _entry("Art", "Personal Cell (internal)", "", "773-603-5041", "", 4),
     _entry("Brittany", "Prestig Inc", "dispatch3@prestige.inc", "773-440-5468", "", 1),
     _entry("Brittany", "Prestige Transportation Inc", "dispatch3@prestigecalifornia.com", "", "", 2),
     _entry("Brittany", "Xpress Trans Inc", XPRESS_SHARED_EMAIL, "708-356-4421", "210", 3),
@@ -99,6 +95,8 @@ SEED_DISPATCHER_CONTACTS: list[dict[str, Any]] = [
     _entry("Sanjuana", "Prestige Transportation Inc", "dispatch6@prestigecalifornia.com", "909-302-0191", "315", 2),
     _entry("Sanjuana", "Xpress Trans Inc", XPRESS_SHARED_EMAIL, "909-302-0185", "305", 3),
     _entry("Matt", "Prestig Inc", "matt@prestige.inc", "", "", 1),
+    _entry("Operations", "Xpress Trans Inc", XPRESS_SHARED_EMAIL, "224-341-6014", "", 1),
+    _entry("Zack", "Xpress Trans Inc", XPRESS_SHARED_EMAIL, "224-522-1354", "", 2),
 ]
 
 _COMPANY_FIELDS = [
