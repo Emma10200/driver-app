@@ -28,6 +28,7 @@ from runtime_context import (
 )
 from services.admin_dashboard import render_admin_dashboard
 from services.error_log_service import log_application_error
+from services.internal_route_memory import remember_internal_route_for_login, restore_internal_route_after_login
 from services.qbo_dashboard import render_qbo_dashboard
 from state import init_session_state
 from ui.common import (
@@ -135,10 +136,25 @@ def _safety_upload_token() -> str:
     return ""
 
 
+def _internal_route_requested() -> bool:
+    return (
+        admin_dashboard_requested()
+        or qbo_importer_requested()
+        or qbo_oauth_callback_requested()
+        or _safety_portal_requested()
+        or _gps_map_requested()
+        or _dispatch_board_requested()
+    )
+
+
+restore_internal_route_after_login(current_route_requested=_internal_route_requested())
+
+
 # Standalone admin dashboard route. Reachable via ?dashboard=1; gated by admin
 # auth config (Google SSO, password fallback, or both). Short-circuits the
 # entire application flow so the dashboard renders by itself.
 if admin_dashboard_requested():
+    remember_internal_route_for_login("dashboard")
     render_admin_dashboard(SUBMISSIONS_DIR)
     render_version_footer()
     st.stop()
@@ -148,6 +164,7 @@ if admin_dashboard_requested():
 # the Intuit OAuth callback query param. This short-circuits the driver
 # application flow exactly like the admin dashboard route above.
 if qbo_importer_requested() or qbo_oauth_callback_requested():
+    remember_internal_route_for_login("qbo")
     render_qbo_dashboard()
     render_version_footer()
     st.stop()
@@ -180,6 +197,7 @@ if _recipient_safety_token:
 # ?route=safety. SSO-gated inside the page using the QBO allowlist. Lazy
 # import so a parser-side error cannot break overall startup.
 if _safety_portal_requested():
+    remember_internal_route_for_login("safety")
     from services.safety_portal_page import render_safety_portal_page
 
     render_safety_portal_page(SUBMISSIONS_DIR)
@@ -201,6 +219,7 @@ if _shop_inventory_requested():
 # GPS Fleet Map & Trailer-Truck Matching. Reachable via ?gps=1 or ?route=gps-map.
 # Reads from Supabase assets_current. No ELD API calls from this side.
 if _gps_map_requested():
+    remember_internal_route_for_login("gps-map")
     from services.staff_auth import render_staff_login_gate
 
     if not render_staff_login_gate(
@@ -221,6 +240,7 @@ if _gps_map_requested():
 # ?route=dispatch-board. Google Sheets remains editable source of truth while
 # dispatchers can try the web view.
 if _dispatch_board_requested():
+    remember_internal_route_for_login("dispatch-board")
     from services.staff_auth import render_staff_login_gate
 
     if not render_staff_login_gate(
