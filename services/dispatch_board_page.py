@@ -148,27 +148,53 @@ _BOARD_CSS = """
 .rate-pill-alert { border-color: #fca5a5; background: #fef2f2; color: #991b1b; }
 .rate-pill-warn { border-color: #fcd34d; background: #fffbeb; color: #92400e; }
 .rate-line { font-size: .70rem; color: #475569; max-width: 118px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rate-alert-panel {
-    margin: .75rem 0 1rem;
-    padding: .85rem;
-    border: 1px solid #fed7aa;
-    border-radius: 14px;
-    background: #fff7ed;
-}
-.rate-alert-title { font-weight: 900; color: #9a3412; margin-bottom: .45rem; }
-.rate-alert-group { margin-top: .55rem; font-weight: 850; color: #334155; }
-.rate-alert-item {
-    margin: .28rem 0;
-    padding: .45rem .55rem;
+.alert-bell-badge {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: .3rem;
+    cursor: pointer;
+    font-size: 1.35rem;
+    padding: .3rem .5rem;
     border-radius: 10px;
+    border: 1px solid #fed7aa;
+    background: #fff7ed;
+    color: #9a3412;
+    font-weight: 850;
+    letter-spacing: .02em;
+}
+.alert-bell-count {
+    position: absolute;
+    top: -4px;
+    right: -6px;
+    min-width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    background: #dc2626;
+    color: #fff;
+    font-size: .62rem;
+    font-weight: 900;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 4px;
+    border: 2px solid #fff;
+    line-height: 1;
+}
+.alert-list-item {
+    margin: .3rem 0;
+    padding: .42rem .52rem;
+    border-radius: 8px;
     border: 1px solid #fed7aa;
     background: #ffffff;
     color: #0f172a;
-    font-size: .80rem;
+    font-size: .78rem;
+    line-height: 1.28;
 }
-.rate-alert-red { border-left: 5px solid #dc2626; }
-.rate-alert-yellow { border-left: 5px solid #f59e0b; }
-.rate-alert-info { border-left: 5px solid #2563eb; }
+.alert-list-item-red { border-left: 4px solid #dc2626; }
+.alert-list-item-yellow { border-left: 4px solid #f59e0b; }
+.alert-list-item-info { border-left: 4px solid #2563eb; }
+.alert-group-header { font-weight: 900; color: #334155; margin: .55rem 0 .2rem; font-size: .82rem; }
 @media (max-width: 1200px) {
     .dispatch-card { grid-template-columns: 68px 84px minmax(150px,1.2fr) 98px minmax(120px,1fr) 70px minmax(130px,1fr) minmax(130px,1fr) 84px 112px 98px; }
     .dispatch-cell { font-size: .73rem; padding: .36rem; }
@@ -180,9 +206,17 @@ _BOARD_CSS = """
 def render_dispatch_board_page() -> None:
     st.markdown(_BOARD_CSS, unsafe_allow_html=True)
     rows = load_dispatch_board_rows()
-    rate_docs = [normalize_rate_confirmation_doc(doc) for doc in load_rate_confirmation_documents(days=14)]
+    try:
+        rate_docs = [normalize_rate_confirmation_doc(doc) for doc in load_rate_confirmation_documents(days=14)]
+    except Exception as exc:
+        st.warning(f"Could not load rate confirmations: {exc}")
+        rate_docs = []
     docs_by_truck = group_rate_confirmations_by_truck(rate_docs)
-    gps_by_truck = _load_current_truck_gps()
+    try:
+        gps_by_truck = _load_current_truck_gps()
+    except Exception as exc:
+        st.warning(f"Could not load GPS data: {exc}")
+        gps_by_truck = {}
     alerts = rate_confirmation_alerts(rate_docs)
 
     nav_left, nav_right = st.columns([1, 1])
@@ -228,7 +262,7 @@ def render_dispatch_board_page() -> None:
         st.info("No rows match the current filters.")
         return
 
-    _render_rate_confirmation_alerts(alerts)
+    _render_alert_bell(alerts)
     _render_board(filtered)
     _render_raw_inspector(filtered)
 
@@ -418,41 +452,42 @@ def _rate_conf_cell_html(row: dict[str, Any]) -> str:
     ])
 
 
-def _render_rate_confirmation_alerts(alerts: list[dict[str, Any]]) -> None:
-    if not alerts:
-        return
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for doc in alerts:
-        dispatcher = str(doc.get("board_dispatcher") or "").strip() or "Unmatched / Needs Review"
-        grouped[dispatcher].append(doc)
-
-    st.markdown(
-        f'<div class="rate-alert-panel"><div class="rate-alert-title">Rate Confirmation Alerts · {len(alerts)} item(s)</div>',
-        unsafe_allow_html=True,
-    )
-    for dispatcher in sorted(grouped):
-        st.markdown(f'<div class="rate-alert-group">{_h(dispatcher)}</div>', unsafe_allow_html=True)
-        for doc in grouped[dispatcher][:12]:
-            level = _doc_alert_level(doc) or "info"
-            truck = str(doc.get("matched_truck_id") or "").strip() or "no truck"
-            notes = str(doc.get("alert_notes") or "").strip() or _rate_doc_title(doc)
-            meta = " · ".join(part for part in [
-                f"Truck {truck}",
-                str(doc.get("match_status") or ""),
-                str(doc.get("match_source") or ""),
-                _short_dt(doc.get("received_at")),
-            ] if part)
-            st.markdown(
-                "".join([
-                    f'<div class="rate-alert-item rate-alert-{_h(level)}">',
-                    f'<b>{_h(meta)}</b><br>',
-                    f'{_h(notes)}<br>',
-                    f'<span class="dispatch-muted">{_h(_rate_doc_title(doc))}</span>',
-                    '</div>',
-                ]),
-                unsafe_allow_html=True,
-            )
-    st.markdown('</div>', unsafe_allow_html=True)
+def _render_alert_bell(alerts: list[dict[str, Any]]) -> None:
+    """Compact bell-badge notification: click to expand the alert list."""
+    count = len(alerts)
+    badge_html = (
+        f'<div class="alert-bell-badge">'
+        f'🔔 Alerts'
+        f'<span class="alert-bell-count">{count}</span>'
+        f'</div>'
+    ) if count else '<span class="dispatch-muted">🔔 No alerts</span>'
+    with st.popover(f"🔔 {count} Alert{'s' if count != 1 else ''}" if count else "🔔 Alerts", use_container_width=False):
+        if not alerts:
+            st.caption("No rate-confirmation alerts right now.")
+            return
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for doc in alerts:
+            dispatcher = str(doc.get("board_dispatcher") or "").strip() or "Unmatched / Needs Review"
+            grouped[dispatcher].append(doc)
+        for dispatcher in sorted(grouped):
+            st.markdown(f'<div class="alert-group-header">{_h(dispatcher)}</div>', unsafe_allow_html=True)
+            for doc in grouped[dispatcher][:15]:
+                level = _doc_alert_level(doc) or "info"
+                truck = str(doc.get("matched_truck_id") or "").strip() or "no truck"
+                notes = str(doc.get("alert_notes") or "").strip() or _rate_doc_title(doc)
+                meta = " · ".join(part for part in [
+                    f"Truck {truck}",
+                    str(doc.get("match_status") or ""),
+                    _short_dt(doc.get("received_at")),
+                ] if part)
+                st.markdown(
+                    f'<div class="alert-list-item alert-list-item-{_h(level)}">'
+                    f'<b>{_h(meta)}</b><br>'
+                    f'{_h(notes)}<br>'
+                    f'<span class="dispatch-muted">{_h(_rate_doc_title(doc))}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
 
 
 def _rate_doc_title(doc: dict[str, Any]) -> str:
