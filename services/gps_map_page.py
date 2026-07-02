@@ -153,8 +153,6 @@ def render_gps_map_page() -> None:
     visible_trailers = [t for t in trailers if _visible(t)]
     visible_assets = [a for a in assets if _visible(a)]
 
-    _render_sidebar_fleet_metrics(visible_trucks, visible_trailers, visible_assets, active_providers)
-
     focused_asset = _render_map_lookup_panel(visible_assets, unit_search)
 
     # --- Map (renders FIRST with just current positions) ---
@@ -349,13 +347,10 @@ def _render_fleet_overview_tab(assets: list[Asset], assignments: dict[str, str],
     n_trailers = sum(1 for r in fleet_rows if r["Type"] == "Trailer")
     n_in_yard = sum(1 for r in fleet_rows if r["Yard"])
     n_moving = sum(1 for r in fleet_rows if r["Speed"] and str(r["Speed"]) not in ("0", "0.0", ""))
-    with st.sidebar:
-        c1, c2 = st.columns(2)
-        c1.metric("Trucks", n_trucks)
-        c2.metric("Trailers", n_trailers)
-        c3, c4 = st.columns(2)
-        c3.metric("In Yard", n_in_yard)
-        c4.metric("Moving", n_moving)
+    st.caption(
+        f"Visible fleet: {n_trucks} trucks · {n_trailers} trailers · "
+        f"{n_in_yard} in yard · {n_moving} moving"
+    )
 
     if not fleet_rows:
         st.info("No units match the current filters." + (" Try clearing the search." if search_norm else ""))
@@ -2831,21 +2826,6 @@ def _render_map_controls(
         show_historical,
         unit_search.strip(),
     )
-
-
-def _render_sidebar_fleet_metrics(
-    visible_trucks: list[Asset],
-    visible_trailers: list[Asset],
-    visible_assets: list[Asset],
-    active_providers: set[str],
-) -> None:
-    """Render compact fleet counts in the sidebar to keep mobile map layout clean."""
-    with st.sidebar.expander("Fleet snapshot", expanded=True):
-        st.metric("Trucks", len(visible_trucks))
-        st.metric("Trailers", len(visible_trailers))
-        st.metric("Last-Known", sum(1 for a in visible_assets if _is_historical_last_known(a)))
-        st.metric("No Coordinates", sum(1 for a in visible_assets if not _has_coords(a)))
-        st.metric("Providers", len(active_providers))
 
 
 def _render_map_lookup_panel(assets: list[Asset], unit_search: str) -> Asset | None:

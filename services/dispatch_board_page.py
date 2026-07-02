@@ -251,11 +251,9 @@ def render_dispatch_board_page() -> None:
     rows = [_normalize_row(row) for row in rows]
     _attach_rate_confirmations(rows, docs_by_truck)
     _attach_current_gps(rows, gps_by_truck)
-    latest_publish = max((str(row.get("source_updated_at") or "") for row in rows), default="")
     dispatchers = sorted({row["dispatcher"] for row in rows if row["dispatcher"]})
     statuses = sorted({row["status"] for row in rows if row["status"]})
 
-    _render_metrics(rows, dispatchers, latest_publish, rate_docs, alerts)
     filtered = _render_filters(rows, dispatchers, statuses)
 
     col_sheet, col_csv, col_contacts, col_alerts = st.columns([1, 1, 1, 1])
@@ -284,20 +282,6 @@ def render_dispatch_board_page() -> None:
 
 
 _HIDDEN_STATUSES = {"INACTIVE", "VACATION", "OUT", "TERMINATED"}
-
-
-def _render_metrics(rows: list[dict[str, Any]], dispatchers: list[str], latest_publish: str, rate_docs: list[dict[str, Any]], alerts: list[dict[str, Any]]) -> None:
-    active = sum(1 for row in rows if row["status"].upper() == "ACTIVE")
-    no_gps = sum(1 for row in rows if _is_no_gps(row.get("last_gps", "")))
-    gps_active = sum(1 for row in rows if row.get("gps_active_24h"))
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-    col1.metric("Board Rows", len(rows))
-    col2.metric("Active", active)
-    col3.metric("Dispatchers", len(dispatchers))
-    col4.metric("GPS Active 24h", gps_active, delta=f"{no_gps} no gps" if no_gps else None)
-    col5.metric("Rate Cons", len(rate_docs))
-    col6.metric("RC Alerts", len(alerts), delta=None if not alerts else "review")
-    st.caption(f"Last board mirror: {_short_dt(latest_publish)}")
 
 
 def _render_filters(rows: list[dict[str, Any]], dispatchers: list[str], statuses: list[str]) -> list[dict[str, Any]]:
