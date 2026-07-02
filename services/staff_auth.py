@@ -113,6 +113,10 @@ def render_staff_login_gate(
         "Dispatcher emails listed in the Company Contacts / Info page have access. "
         "Accounting and approved company contacts are included too."
     )
+    st.caption(
+        "Use your assigned dispatch email, e.g. `dispatch#@prestige.inc`, "
+        "`dispatch#@prestigecalifornia.com`, or the shared Xpress dispatch email."
+    )
 
     if not hasattr(st, "login") or not hasattr(st, "user"):
         st.error("This Streamlit version does not support native Google login.")
