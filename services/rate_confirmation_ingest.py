@@ -344,13 +344,14 @@ def select_single_truck(
 ) -> dict[str, Any]:
     """Return selected truck metadata plus alert fields.
 
-    Uses a **source cascade**: subject beats filename beats email_body.
-    Within the best source, if multiple distinct trucks tie at the same match
-    quality (exact > truck_label > number), apply tie-breakers:
-      1. Dispatcher: if the sender maps to a board dispatcher, prefer that
-         dispatcher's truck.
-      2. GPS active: among remaining ties, prefer trucks with a recent GPS ping.
-      3. If still tied, flag ambiguous.
+    Resolution order:
+      1. **Dispatcher filter**: if the sender maps to a known dispatcher, narrow
+         candidates to that dispatcher's trucks. This is near-authoritative — a
+         dispatcher almost always sends rate-cons for their own trucks.
+      2. **Source cascade**: subject > filename > email_body > pdf_text.
+      3. **GPS active tie-break**: among remaining ties, prefer trucks with a
+         recent GPS ping.
+      4. **Ambiguous**: only if all above fail.
     """
     if not matches:
         return {
@@ -368,12 +369,46 @@ def select_single_truck(
 
     active = gps_active_trucks or set()
 
+    # Step 1: dispatcher pre-filter. If sender is a known dispatcher, try to
+    # resolve using ONLY that dispatcher's trucks first.
+    dispatcher_filtered = list(matches)
+    used_dispatcher_filter = False
+    if sender_dispatcher:
+        disp_lower = sender_dispatcher.lower().strip()
+        disp_matches = [
+            m for m in matches
+            if str(m.get("board_dispatcher") or "").lower().strip() == disp_lower
+        ]
+        if disp_matches:
+            dispatcher_filtered = disp_matches
+            used_dispatcher_filter = True
+
+    # Step 2: source cascade on the (possibly dispatcher-filtered) pool
+    result = _source_cascade(dispatcher_filtered, active, is_dispatcher_filtered=used_dispatcher_filter)
+    if result:
+        return result
+
+    # Step 3: if dispatcher filter produced nothing useful, retry with full pool
+    if used_dispatcher_filter:
+        result = _source_cascade(list(matches), active, is_dispatcher_filtered=False)
+        if result:
+            return result
+
+    # Fallback
+    best = matches[0]
+    return _build_selected(best, [str(best["matched_truck"])])
+def _source_cascade(
+    matches: list[dict[str, Any]],
+    gps_active: set[str],
+    *,
+    is_dispatcher_filtered: bool,
+) -> dict[str, Any] | None:
+    """Run the source-priority cascade on a match pool. Returns a selection dict or None."""
     source_tiers = ["subject", "filename", "email_body", "pdf_text"]
     for source in source_tiers:
         source_matches = [m for m in matches if str(m.get("source")) == source]
         if not source_matches:
             continue
-        # Within this source, find the best quality tier
         best = source_matches[0]
         best_quality = (
             MATCH_RANK.get(str(best["match_type"]), 99),
@@ -388,65 +423,24 @@ def select_single_truck(
         ]
         tied_trucks = sorted({str(item["matched_truck"]) for item in tied})
         if len(tied_trucks) == 1:
+            # Single truck — clean match regardless of whether dispatcher filtered
             return _build_selected(best, tied_trucks)
-        # Multiple trucks tied — apply tie-breakers before declaring ambiguous
-        winner = _break_tie(tied, tied_trucks, sender_dispatcher, active)
-        if winner:
-            return _build_selected(winner, [str(winner["matched_truck"])], tiebreak=True)
-        # Body noise: bare numbers are low signal
+        # Multiple trucks tied — GPS tiebreak
+        if gps_active and len(tied_trucks) > 1:
+            active_matches = [m for m in tied if str(m["matched_truck"]) in gps_active]
+            active_trucks = sorted({str(m["matched_truck"]) for m in active_matches})
+            if len(active_trucks) == 1:
+                return _build_selected(active_matches[0], active_trucks, tiebreak=True)
+        # Body noise handling
         if source in {"email_body", "pdf_text"} and len(tied_trucks) > 1:
             labeled = [m for m in tied if str(m.get("label")) == "truck_label"]
             labeled_trucks = sorted({str(m["matched_truck"]) for m in labeled})
             if len(labeled_trucks) == 1:
                 return _build_selected(labeled[0], labeled_trucks)
-            if labeled_trucks:
-                winner = _break_tie(labeled, labeled_trucks, sender_dispatcher, active)
-                if winner:
-                    return _build_selected(winner, [str(winner["matched_truck"])], tiebreak=True)
-                return _build_ambiguous(best, labeled_trucks)
-            # All bare numbers from body — pick first, low confidence
-            return _build_selected(best, [str(best["matched_truck"])], body_noise=True)
+            if not labeled_trucks:
+                return _build_selected(best, [str(best["matched_truck"])], body_noise=True)
+            return _build_ambiguous(best, labeled_trucks)
         return _build_ambiguous(best, tied_trucks)
-
-    # Fell through all sources with no matches (shouldn't happen if matches is non-empty)
-    best = matches[0]
-    return _build_selected(best, [str(best["matched_truck"])])
-
-
-def _break_tie(
-    tied: list[dict[str, Any]],
-    tied_trucks: list[str],
-    sender_dispatcher: str,
-    gps_active: set[str],
-) -> dict[str, Any] | None:
-    """Try to pick a single truck from a tie using dispatcher and GPS signals.
-
-    Returns the winning match dict, or None if the tie can't be broken.
-    """
-    remaining = list(tied)
-    remaining_trucks = list(tied_trucks)
-
-    # Tie-breaker 1: dispatcher match
-    if sender_dispatcher:
-        disp_lower = sender_dispatcher.lower().strip()
-        dispatcher_matches = [
-            m for m in remaining
-            if str(m.get("board_dispatcher") or "").lower().strip() == disp_lower
-        ]
-        dispatcher_trucks = sorted({str(m["matched_truck"]) for m in dispatcher_matches})
-        if len(dispatcher_trucks) == 1:
-            return dispatcher_matches[0]
-        if dispatcher_trucks:
-            remaining = dispatcher_matches
-            remaining_trucks = dispatcher_trucks
-
-    # Tie-breaker 2: GPS active (pinged in last 24h)
-    if gps_active and len(remaining_trucks) > 1:
-        active_matches = [m for m in remaining if str(m["matched_truck"]) in gps_active]
-        active_trucks = sorted({str(m["matched_truck"]) for m in active_matches})
-        if len(active_trucks) == 1:
-            return active_matches[0]
-
     return None
 
 

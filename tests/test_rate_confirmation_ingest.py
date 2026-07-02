@@ -81,7 +81,7 @@ def test_subject_wins_over_body_noise() -> None:
 
 
 def test_dispatcher_tiebreak_picks_dispatchers_truck() -> None:
-    """When multiple trucks tie, the sender's dispatcher's truck wins."""
+    """When multiple trucks tie, the sender's dispatcher's truck wins cleanly."""
     board = {
         "333": BoardTruck(truck_id="333", dispatcher="Anna"),
         "713": BoardTruck(truck_id="713", dispatcher="Brittany"),
@@ -93,7 +93,8 @@ def test_dispatcher_tiebreak_picks_dispatchers_truck() -> None:
 
     assert result["matched_truck_id"] == "333"
     assert result["match_status"] == "matched"
-    assert "dispatcher_or_gps_tiebreak" in result["alert_codes"]
+    # Dispatcher pre-filter narrows to 1 truck → clean match, no alert
+    assert result["alert_level"] == ""
 
 
 def test_gps_active_tiebreak() -> None:

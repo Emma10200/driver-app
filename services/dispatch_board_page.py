@@ -48,7 +48,7 @@ _BOARD_CSS = """
 }
 .dispatch-card {
   display: grid;
-    grid-template-columns: 74px 92px minmax(165px,1.25fr) 112px minmax(130px,1fr) 76px minmax(145px,1.05fr) minmax(150px,1fr) 92px 126px 108px;
+    grid-template-columns: 74px 92px minmax(140px,1.1fr) minmax(130px,1fr) 76px 92px 126px 118px;
   gap: 0;
   align-items: stretch;
     border: 1px solid #dbe3ef;
@@ -196,7 +196,7 @@ _BOARD_CSS = """
 .alert-list-item-info { border-left: 4px solid #2563eb; }
 .alert-group-header { font-weight: 900; color: #334155; margin: .55rem 0 .2rem; font-size: .82rem; }
 @media (max-width: 1200px) {
-    .dispatch-card { grid-template-columns: 68px 84px minmax(150px,1.2fr) 98px minmax(120px,1fr) 70px minmax(130px,1fr) minmax(130px,1fr) 84px 112px 98px; }
+    .dispatch-card { grid-template-columns: 68px 84px minmax(120px,1.1fr) minmax(110px,1fr) 70px 84px 112px 100px; }
     .dispatch-cell { font-size: .73rem; padding: .36rem; }
 }
 </style>
@@ -249,22 +249,29 @@ def render_dispatch_board_page() -> None:
     _render_metrics(rows, dispatchers, latest_publish, rate_docs, alerts)
     filtered = _render_filters(rows, dispatchers, statuses)
 
-    st.link_button("Open editable Google Sheet", DISPATCH_BOARD_SHEET_URL)
-    st.download_button(
-        "Download filtered CSV",
-        _rows_to_csv(filtered),
-        file_name="dispatch_board_filtered.csv",
-        mime="text/csv",
-        use_container_width=False,
-    )
+    col_sheet, col_csv, col_alerts = st.columns([1, 1, 1])
+    with col_sheet:
+        st.link_button("Open editable Google Sheet", DISPATCH_BOARD_SHEET_URL, use_container_width=True)
+    with col_csv:
+        st.download_button(
+            "Download filtered CSV",
+            _rows_to_csv(filtered),
+            file_name="dispatch_board_filtered.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    with col_alerts:
+        _render_alert_bell(alerts)
 
     if not filtered:
         st.info("No rows match the current filters.")
         return
 
-    _render_alert_bell(alerts)
     _render_board(filtered)
     _render_raw_inspector(filtered)
+
+
+_HIDDEN_STATUSES = {"INACTIVE", "VACATION", "OUT", "TERMINATED"}
 
 
 def _render_metrics(rows: list[dict[str, Any]], dispatchers: list[str], latest_publish: str, rate_docs: list[dict[str, Any]], alerts: list[dict[str, Any]]) -> None:
@@ -282,14 +289,15 @@ def _render_metrics(rows: list[dict[str, Any]], dispatchers: list[str], latest_p
 
 
 def _render_filters(rows: list[dict[str, Any]], dispatchers: list[str], statuses: list[str]) -> list[dict[str, Any]]:
+    # Default-hide inactive/vacation statuses
+    default_statuses = [s for s in statuses if s.upper() not in _HIDDEN_STATUSES]
     with st.sidebar:
         st.subheader("Dispatch Board Filters")
         query = st.text_input("Search truck, trailer, driver, city, note", "").strip().lower()
         selected_dispatchers = st.multiselect("Dispatcher", dispatchers, default=dispatchers)
-        selected_statuses = st.multiselect("Status", statuses, default=statuses)
+        selected_statuses = st.multiselect("Status", statuses, default=default_statuses)
         hide_no_unit = st.toggle("Hide rows without truck/trailer", value=True)
         st.toggle("Show raw JSON inspector", value=False, key="dispatch_show_raw")
-        st.caption("Raw inspector is useful while tuning the web UI against the real sheet shape.")
 
     filtered = []
     for row in rows:
@@ -312,17 +320,19 @@ def _render_board(rows: list[dict[str, Any]]) -> None:
 
     for dispatcher in sorted(grouped):
         section_rows = grouped[dispatcher]
+        truck_count = sum(1 for r in section_rows if r.get("truck_id"))
         st.markdown(
-            f'<div class="dispatch-section">--- {_h(dispatcher)} --- <span class="dispatch-muted">{len(section_rows)} rows</span></div>',
+            f'<div class="dispatch-section">--- {_h(dispatcher)} --- <span class="dispatch-muted">{truck_count} truck{"s" if truck_count != 1 else ""}</span></div>',
             unsafe_allow_html=True,
         )
         _render_header_row()
         for row in section_rows:
             st.markdown(_row_card_html(row), unsafe_allow_html=True)
+            _render_truck_detail_expander(row)
 
 
 def _render_header_row() -> None:
-    labels = ["Truck", "Trailer", "Driver", "Cell", "Location", "Date", "Notes", "Planning", "Status", "Rate Conf", "GPS"]
+    labels = ["Truck", "Trailer", "Driver", "Location", "Date", "Status", "Rate Conf", "GPS"]
     cells = "".join(f'<div class="dispatch-cell">{label}</div>' for label in labels)
     st.markdown(f'<div class="dispatch-card dispatch-header-row">{cells}</div>', unsafe_allow_html=True)
 
@@ -332,17 +342,63 @@ def _row_card_html(row: dict[str, Any]) -> str:
         '<div class="dispatch-card">',
         f'<div class="dispatch-cell dispatch-unit">{_h(row["truck_id"])}</div>',
         f'<div class="dispatch-cell dispatch-trailer">{_h(row["trailer_id"])}</div>',
-        f'<div class="dispatch-cell"><div><b>{_h(row["driver_name"])}</b><br><span class="dispatch-muted">row {int(row.get("sheet_row") or 0)}</span></div></div>',
-        f'<div class="dispatch-cell">{_h(row["cell"])}</div>',
+        f'<div class="dispatch-cell"><b>{_h(row["driver_name"])}</b></div>',
         f'<div class="dispatch-cell">{_h(row["location"])}</div>',
         f'<div class="dispatch-cell"><b>{_h(row["date_text"])}</b></div>',
-        f'<div class="dispatch-cell dispatch-note">{_h(row["notes"])}</div>',
-        f'<div class="dispatch-cell">{_h(row["planning_note"])}</div>',
         f'<div class="dispatch-cell"><span class="status-pill {_status_class(row["status"])}">{_h(row["status"] or "—")}</span></div>',
         f'<div class="dispatch-cell">{_rate_conf_cell_html(row)}</div>',
         f'<div class="dispatch-cell">{_gps_cell_html(row)}</div>',
         '</div>',
     ])
+
+
+def _render_truck_detail_expander(row: dict[str, Any]) -> None:
+    """Collapsible detail panel below each truck row with GPS + rate-con info."""
+    truck_id = str(row.get("truck_id") or "").strip()
+    if not truck_id:
+        return
+    with st.expander(f"Truck {truck_id} details", expanded=False):
+        col_gps, col_rc = st.columns(2)
+        gps = row.get("current_gps") if isinstance(row.get("current_gps"), dict) else {}
+        with col_gps:
+            st.markdown("**GPS**")
+            active = bool(gps.get("active_24h"))
+            st.markdown(f"Status: **{'Active' if active else 'Stale/Missing'}**")
+            st.markdown(f"Last ping: {gps.get('last_ping_label') or 'N/A'}")
+            st.markdown(f"Provider: {gps.get('provider') or row.get('eld_provider') or '—'}")
+            st.markdown(f"Location: {gps.get('address') or row.get('location') or '—'}")
+            lat, lon = gps.get("lat"), gps.get("lon")
+            coords = _format_coords(lat, lon)
+            if coords:
+                st.markdown(f"Coords: {coords}")
+                st.markdown(f"[Open in Google Maps](https://www.google.com/maps?q={lat},{lon})")
+            speed = _format_gps_number(gps.get("speed"), suffix=" mph/kph")
+            heading = _format_gps_number(gps.get("heading_deg"), suffix="°")
+            if speed:
+                st.markdown(f"Speed: {speed}")
+            if heading:
+                st.markdown(f"Heading: {heading}")
+        docs = row.get("rate_confirmations") if isinstance(row.get("rate_confirmations"), list) else []
+        with col_rc:
+            st.markdown("**Rate Confirmations**")
+            if not docs:
+                st.caption("No rate confirmations matched to this truck.")
+            else:
+                for doc in docs[:8]:
+                    title = _rate_doc_title(doc)
+                    received = _short_dt(doc.get("received_at"))
+                    ref = str(doc.get("load_reference") or "")
+                    domain = str(doc.get("sender_domain") or "")
+                    st.markdown(f"- **{title}** ({received})")
+                    st.caption(f"Ref: {ref} | {domain}" if ref else domain)
+        notes = str(row.get("notes") or "")
+        planning = str(row.get("planning_note") or "")
+        if notes or planning:
+            st.markdown("---")
+            if notes:
+                st.markdown(f"**Notes:** {notes}")
+            if planning:
+                st.markdown(f"**Planning/Equipment:** {planning}")
 
 
 def _load_current_truck_gps() -> dict[str, dict[str, Any]]:
@@ -453,20 +509,44 @@ def _rate_conf_cell_html(row: dict[str, Any]) -> str:
 
 
 def _render_alert_bell(alerts: list[dict[str, Any]]) -> None:
-    """Compact bell-badge notification: click to expand the alert list."""
+    """Bell-badge notification popover with type/age toggles."""
     count = len(alerts)
-    badge_html = (
-        f'<div class="alert-bell-badge">'
-        f'🔔 Alerts'
-        f'<span class="alert-bell-count">{count}</span>'
-        f'</div>'
-    ) if count else '<span class="dispatch-muted">🔔 No alerts</span>'
-    with st.popover(f"🔔 {count} Alert{'s' if count != 1 else ''}" if count else "🔔 Alerts", use_container_width=False):
+    with st.popover(f"🔔 {count} Alert{'s' if count != 1 else ''}" if count else "🔔 Alerts", use_container_width=True):
         if not alerts:
             st.caption("No rate-confirmation alerts right now.")
             return
-        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        # Filter toggles
+        st.markdown("**Filter alerts**")
+        tc1, tc2, tc3 = st.columns(3)
+        show_red = tc1.toggle("🔴 Red", value=True, key="alert_show_red")
+        show_yellow = tc2.toggle("🟡 Yellow", value=True, key="alert_show_yellow")
+        show_info = tc3.toggle("🔵 Info", value=False, key="alert_show_info")
+        hide_old = st.toggle("Hide alerts older than 5 days", value=True, key="alert_hide_old")
+        st.markdown("---")
+
+        now = datetime.now(UTC)
+        visible: list[dict[str, Any]] = []
         for doc in alerts:
+            level = _doc_alert_level(doc)
+            if level == "red" and not show_red:
+                continue
+            if level == "yellow" and not show_yellow:
+                continue
+            if level == "info" and not show_info:
+                continue
+            if hide_old:
+                received = _parse_dt(str(doc.get("received_at") or ""))
+                if received and (now - _ensure_utc(received)).days > 5:
+                    continue
+            visible.append(doc)
+
+        st.caption(f"Showing {len(visible)} of {count} alerts")
+        if not visible:
+            st.info("All alerts filtered out. Adjust toggles above.")
+            return
+
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for doc in visible:
             dispatcher = str(doc.get("board_dispatcher") or "").strip() or "Unmatched / Needs Review"
             grouped[dispatcher].append(doc)
         for dispatcher in sorted(grouped):
