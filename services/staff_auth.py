@@ -12,7 +12,7 @@ from services.qbo_auth import qbo_allowed_emails
 logger = logging.getLogger(__name__)
 
 _DEFAULT_ALLOWED_EMAIL = "accounts@prestige.inc"
-_EXTRA_CONTACT_ALLOWED_EMAILS = {"deyana@prestigetransportation.com"}
+_EXTRA_CONTACT_ALLOWED_EMAILS = {"deyana@prestigetransportation.com", "etountchev@gmail.com"}
 
 
 def _mapping_get(mapping: Any, key: str) -> Any:

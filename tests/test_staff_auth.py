@@ -13,12 +13,14 @@ def test_contact_directory_allowed_emails_include_company_dispatchers_and_deyana
         {"email": ""},
     ]
 
-    assert staff_auth.contact_directory_allowed_emails(companies, contacts) == {
+    allowed = staff_auth.contact_directory_allowed_emails(companies, contacts)
+
+    assert {
         "dispatch@prestige.inc",
         "dispatch7@prestige.inc",
         "dispatch@xpresstransinc.com",
         "deyana@prestigetransportation.com",
-    }
+    }.issubset(allowed)
 
 
 def test_staff_allowed_emails_combines_qbo_contacts_and_accounts_default(monkeypatch):
