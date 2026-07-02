@@ -116,6 +116,11 @@ def resolve_sender_dispatcher(sender_email: str, sender_name: str, board: dict[s
     return ""
 
 
+def is_excluded_sender_email(sender_email: str) -> bool:
+    """Return True when a sender should never create rate-confirmation docs."""
+    return sender_email.lower().strip() in EXCLUDED_SENDER_EMAILS
+
+
 @dataclass(frozen=True)
 class MailboxConfig:
     username: str
@@ -688,7 +693,7 @@ def build_document_rows_from_message(
     body = message_body_text(msg)
     attachments = _attachment_parts(msg)
 
-    if from_addr_lower in EXCLUDED_SENDER_EMAILS or domain in NOISE_DOMAINS:
+    if is_excluded_sender_email(from_addr_lower) or domain in NOISE_DOMAINS:
         return []
 
     sender_dispatcher = resolve_sender_dispatcher(from_addr, _decode(from_name), board)
@@ -832,6 +837,14 @@ def ingest_recent_rate_confirmations(*, days: int = 14, limit: int = 0, dry_run:
     if dry_run or not rows:
         return summary
     client = SupabaseRestClient()
+    # Upsert will not remove rows that are now intentionally excluded. Clean the
+    # active ingest window so stale BOL alerts disappear after the next refresh.
+    since = (datetime.now(UTC) - timedelta(days=max(1, int(days)))).isoformat()
+    for sender_email in EXCLUDED_SENDER_EMAILS:
+        client.delete(
+            RATE_CONF_TABLE,
+            filters={"sender_email": f"eq.{sender_email}", "received_at": f"gte.{since}"},
+        )
     # Upsert in modest chunks to avoid huge PostgREST payloads.
     upserted = 0
     for start in range(0, len(rows), 250):

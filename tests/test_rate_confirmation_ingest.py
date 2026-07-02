@@ -215,3 +215,25 @@ def test_bol_sender_is_excluded_but_statements_sender_is_retained() -> None:
     rows = build_document_rows_from_message(statements_msg, board)
     assert len(rows) == 1
     assert rows[0]["matched_truck_id"] == "649"
+
+
+def test_stale_bol_rows_are_not_ui_alerts() -> None:
+    """Old BOL rows already in Supabase should be hidden from alert lane."""
+    from services.rate_confirmation_data import rate_confirmation_alerts
+
+    docs = [
+        {
+            "sender_email": "bol@prestige.inc",
+            "match_status": "unmatched",
+            "alert_level": "red",
+        },
+        {
+            "sender_email": "statements@prestigetransportation.com",
+            "match_status": "unmatched",
+            "alert_level": "red",
+        },
+    ]
+
+    alerts = rate_confirmation_alerts(docs)
+    assert len(alerts) == 1
+    assert alerts[0]["sender_email"] == "statements@prestigetransportation.com"

@@ -15,6 +15,16 @@ def _get_client():
     return SupabaseRestClient()
 
 
+def _is_excluded_sender(doc: dict[str, Any]) -> bool:
+    """Keep stale excluded senders out of the UI even before DB cleanup runs."""
+    try:
+        from services.rate_confirmation_ingest import is_excluded_sender_email
+
+        return is_excluded_sender_email(str(doc.get("sender_email") or ""))
+    except Exception:
+        return False
+
+
 def load_rate_confirmation_documents(days: int = 14) -> list[dict[str, Any]]:
     """Load recent rate-confirmation rows mirrored from the Gmail inbox.
 
@@ -29,7 +39,7 @@ def load_rate_confirmation_documents(days: int = 14) -> list[dict[str, Any]]:
 
     since = (datetime.now(UTC) - timedelta(days=max(1, int(days)))).isoformat()
     try:
-        return client.select_all(
+        rows = client.select_all(
             "rate_confirmation_documents",
             select=(
                 "document_key,message_id,attachment_index,attachment_filename,attachment_content_type,attachment_sha256,"
@@ -45,6 +55,7 @@ def load_rate_confirmation_documents(days: int = 14) -> list[dict[str, Any]]:
             page_size=1000,
             hard_cap=20000,
         )
+        return [row for row in rows if not _is_excluded_sender(row)]
     except Exception as exc:
         logger.warning("Rate confirmations query failed: %s", exc)
         return []
@@ -142,6 +153,8 @@ def rate_confirmation_alerts(docs: list[dict[str, Any]]) -> list[dict[str, Any]]
     """Return documents that should be surfaced in the dispatch-board alert lane."""
     out: list[dict[str, Any]] = []
     for doc in docs:
+        if _is_excluded_sender(doc):
+            continue
         level = str(doc.get("alert_level") or "").strip().lower()
         status = str(doc.get("match_status") or "").strip().lower()
         if level in {"red", "yellow"} or status in {"ambiguous", "unmatched", "cancelled"}:
