@@ -57,16 +57,32 @@ from services.gps_matching import (
 @st.cache_data(ttl=300, show_spinner=False)
 def _cached_hourly_timeline(unit_id: str, unit_type: str, start_iso: str, end_iso: str):
     """Cached wrapper for hourly evidence timeline (5-min TTL)."""
-    from datetime import datetime, timezone
     start = datetime.fromisoformat(start_iso)
     end = datetime.fromisoformat(end_iso)
     return load_hourly_evidence_timeline(unit_id, unit_type, start, end)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def _cached_hourly_evidence_rows(unit_id: str, unit_type: str, start_iso: str, end_iso: str):
+    """Cached wrapper for raw hourly evidence rows (5-min TTL)."""
+    start = datetime.fromisoformat(start_iso)
+    end = datetime.fromisoformat(end_iso)
+    return load_hourly_evidence_rows(unit_id, unit_type, start, end)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_gps_trail(unit_id: str, unit_type: str, start_iso: str, end_iso: str):
+    """Cached wrapper for raw GPS history trails (5-min TTL)."""
+    start = datetime.fromisoformat(start_iso)
+    end = datetime.fromisoformat(end_iso)
+    if unit_type == "trailer":
+        return load_trailer_gps_trail(unit_id, start, end)
+    return load_truck_gps_trail(unit_id, start, end)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def _cached_yard_pings(yard_name: str, start_iso: str, end_iso: str):
     """Cached wrapper for yard proximity pings (5-min TTL)."""
-    from datetime import datetime, timezone
     start = datetime.fromisoformat(start_iso)
     end = datetime.fromisoformat(end_iso)
     return load_yard_proximity_pings(yard_name, start, end)
@@ -1902,25 +1918,25 @@ def _render_unit_history_tab(assets: list[Asset]) -> None:
         return
 
     # Date navigation
-    today = date.today()
+    latest_date = _latest_analysis_date(default=date.today())
     col_d1, col_d2, col_d3 = st.columns([1, 2, 1])
     with col_d1:
         if st.button("← Prev Day", key="hist_prev_day"):
-            current = st.session_state.get("history_date", today)
+            current = st.session_state.get("history_date", latest_date)
             st.session_state["history_date"] = current - timedelta(days=1)
     with col_d2:
         hist_date = st.date_input(
             "Date",
-            value=st.session_state.get("history_date", today),
+            value=st.session_state.get("history_date", latest_date),
             key="history_date_input",
         )
         st.session_state["history_date"] = hist_date
     with col_d3:
         if st.button("Next Day →", key="hist_next_day"):
-            current = st.session_state.get("history_date", today)
+            current = st.session_state.get("history_date", latest_date)
             st.session_state["history_date"] = current + timedelta(days=1)
 
-    hist_date = st.session_state.get("history_date", today)
+    hist_date = st.session_state.get("history_date", latest_date)
 
     # Optional custom range
     use_range = st.toggle("Custom date range", value=False, key="hist_use_range")
@@ -1934,38 +1950,32 @@ def _render_unit_history_tab(assets: list[Asset]) -> None:
         range_start = hist_date
         range_end = hist_date
 
-    # Load data
-    if st.button("Load History", type="primary", key="hist_load"):
-        start_dt = datetime.combine(range_start, time.min).replace(tzinfo=timezone.utc)
-        end_dt = datetime.combine(range_end, time(23, 59, 59)).replace(tzinfo=timezone.utc)
+    st.caption(f"Latest detailed GPS date detected: **{latest_date}**. Results load automatically; use Refresh if needed.")
+    refresh = st.button("Refresh History", type="primary", key="hist_load")
+    if refresh:
+        _cached_gps_trail.clear()
 
-        with st.spinner(f"Loading GPS history for {unit_type} {unit_id}..."):
-            if unit_type == "trailer":
-                trail = load_trailer_gps_trail(unit_id, start_dt, end_dt)
-            else:
-                trail = load_truck_gps_trail(unit_id, start_dt, end_dt)
+    start_dt, end_dt = _local_date_range_to_utc(range_start, range_end)
+    if end_dt < start_dt:
+        start_dt, end_dt = end_dt, start_dt
 
-        if not trail:
-            st.warning(f"No GPS pings found for **{unit_type} {unit_id}** on {range_start} — {range_end}.")
-            return
+    with st.spinner(f"Loading GPS history for {unit_type} {unit_id}..."):
+        trail = _cached_gps_trail(unit_id, unit_type, start_dt.isoformat(), end_dt.isoformat())
 
-        # Build trip segments from raw pings
-        trips = _build_trip_segments(trail)
-        st.session_state["history_trail"] = trail
-        st.session_state["history_trips"] = trips
-        st.session_state["history_meta"] = {
-            "unit_id": unit_id,
-            "unit_type": unit_type,
-            "date_label": str(range_start) if range_start == range_end else f"{range_start} — {range_end}",
-            "ping_count": len(trail),
-        }
+    if not trail:
+        st.warning(
+            f"No GPS pings found for **{unit_type} {unit_id}** on {range_start} — {range_end}. "
+            "Try the latest detected date above or a wider custom range."
+        )
+        return
 
-    # Display results
-    if "history_trips" in st.session_state:
-        meta = st.session_state["history_meta"]
-        trail = st.session_state["history_trail"]
-        trips = st.session_state["history_trips"]
-        _render_unit_history_results(trail, trips, meta)
+    trips = _build_trip_segments(trail)
+    _render_unit_history_results(trail, trips, {
+        "unit_id": unit_id,
+        "unit_type": unit_type,
+        "date_label": str(range_start) if range_start == range_end else f"{range_start} — {range_end}",
+        "ping_count": len(trail),
+    })
 
 
 def _render_unit_history_results(
@@ -2226,12 +2236,12 @@ def _render_timeline_tab(assets: list[Asset]) -> None:
     unit_id = parts[1]
 
     # Date range
-    today = date.today()
+    latest_date = _latest_evidence_date(default=_latest_analysis_date(default=date.today()))
     col1, col2 = st.columns(2)
     with col1:
-        tl_start = st.date_input("From", value=today - timedelta(days=7), key="tl_start")
+        tl_start = st.date_input("From", value=latest_date - timedelta(days=7), key="tl_start")
     with col2:
-        tl_end = st.date_input("To", value=today, key="tl_end")
+        tl_end = st.date_input("To", value=latest_date, key="tl_end")
 
     # --- Yard Mode toggle ---
     yard_mode = st.toggle(
@@ -2250,31 +2260,51 @@ def _render_timeline_tab(assets: list[Asset]) -> None:
         _render_yard_mode_controls(unit_id, unit_type, tl_start, tl_end)
         return
 
-    if st.button("Load Timeline", type="primary", key="tl_compute"):
-        start_dt, end_dt = _local_date_range_to_utc(tl_start, tl_end)
-        if end_dt < start_dt:
-            start_dt, end_dt = end_dt, start_dt
+    st.caption(f"Latest dense evidence date detected: **{latest_date}**. Timeline loads automatically; use Refresh if needed.")
+    refresh = st.button("Refresh Timeline", type="primary", key="tl_compute")
+    if refresh:
+        _cached_hourly_timeline.clear()
+        _cached_hourly_evidence_rows.clear()
 
-        # Primary: hourly evidence table (detailed hour-by-hour view)
-        with st.spinner("Loading hourly evidence..."):
-            segments = _cached_hourly_timeline(unit_id, unit_type, start_dt.isoformat(), end_dt.isoformat())
+    start_dt, end_dt = _local_date_range_to_utc(tl_start, tl_end)
+    if end_dt < start_dt:
+        start_dt, end_dt = end_dt, start_dt
 
-        if not segments:
-            st.info(
-                "No dense hourly evidence found for this unit/range yet. "
-                "Try a date range inside the latest dense evidence job window."
+    with st.spinner("Loading hourly evidence..."):
+        evidence_rows = _cached_hourly_evidence_rows(unit_id, unit_type, start_dt.isoformat(), end_dt.isoformat())
+        segments = _cached_hourly_timeline(unit_id, unit_type, start_dt.isoformat(), end_dt.isoformat())
+
+    if segments:
+        _render_timeline_visual(_consolidate_timeline(segments))
+    elif evidence_rows:
+        st.info(
+            f"Found **{len(evidence_rows)}** hourly evidence row(s), but none became paired timeline runs. "
+            "They are likely near/yard/review rows, so the raw evidence is shown below."
+        )
+    else:
+        latest_job = load_latest_pairing_job()
+        job_window = ""
+        if latest_job:
+            job_window = f" Latest job window: {str(latest_job.get('range_start') or '')[:10]} → {str(latest_job.get('range_end') or '')[:10]}."
+        st.warning(
+            "No dense hourly evidence rows found for this unit/range. "
+            "Try a date range inside the latest dense evidence job window." + job_window
+        )
+        return
+
+    detail_rows = _build_hourly_evidence_detail_rows(evidence_rows, primary_type=unit_type)
+    if detail_rows:
+        with st.expander("Hourly evidence detail", expanded=not bool(segments)):
+            st.dataframe(
+                detail_rows,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Confidence": st.column_config.NumberColumn(format="%.1f%%"),
+                    "Distance (mi)": st.column_config.NumberColumn(format="%.3f"),
+                    "Ping Gap (min)": st.column_config.NumberColumn(format="%.2f"),
+                },
             )
-            return
-
-        # Store in session for display
-        consolidated = _consolidate_timeline(segments)
-        st.session_state["timeline_segments"] = consolidated
-        st.session_state["timeline_selected_unit"] = f"{unit_type}:{unit_id}"
-
-    # Display timeline if available
-    if "timeline_segments" in st.session_state:
-        segments = st.session_state["timeline_segments"]
-        _render_timeline_visual(segments)
 
 
 def _analysis_unit_choices(assets: list[Asset]) -> list[tuple[str, str]]:
@@ -2295,6 +2325,28 @@ def _analysis_unit_choices(assets: list[Asset]) -> list[tuple[str, str]]:
         if asset_type in {"truck", "trailer"} and asset_id:
             units.setdefault((asset_type, asset_id), (asset_type, asset_id))
     return sorted(units.values(), key=lambda item: (item[0], _unit_sort_key(item[1])))
+
+
+def _latest_analysis_date(*, default: date) -> date:
+    latest = None
+    try:
+        rows = _cached_analysis_unit_options()
+    except Exception:
+        rows = []
+    for row in rows:
+        parsed = _parse_ui_dt(row.get("latest_at"))
+        if parsed and (latest is None or parsed > latest):
+            latest = parsed
+    return latest.astimezone(_user_timezone()).date() if latest else default
+
+
+def _latest_evidence_date(*, default: date) -> date:
+    try:
+        job = load_latest_pairing_job()
+    except Exception:
+        job = None
+    parsed = _parse_ui_dt((job or {}).get("range_end"))
+    return parsed.astimezone(_user_timezone()).date() if parsed else default
 
 
 # ---------------------------------------------------------------------------
