@@ -12,6 +12,13 @@ from typing import Any
 import streamlit as st
 
 from services.dispatch_board_data import load_dispatch_board_rows
+from services.dispatch_contacts import (
+    group_contacts_by_dispatcher,
+    load_company_info,
+    load_dispatcher_contacts,
+    save_company_info,
+    save_dispatcher_contacts,
+)
 from services.rate_confirmation_data import (
     dedupe_rate_confirmation_documents,
     group_rate_confirmations_by_truck,
@@ -251,7 +258,7 @@ def render_dispatch_board_page() -> None:
     _render_metrics(rows, dispatchers, latest_publish, rate_docs, alerts)
     filtered = _render_filters(rows, dispatchers, statuses)
 
-    col_sheet, col_csv, col_alerts = st.columns([1, 1, 1])
+    col_sheet, col_csv, col_contacts, col_alerts = st.columns([1, 1, 1, 1])
     with col_sheet:
         st.link_button("Open editable Google Sheet", DISPATCH_BOARD_SHEET_URL, use_container_width=True)
     with col_csv:
@@ -262,6 +269,9 @@ def render_dispatch_board_page() -> None:
             mime="text/csv",
             use_container_width=True,
         )
+    with col_contacts:
+        if st.button("📇 Company Contacts / Info", use_container_width=True):
+            _contacts_dialog()
     with col_alerts:
         _render_alert_bell(alerts)
 
@@ -512,13 +522,135 @@ def _rate_conf_cell_html(row: dict[str, Any]) -> str:
     ])
 
 
+def _dash(value: Any) -> str:
+    """Render missing sheet values as a dash instead of an empty hole."""
+    text = str(value or "").strip()
+    return text if text else "—"
+
+
+@st.dialog("📇 Company Contacts / Info", width="large")
+def _contacts_dialog() -> None:
+    edit_mode = st.toggle("✏️ Edit directory", key="contacts_edit_mode", help="Add, edit, or remove dispatchers and company info.")
+    if edit_mode:
+        _render_contacts_editor()
+        return
+
+    companies = load_company_info()
+    st.markdown("#### 🏢 Companies")
+    company_cols = st.columns(max(1, min(3, len(companies))))
+    for idx, company in enumerate(companies):
+        with company_cols[idx % len(company_cols)]:
+            st.markdown(
+                "\n".join([
+                    f"**{_dash(company.get('division'))}**",
+                    f"- {_dash(company.get('mc_number'))}",
+                    f"- {_dash(company.get('dot_number'))}",
+                    f"- {_dash(company.get('fin_number'))}",
+                    f"- 📧 {_dash(company.get('dispatch_email'))}",
+                    f"- ☎️ {_dash(company.get('company_phone'))}",
+                    f"- 🛠️ Setup: {_dash(company.get('setup_phone'))} ({_dash(company.get('setup_contact'))})",
+                    f"- 📍 {_dash(company.get('address'))}",
+                ])
+            )
+    st.caption("Xpress Trans has no per-dispatcher emails — everyone shares the main dispatch inbox.")
+    st.divider()
+
+    st.markdown("#### 👥 Dispatchers")
+    grouped = group_contacts_by_dispatcher(load_dispatcher_contacts())
+    if not grouped:
+        st.info("No dispatcher contacts yet. Use ✏️ Edit directory to add some.")
+        return
+    for name, entries in grouped.items():
+        with st.expander(f"👤 Contacts for {name}", expanded=False):
+            for i, entry in enumerate(entries):
+                if i:
+                    st.markdown("---")
+                division = str(entry.get("division") or "").strip()
+                if division.lower().startswith("personal cell"):
+                    st.markdown(f"**Personal Cell (internal only — don't give to brokers):** {_dash(entry.get('phone'))}")
+                    continue
+                lines = [
+                    f"**Division:** {_dash(division)}",
+                    f"**Email Address:** {_dash(entry.get('email'))}",
+                    f"**Phone:** {_dash(entry.get('phone'))}",
+                ]
+                if str(entry.get("extension") or "").strip():
+                    lines.append(f"**Extension:** {entry['extension']}")
+                st.markdown("  \n".join(lines))
+
+
+def _render_contacts_editor() -> None:
+    """Pencil mode: edit/add/remove dispatcher contact rows and company info."""
+    st.caption("Add or delete rows, then hit Save. Blank cells display as dashes. Saving requires the contact directory tables (migration 0025).")
+
+    st.markdown("**Dispatcher contacts**")
+    contact_rows = [
+        {
+            "dispatcher_name": str(entry.get("dispatcher_name") or ""),
+            "division": str(entry.get("division") or ""),
+            "email": str(entry.get("email") or ""),
+            "phone": str(entry.get("phone") or ""),
+            "extension": str(entry.get("extension") or ""),
+            "sort_order": int(entry.get("sort_order") or 0),
+        }
+        for entry in load_dispatcher_contacts()
+    ]
+    edited_contacts = st.data_editor(
+        contact_rows,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="contacts_editor_dispatchers",
+        column_config={
+            "dispatcher_name": st.column_config.TextColumn("Dispatcher", required=True),
+            "division": st.column_config.TextColumn("Division"),
+            "email": st.column_config.TextColumn("Email"),
+            "phone": st.column_config.TextColumn("Phone"),
+            "extension": st.column_config.TextColumn("Ext"),
+            "sort_order": st.column_config.NumberColumn("Order", min_value=0, step=1),
+        },
+    )
+
+    st.markdown("**Company / division info**")
+    company_rows = [
+        {
+            "division": str(company.get("division") or ""),
+            "mc_number": str(company.get("mc_number") or ""),
+            "dot_number": str(company.get("dot_number") or ""),
+            "fin_number": str(company.get("fin_number") or ""),
+            "dispatch_email": str(company.get("dispatch_email") or ""),
+            "company_phone": str(company.get("company_phone") or ""),
+            "setup_phone": str(company.get("setup_phone") or ""),
+            "setup_contact": str(company.get("setup_contact") or ""),
+            "address": str(company.get("address") or ""),
+            "sort_order": int(company.get("sort_order") or 0),
+        }
+        for company in load_company_info()
+    ]
+    edited_companies = st.data_editor(
+        company_rows,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="contacts_editor_companies",
+    )
+
+    if st.button("💾 Save directory", type="primary", use_container_width=True):
+        try:
+            saved_contacts = save_dispatcher_contacts(list(edited_contacts))
+            saved_companies = save_company_info(list(edited_companies))
+        except Exception as exc:
+            st.error(f"Could not save the directory: {exc}")
+        else:
+            st.success(f"Saved {saved_contacts} contact rows and {saved_companies} companies.")
+            st.session_state["contacts_edit_mode"] = False
+            st.rerun()
+
+
 def _render_alert_bell(alerts: list[dict[str, Any]]) -> None:
     """Bell-badge notification popover with issue-type filters and email previews."""
     count = len(alerts)
     with st.popover(f"🔔 {count} Alert{'s' if count != 1 else ''}" if count else "🔔 Alerts", use_container_width=True):
         if not alerts:
-            st.caption("No rate-confirmation alerts right now.")
-            return
+            st.caption("No rate-confirmation alerts right now.")            return
         category_counts: dict[str, int] = defaultdict(int)
         for doc in alerts:
             category_counts[_alert_category(doc)[0]] += 1
