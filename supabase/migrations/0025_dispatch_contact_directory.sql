@@ -103,10 +103,6 @@ from (values
     ('Lily',      'Xpress Trans Inc',             'dispatch@xpresstransinc.com',      '909-302-0181', '301', 3),
     ('Lily',      'Personal Cell (internal)',     '',                                 '714-272-3260', '',    4),
 
-    ('Sanjuana',  'Prestig Inc',                  'dispatch6@prestige.inc',           '909-243-9167', '',    1),
-    ('Sanjuana',  'Prestige Transportation Inc',  'dispatch6@prestigecalifornia.com', '909-206-2445', '315', 2),
-    ('Sanjuana',  'Xpress Trans Inc',             'dispatch@xpresstransinc.com',      '909-302-0185', '305', 3),
-
     ('Matt',      'Prestig Inc',                  'matt@prestige.inc',                '',             '',    1),
 
     ('Zach',      'Prestig Inc',                  'operations@prestige.inc',          '708-701-1109', '',    1),

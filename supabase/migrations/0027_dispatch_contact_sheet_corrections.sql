@@ -37,9 +37,6 @@ where dispatcher_name = 'Felix' and division = 'Prestige Transportation Inc';
 update public.dispatch_contact_entries set phone = '909-206-4365'
 where dispatcher_name = 'Lily' and division = 'Prestige Transportation Inc';
 
-update public.dispatch_contact_entries set phone = '909-206-2445'
-where dispatcher_name = 'Sanjuana' and division = 'Prestige Transportation Inc';
-
 insert into public.dispatch_contact_entries
     (dispatcher_name, division, email, phone, extension, sort_order)
 select seed.dispatcher_name, seed.division, seed.email, seed.phone, seed.extension, seed.sort_order

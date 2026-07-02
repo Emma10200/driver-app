@@ -85,6 +85,8 @@ def test_contact_seed_includes_zach_operations_contacts_but_not_art_or_arc() -> 
     assert "art" not in normalized_names
     assert "arc" not in normalized_names
     assert "zack" not in normalized_names
+    assert "sanjuana" not in normalized_names
+    assert "san juana" not in normalized_names
 
 
 def test_pasted_sheet_phone_updates_are_reflected_in_seed() -> None:
