@@ -185,7 +185,9 @@ def render_dispatch_board_page() -> None:
     gps_by_truck = _load_current_truck_gps()
     alerts = rate_confirmation_alerts(rate_docs)
 
-    st.markdown(
+    nav_left, nav_right = st.columns([1, 1])
+    with nav_left:
+        st.markdown(
         """
         <div class="dispatch-hero">
           <h1>Dispatch Board</h1>
@@ -193,7 +195,10 @@ def render_dispatch_board_page() -> None:
         </div>
         """,
         unsafe_allow_html=True,
-    )
+        )
+    with nav_right:
+        st.markdown("<div style='height:0.85rem'></div>", unsafe_allow_html=True)
+        st.link_button("Open GPS Fleet Map", "?route=gps-map", use_container_width=True)
 
     if not rows:
         st.warning("No dispatch board rows are in Supabase yet. Run Utilities → ⬆️ Publish Dispatch Board to Supabase in the Sheet.")

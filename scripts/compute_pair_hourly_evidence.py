@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import re
 import sys
 import time
 import uuid
@@ -126,8 +127,9 @@ def main() -> None:
     print(
         f"All-fleet hourly evidence job {job_id}\n"
         f"Window: {start.isoformat()} → {end.isoformat()}\n"
-        f"Max paired distance: {args.max_distance:.2f} mi; near distance stored: {args.near_distance:.2f} mi; "
-        f"max ping gap: {args.max_ping_gap_minutes:.0f} min\n"
+        f"Paired radius tiers: yard≤{args.yard_strict_radius:.2f} mi, far≤{args.far_radius_max:.2f} mi; "
+        f"near distance floor: {args.near_distance:.2f} mi; max ping gap: {args.max_ping_gap_minutes:.0f} min\n"
+        f"Run promotion: ≥{args.run_min_hours} close hours or ≥{args.run_min_miles:.1f} mi together\n"
         f"Supabase: {supabase_url}"
     )
 
@@ -250,6 +252,7 @@ class Point:
     provider: str
     division: str
     address: str
+    source: str = ""
 
 
 def compute_window(
@@ -260,14 +263,14 @@ def compute_window(
     args: argparse.Namespace,
     job_id: str,
     apply_billable: bool,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, int]]:
     rows = client.load_history(start, end, hard_cap=args.hard_cap)
     points = [_row_to_point(row) for row in rows]
     points = [point for point in points if point is not None]
     points = enrich_point_motion(points)
     print(f"Loaded {len(rows):,} raw rows; usable coordinate rows: {len(points):,}")
     if not points:
-        return [], [], [], {"history_rows": len(rows), "usable_points": 0, "hourly_rows": 0, "daily_rows": 0, "weekly_rows": 0}
+        return [], [], [], [], {"history_rows": len(rows), "usable_points": 0, "hourly_rows": 0, "daily_rows": 0, "weekly_rows": 0}
 
     asset_tracks = build_asset_tracks(points)
     print(f"Built {len(asset_tracks):,} asset-hour raw tracks")
@@ -281,6 +284,10 @@ def compute_window(
         min_matches=args.min_matches,
         min_match_ratio=args.min_match_ratio,
         max_candidates_per_trailer_hour=args.max_candidates_per_trailer_hour,
+        yard_strict_radius_miles=args.yard_strict_radius,
+        far_radius_max_miles=args.far_radius_max,
+        run_min_hours=args.run_min_hours,
+        run_min_miles=args.run_min_miles,
         job_id=job_id,
     )
     print(f"Computed {len(hourly_rows):,} dense timestamp hourly candidate rows")
@@ -306,6 +313,7 @@ def delete_derived_range(client: SupabaseClient, start: datetime, end: datetime)
     client.delete_range("asset_pair_hourly_evidence", "hour_start", start, end)
     client.delete_date_range("asset_pair_daily_summary", "service_date", start.date(), end.date())
     client.delete_date_range("asset_pair_weekly_review", "week_start", _week_start(start.date()), _week_start(end.date()))
+    client.delete_date_range_unscoped("trailer_activity_summary", "service_date", start.date(), end.date())
 
 
 def write_derived_rows(
@@ -323,6 +331,7 @@ def write_derived_rows(
 
 
 def build_asset_tracks(points: list[Point]) -> list[AssetTrack]:
+    points = canonicalize_legacy_trailer_aliases(points)
     grouped: dict[tuple[datetime, str, str], list[Point]] = defaultdict(list)
     seen: set[tuple[str, str, datetime, float, float]] = set()
     for point in points:
@@ -391,9 +400,68 @@ def enrich_point_motion(points: list[Point]) -> list[Point]:
                 provider=point.provider,
                 division=point.division,
                 address=point.address,
+                source=point.source,
             ))
     enriched.sort(key=lambda p: p.ts)
     return enriched
+
+
+def canonicalize_legacy_trailer_aliases(points: list[Point]) -> list[Point]:
+    """Fold legacy blank-source trailer base IDs into dashed canonical IDs.
+
+    Older imported GPS can contain trailer IDs like ``4400`` while the current
+    Anytrek/dispatch identity is ``4400-14``. Treating both as separate trailers
+    creates duplicate UI rows and duplicate matching evidence. To avoid merging
+    genuinely different units, only blank-provider/blank-source base IDs are
+    rewritten, and only when exactly one dashed trailer ID shares that prefix in
+    the same compute window/chunk.
+    """
+    dashed_by_prefix: dict[str, set[str]] = defaultdict(set)
+    for point in points:
+        if point.asset_type != "trailer":
+            continue
+        match = re.match(r"^(\d{2,})-\d+", str(point.asset_id or ""))
+        if match:
+            dashed_by_prefix[match.group(1)].add(point.asset_id)
+
+    alias_map = {
+        prefix: next(iter(values))
+        for prefix, values in dashed_by_prefix.items()
+        if len(values) == 1
+    }
+    if not alias_map:
+        return points
+
+    out: list[Point] = []
+    changed = 0
+    for point in points:
+        canonical_id = alias_map.get(point.asset_id)
+        if (
+            point.asset_type == "trailer"
+            and canonical_id
+            and re.fullmatch(r"\d{2,}", point.asset_id or "")
+            and not point.provider
+            and not point.source
+        ):
+            changed += 1
+            out.append(Point(
+                asset_type=point.asset_type,
+                asset_id=canonical_id,
+                ts=point.ts,
+                lat=point.lat,
+                lon=point.lon,
+                speed=point.speed,
+                heading_deg=point.heading_deg,
+                provider=point.provider,
+                division=point.division,
+                address=point.address,
+                source=point.source,
+            ))
+        else:
+            out.append(point)
+    if changed:
+        print(f"Canonicalized {changed:,} legacy trailer alias point(s) into dashed IDs.")
+    return out
 
 
 def _derive_motion_for_point(points: list[Point], idx: int) -> tuple[float | None, float | None]:
@@ -427,6 +495,10 @@ def compute_hourly_evidence(
     min_matches: int,
     min_match_ratio: float,
     max_candidates_per_trailer_hour: int,
+    yard_strict_radius_miles: float,
+    far_radius_max_miles: float,
+    run_min_hours: int,
+    run_min_miles: float,
     job_id: str,
 ) -> list[dict[str, Any]]:
     by_hour: dict[datetime, dict[str, list[AssetTrack]]] = defaultdict(lambda: {"truck": [], "trailer": []})
@@ -451,17 +523,28 @@ def compute_hourly_evidence(
                 if _both_in_yard_suppression_zone(truck.lat, truck.lon, trailer.lat, trailer.lon):
                     continue
 
+                effective_radius = min(
+                    paired_radius_for(truck.lat, truck.lon, yard_strict_radius_miles=yard_strict_radius_miles, far_radius_max_miles=far_radius_max_miles),
+                    paired_radius_for(trailer.lat, trailer.lon, yard_strict_radius_miles=yard_strict_radius_miles, far_radius_max_miles=far_radius_max_miles),
+                )
+                # Retain review evidence a little beyond the paired-eligible radius so
+                # far-from-yard candidates are not thrown away before run promotion.
+                dynamic_near_distance = max(
+                    near_distance_miles,
+                    effective_radius + min(1.0, max(0.25, effective_radius * 0.25)),
+                )
+
                 matches = _timestamp_matches(truck, trailer, max_ping_gap_minutes=max_ping_gap_minutes)
                 matches = [m for m in matches if not m.movement_mismatch]
                 if not matches:
                     continue
 
                 distances = [m.distance_miles for m in matches]
-                near_matches = [m for m in matches if m.distance_miles <= near_distance_miles]
+                near_matches = [m for m in matches if m.distance_miles <= dynamic_near_distance]
                 if not near_matches:
                     continue
 
-                close_matches = [m for m in matches if m.distance_miles <= max_distance_miles]
+                close_matches = [m for m in matches if m.distance_miles <= effective_radius]
                 best_match = min(matches, key=lambda m: (m.distance_miles, m.ping_gap_minutes))
                 best_near_match = min(near_matches, key=lambda m: (m.distance_miles, m.ping_gap_minutes))
                 matched_count = len(matches)
@@ -525,12 +608,13 @@ def compute_hourly_evidence(
                     close_ratio=close_ratio,
                     evidence_ratio=evidence_ratio,
                     close_count=close_count,
-                    max_distance=max_distance_miles,
+                    max_distance=effective_radius,
                     max_gap=max_ping_gap_minutes,
                     paired=paired,
                     same_yard=same_yard,
                     movement_score=movement_score,
                 )
+                sort_score = (paired, confidence, close_count, -best_match.distance_miles)
                 candidates.append(
                     {
                         "hour_start": hour_start.isoformat(),
@@ -566,17 +650,38 @@ def compute_hourly_evidence(
                         "source": "auto",
                         "job_id": job_id,
                         "computed_at": computed_at,
-                        "_sort_score": (paired, confidence, close_count, -best_match.distance_miles),
+                        "_sort_score": sort_score,
+                        "_effective_radius_miles": effective_radius,
+                        "_close_count": close_count,
                     }
                 )
             candidates.sort(key=lambda row: row["_sort_score"], reverse=True)
             for row in candidates[:max(1, max_candidates_per_trailer_hour)]:
                 hour_candidates.append(row)
 
-        # --- Exclusive matching: one truck ↔ one trailer per hour ---
+        records.extend(hour_candidates)
+
+    promote_repeated_runs(
+        records,
+        min_run_hours=run_min_hours,
+        min_run_miles=run_min_miles,
+        max_ping_gap_minutes=max_ping_gap_minutes,
+    )
+    return apply_hourly_exclusivity(records)
+
+
+def apply_hourly_exclusivity(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Enforce one truck↔trailer pairing per hour after all scoring/promotions."""
+    by_hour: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in records:
+        by_hour[str(row.get("hour_start") or "")].append(row)
+
+    out: list[dict[str, Any]] = []
+    for hour_start in sorted(by_hour):
+        hour_candidates = by_hour[hour_start]
         # Greedy assignment: highest-scoring paired candidate claims the truck and trailer.
         # Conflicting lower-scored candidates get demoted to "near" (kept for review).
-        hour_candidates.sort(key=lambda row: row["_sort_score"], reverse=True)
+        hour_candidates.sort(key=lambda row: row.get("_sort_score", (False, 0.0, 0, 0.0)), reverse=True)
         claimed_trucks: set[str] = set()
         claimed_trailers: set[str] = set()
         for row in hour_candidates:
@@ -593,8 +698,80 @@ def compute_hourly_evidence(
                     claimed_trucks.add(truck_id)
                     claimed_trailers.add(trailer_id)
             row.pop("_sort_score", None)
-            records.append(row)
-    return records
+            row.pop("_effective_radius_miles", None)
+            row.pop("_close_count", None)
+            out.append(row)
+    return out
+
+
+def promote_repeated_runs(
+    records: list[dict[str, Any]],
+    *,
+    min_run_hours: int = 3,
+    min_run_miles: float = 5.0,
+    max_ping_gap_minutes: float = 5.0,
+) -> None:
+    """Promote sustained close runs that failed only single-hour movement proof.
+
+    Sparse/stationary hours are fragile by themselves, but repeated timestamp-aligned
+    proximity across several hours is strong evidence of a real truck/trailer run.
+    Yard rows stay review-only, and final 1:1 exclusivity is applied after promotion.
+    """
+    min_run_hours = max(1, int(min_run_hours))
+    min_run_miles = max(0.0, float(min_run_miles))
+    max_ping_gap_minutes = max(0.0, float(max_ping_gap_minutes))
+
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in records:
+        if row.get("source") != "auto":
+            continue
+        if row.get("status") == "same_yard":
+            continue
+        if row.get("truck_yard") or row.get("trailer_yard"):
+            continue
+        if float(row.get("best_ping_gap_minutes") or 9999.0) > max_ping_gap_minutes:
+            continue
+        best_distance = float(row.get("best_distance_miles") or 9999.0)
+        effective_radius = float(row.get("_effective_radius_miles") or 0.0)
+        if best_distance > effective_radius:
+            continue
+        key = (str(row.get("truck_id") or ""), str(row.get("trailer_id") or ""))
+        if not key[0] or not key[1]:
+            continue
+        groups[key].append(row)
+
+    for rows in groups.values():
+        rows.sort(key=lambda row: _parse_hour_start(str(row.get("hour_start") or "")) or datetime.min.replace(tzinfo=timezone.utc))
+        run: list[dict[str, Any]] = []
+        previous_hour: datetime | None = None
+        for row in rows:
+            current_hour = _parse_hour_start(str(row.get("hour_start") or ""))
+            if current_hour is None:
+                continue
+            if previous_hour is not None and (current_hour - previous_hour) > timedelta(hours=2):
+                _promote_run_if_qualified(run, min_run_hours=min_run_hours, min_run_miles=min_run_miles)
+                run = []
+            run.append(row)
+            previous_hour = current_hour
+        _promote_run_if_qualified(run, min_run_hours=min_run_hours, min_run_miles=min_run_miles)
+
+
+def _promote_run_if_qualified(run: list[dict[str, Any]], *, min_run_hours: int, min_run_miles: float) -> None:
+    if not run:
+        return
+    run_miles = sum(float(row.get("miles_traveled") or 0.0) for row in run)
+    if len(run) < min_run_hours and run_miles < min_run_miles:
+        return
+    for row in run:
+        if row.get("status") == "paired":
+            continue
+        row["status"] = "paired"
+        row["paired_evidence"] = True
+        # Modest but billable-eligible confidence for sustained proximity evidence.
+        row["confidence"] = round(max(0.55, min(0.65, float(row.get("confidence") or 0.0) + 0.12)), 3)
+        row["billable_candidate"] = not bool(row.get("truck_yard") or row.get("trailer_yard"))
+        close_count = int(row.get("_close_count") or 0)
+        row["_sort_score"] = (True, float(row.get("confidence") or 0.0), close_count, -float(row.get("best_distance_miles") or 9999.0))
 
 
 def apply_billable_candidate_rules(
@@ -963,7 +1140,7 @@ class SupabaseClient:
         # for 888 ELD because the live publisher is our only dense-ish 888 feed.
         source_filter = ",".join(f"source.eq.{s}" for s in MATCHING_SOURCES)
         params_base = {
-            "select": "asset_type,asset_id,division,lat,lon,speed,heading_deg,provider,recorded_at,address",
+            "select": "asset_type,asset_id,division,lat,lon,speed,heading_deg,provider,recorded_at,address,source",
             "and": f"(recorded_at.gte.{start.isoformat()},recorded_at.lte.{end.isoformat()})",
             "or": f"({source_filter})",
             "order": "recorded_at.asc",
@@ -1085,6 +1262,11 @@ class SupabaseClient:
         if not response.ok:
             raise RuntimeError(f"delete {table} failed: HTTP {response.status_code} {response.text[:500]}")
 
+    def delete_date_range_unscoped(self, table: str, column: str, start: date, end: date) -> None:
+        response = requests.delete(f"{self.url}/rest/v1/{table}", headers=self.headers, params={column: f"gte.{start.isoformat()}", "and": f"({column}.lte.{end.isoformat()})"}, timeout=90)
+        if not response.ok:
+            raise RuntimeError(f"delete {table} failed: HTTP {response.status_code} {response.text[:500]}")
+
 
 def _row_to_point(row: dict[str, Any]) -> Point | None:
     try:
@@ -1109,6 +1291,7 @@ def _row_to_point(row: dict[str, Any]) -> Point | None:
         provider=str(row.get("provider") or ""),
         division=str(row.get("division") or ""),
         address=str(row.get("address") or ""),
+        source=str(row.get("source") or ""),
     )
 
 
@@ -1117,7 +1300,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--days", type=int, default=60)
     parser.add_argument("--start", help="UTC date/datetime start. Use with --end.")
     parser.add_argument("--end", help="UTC date/datetime end. Use with --start.")
-    parser.add_argument("--max-distance", type=float, default=0.5, help="Miles to classify as paired evidence.")
+    parser.add_argument("--max-distance", type=float, default=0.5, help="Legacy alias for --yard-strict-radius when --yard-strict-radius is omitted.")
     parser.add_argument("--near-distance", type=float, default=1.0, help="Miles to retain as near evidence for review.")
     parser.add_argument("--max-ping-gap-minutes", type=float, default=5, help="Max timestamp gap for dense ping interpolation/matching.")
     parser.add_argument("--min-matches", type=int, default=2, help="Minimum close timestamp matches to mark an hour paired.")
@@ -1126,6 +1309,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--billable-min-pair-days", type=int, default=2, help="Minimum distinct service dates for a truck/trailer before marking billable candidates.")
     parser.add_argument("--billable-min-confidence", type=float, default=0.55, help="Minimum hourly confidence for billable candidate hours.")
     parser.add_argument("--max-candidates-per-trailer-hour", type=int, default=5, help="Keep only the strongest truck candidates per trailer-hour.")
+    parser.add_argument("--yard-strict-radius", type=float, default=0.5, help="Paired radius in/near yards before distance-from-yard tiers widen it.")
+    parser.add_argument("--far-radius-max", type=float, default=10.0, help="Maximum paired radius for isolated units far from known yards.")
+    parser.add_argument("--run-min-hours", type=int, default=3, help="Minimum repeated close hours to promote a near run to paired.")
+    parser.add_argument("--run-min-miles", type=float, default=5.0, help="Minimum cumulative miles to promote a short close run to paired.")
     parser.add_argument("--include-same-yard", action="store_true")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument("--hard-cap", type=int, default=DEFAULT_HARD_CAP)
@@ -1133,7 +1320,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--incremental", action="store_true", help="Recompute only from the last successful hourly_evidence run minus --overlap-hours.")
     parser.add_argument("--overlap-hours", type=int, default=72, help="Safety overlap window for incremental recompute runs.")
     parser.add_argument("--dry-run", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if "--max-distance" in sys.argv and "--yard-strict-radius" not in sys.argv:
+        args.yard_strict_radius = args.max_distance
+    return args
 
 
 def _resolve_window(args: argparse.Namespace, client: SupabaseClient | None = None) -> tuple[datetime, datetime]:
@@ -1163,6 +1353,16 @@ def _parse_date_or_datetime(value: str, *, is_end: bool) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _parse_hour_start(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _load_secrets() -> dict[str, str]:
@@ -1409,6 +1609,30 @@ def yard_name(lat: float, lon: float) -> str:
         if haversine_miles(lat, lon, yard_lat, yard_lon) <= radius:
             return name
     return ""
+
+
+def paired_radius_for(lat: float, lon: float, *, yard_strict_radius_miles: float = 0.5, far_radius_max_miles: float = 10.0) -> float:
+    """Return paired-eligible radius based on distance from the nearest known yard.
+
+    Near terminals stay strict because parking-lot density creates false positives.
+    Far from yards, proximity can be wider because plausible competing trucks are rare;
+    repeated-run and timestamp-gap guards still control promotion.
+    """
+    yard_strict_radius_miles = max(0.1, float(yard_strict_radius_miles))
+    far_radius_max_miles = max(yard_strict_radius_miles, float(far_radius_max_miles))
+    nearest_yard_miles = min(
+        haversine_miles(lat, lon, yard_lat, yard_lon)
+        for yard_lat, yard_lon, _radius in YARD_GEOFENCES.values()
+    )
+    if nearest_yard_miles <= 5.0:
+        return yard_strict_radius_miles
+    if nearest_yard_miles <= 15.0:
+        return min(far_radius_max_miles, max(yard_strict_radius_miles, 1.0))
+    if nearest_yard_miles <= 50.0:
+        return min(far_radius_max_miles, max(yard_strict_radius_miles, 2.0))
+    if nearest_yard_miles <= 150.0:
+        return min(far_radius_max_miles, max(yard_strict_radius_miles, 5.0))
+    return far_radius_max_miles
 
 
 def yard_proximity_names(lat: float, lon: float) -> set[str]:

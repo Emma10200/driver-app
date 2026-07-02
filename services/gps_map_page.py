@@ -21,9 +21,11 @@ from services.gps_data import (
     build_yard_mode_timeline,
     deactivate_manual_pair_assignment,
     load_asset_hour_coverage,
+    load_analysis_unit_options,
     load_assignments,
     load_current_assets_with_last_known,
     load_evidence_truck_map,
+    load_gps_provider_unit_map,
     load_hourly_evidence_rows,
     load_hourly_evidence_timeline,
     load_latest_pairing_job,
@@ -76,8 +78,19 @@ def _cached_current_assets():
     return load_current_assets_with_last_known(stale_after_days=30)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_analysis_unit_options():
+    """Cached wrapper for detailed GPS analysis units (5-min TTL)."""
+    return load_analysis_unit_options(days=180)
+
+
 def render_gps_map_page() -> None:
-    st.header("GPS Fleet Map")
+    nav_left, nav_right = st.columns([1, 1])
+    with nav_left:
+        st.header("GPS Fleet Map")
+    with nav_right:
+        st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
+        st.link_button("Open Dispatch Board", "?route=dispatch-board", use_container_width=True)
 
     # --- Load FAST data first (current positions only) ---
     with st.spinner("Loading positions..."):
@@ -578,6 +591,9 @@ These parameters are applied automatically by the hourly evidence rebuild script
         }
     overview_rows = [r for r in overview_rows if r["Paired Hours"] >= min_hours]
     overview_rows = _sort_usage_overview(overview_rows, sort_by)
+    primary_archive = load_gps_provider_unit_map(primary_type, [str(r.get("Unit") or "") for r in overview_rows])
+    for row in overview_rows:
+        row["GPS Archive"] = _provider_archive_label(primary_archive.get(str(row.get("Unit") or "")))
 
     paired_hours = sum(float(r.get("paired_hours") or 0) for r in daily_rows)
     billable_hours = sum(float(r.get("billable_candidate_hours") or 0) for r in daily_rows)
@@ -609,6 +625,9 @@ These parameters are applied automatically by the hourly evidence rebuild script
     unit_options = [str(r["Unit"]) for r in overview_rows]
     selected_unit = st.selectbox(f"Inspect {view_mode.lower()}", unit_options, key="usage_dash_selected_unit")
     detail_rows = pair_rows_by_unit.get(selected_unit, [])
+    partner_archive = load_gps_provider_unit_map(partner_type, [str(r.get("Partner") or "") for r in detail_rows])
+    for row in detail_rows:
+        row["Partner GPS Archive"] = _provider_archive_label(partner_archive.get(str(row.get("Partner") or "")))
     st.markdown(f"#### {view_mode} {selected_unit} → {partner_type.title()} breakdown")
     if detail_rows:
         st.dataframe(
@@ -753,8 +772,15 @@ def _render_unmatched_trailers_alert(start_dt: datetime, end_dt: datetime) -> No
         for a in alerts
         if trailer_to_truck.get(str(a["trailer_id"]), "")
     ]
+    alert_evidence_trucks = [
+        str(a.get("evidence_truck") or "")
+        for a in alerts
+        if str(a.get("evidence_truck") or "")
+    ]
     trailer_coverage = load_asset_hour_coverage("trailer", alert_trailers, start_dt, end_dt)
-    truck_coverage = load_asset_hour_coverage("truck", alert_dispatch_trucks, start_dt, end_dt)
+    truck_coverage = load_asset_hour_coverage("truck", sorted(set(alert_dispatch_trucks + alert_evidence_trucks)), start_dt, end_dt)
+    trailer_archive = load_gps_provider_unit_map("trailer", alert_trailers)
+    truck_archive = load_gps_provider_unit_map("truck", sorted(set(alert_dispatch_trucks + alert_evidence_trucks)))
 
     active_route_tid = str(st.session_state.get("active_unmatched_route_trailer") or "")
     alert_ids = {str(a["trailer_id"]) for a in alerts}
@@ -779,9 +805,12 @@ def _render_unmatched_trailers_alert(start_dt: datetime, end_dt: datetime) -> No
                 truck_display = f"{evidence_truck} (GPS)" if not dispatch_truck or dispatch_truck == "—" else f"{dispatch_truck} / {evidence_truck} (GPS)"
             trailer_cov = trailer_coverage.get(str(a["trailer_id"]), {})
             truck_cov = truck_coverage.get(str(dispatch_truck), {}) if dispatch_truck and dispatch_truck != "—" else {}
+            archive_truck = evidence_truck or dispatch_truck
             display_rows.append({
                 "Trailer": a["trailer_id"],
                 "Truck": truck_display,
+                "Trailer Archive": _provider_archive_label(trailer_archive.get(str(a["trailer_id"]))),
+                "Truck Archive": _provider_archive_label(truck_archive.get(str(archive_truck))) if archive_truck and archive_truck != "—" else "—",
                 "GPS Gap": _gps_gap_label(trailer_cov, truck_cov, dispatch_truck),
                 "Trailer GPS": _coverage_summary(trailer_cov),
                 "Truck GPS": _coverage_summary(truck_cov),
@@ -1136,6 +1165,25 @@ def _coverage_summary(coverage: dict[str, Any]) -> str:
     pings = int(coverage.get("ping_count") or 0)
     miles = float(coverage.get("miles_traveled") or 0)
     return f"{hours}h / {pings} pings / {moving} moving / {miles:.1f} mi"
+
+
+def _provider_archive_label(row: dict[str, Any] | None) -> str:
+    if not row:
+        return "—"
+    provider = str(row.get("provider") or "").strip() or "GPS"
+    status = str(row.get("status") or "").strip()
+    is_active = row.get("is_active")
+    if is_active is True:
+        active_label = "active"
+    elif is_active is False:
+        active_label = "inactive"
+    elif status:
+        active_label = status.replace("_", " ")
+    else:
+        active_label = "archive"
+    last_history = _format_dt_text(row.get("last_history_at")) if row.get("last_history_at") else ""
+    suffix = f" · last ping {last_history}" if last_history else ""
+    return f"{provider} · {active_label}{suffix}"
 
 
 def _gps_gap_label(trailer_cov: dict[str, Any], truck_cov: dict[str, Any], dispatch_truck: str) -> str:
@@ -1814,11 +1862,11 @@ def _render_unit_history_tab(assets: list[Asset]) -> None:
         "Shows driving/idle segments, distances, locations, and a route map."
     )
 
-    # Unit input
-    all_ids = sorted(
-        [(a.asset_type, a.asset_id) for a in assets],
-        key=lambda x: (x[0], _unit_sort_key(x[1])),
-    )
+    st.caption("This selector comes from detailed GPS history/archive tables, not only current map rows.")
+
+    # Unit input. Use analysis/detail units first so inactive/deactivated units
+    # can be inspected even when they no longer exist in assets_current.
+    all_ids = _analysis_unit_choices(assets)
     unit_options = [""] + [f"{atype.title()}: {aid}" for atype, aid in all_ids]
 
     col_unit, col_type = st.columns([3, 1])
@@ -2159,11 +2207,10 @@ def _render_timeline_tab(assets: list[Asset]) -> None:
         "This uses dense timestamp-matched hourly evidence only — no legacy asset_pairings fallback."
     )
 
-    # Unit selector
-    all_ids = sorted(
-        [(a.asset_type, a.asset_id) for a in assets],
-        key=lambda x: (x[0], _unit_sort_key(x[1])),
-    )
+    st.caption("This selector comes from dense evidence/history/archive units, not only current map rows.")
+
+    # Unit selector. Detailed analysis should not be limited by live/current map rows.
+    all_ids = _analysis_unit_choices(assets)
     unit_options = [f"{atype.title()}: {aid}" for atype, aid in all_ids]
 
     if not unit_options:
@@ -2228,6 +2275,26 @@ def _render_timeline_tab(assets: list[Asset]) -> None:
     if "timeline_segments" in st.session_state:
         segments = st.session_state["timeline_segments"]
         _render_timeline_visual(segments)
+
+
+def _analysis_unit_choices(assets: list[Asset]) -> list[tuple[str, str]]:
+    """Union detailed analysis units with current map units for selectors."""
+    units: dict[tuple[str, str], tuple[str, str]] = {}
+    try:
+        analysis_rows = _cached_analysis_unit_options()
+    except Exception:
+        analysis_rows = []
+    for row in analysis_rows:
+        asset_type = str(row.get("asset_type") or "").strip().lower()
+        asset_id = str(row.get("asset_id") or "").strip()
+        if asset_type in {"truck", "trailer"} and asset_id:
+            units[(asset_type, asset_id)] = (asset_type, asset_id)
+    for asset in assets:
+        asset_type = str(asset.asset_type or "").strip().lower()
+        asset_id = str(asset.asset_id or "").strip()
+        if asset_type in {"truck", "trailer"} and asset_id:
+            units.setdefault((asset_type, asset_id), (asset_type, asset_id))
+    return sorted(units.values(), key=lambda item: (item[0], _unit_sort_key(item[1])))
 
 
 # ---------------------------------------------------------------------------

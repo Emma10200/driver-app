@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -25,6 +26,106 @@ _CARDINAL_TO_DEG = {
     "W": 270,
     "NW": 315,
 }
+
+_DASHED_TRAILER_RE = re.compile(r"^(\d{2,})-\d+")
+
+
+def _unit_sort_key(unit: str) -> tuple[int, str]:
+    text = str(unit or "")
+    digits = "".join(ch for ch in text if ch.isdigit())
+    return (int(digits) if digits else 999999999, text)
+
+
+def _trailer_alias_map_from_ids(ids: list[str] | set[str]) -> dict[str, str]:
+    """Return {numeric_base: unique_dashed_id} for safe trailer alias folding."""
+    dashed_by_prefix: dict[str, set[str]] = {}
+    for raw in ids:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        match = _DASHED_TRAILER_RE.match(value)
+        if match:
+            dashed_by_prefix.setdefault(match.group(1), set()).add(value)
+    return {prefix: next(iter(values)) for prefix, values in dashed_by_prefix.items() if len(values) == 1}
+
+
+def _canonicalize_trailer_id(asset_id: str, alias_map: dict[str, str]) -> str:
+    text = str(asset_id or "").strip()
+    if re.fullmatch(r"\d{2,}", text):
+        return alias_map.get(text, text)
+    return text
+
+
+def _load_provider_trailer_alias_map(client: Any) -> dict[str, str]:
+    """Load canonical trailer aliases from the independent provider-unit archive."""
+    try:
+        rows = client.select_all(
+            "gps_provider_units",
+            select="asset_id,canonical_asset_id,display_name",
+            filters={"asset_type": "eq.trailer"},
+            order="asset_id.asc",
+            page_size=1000,
+            hard_cap=50000,
+        )
+    except Exception as e:
+        logger.info("Provider trailer alias lookup unavailable: %s", e)
+        return {}
+    ids: set[str] = set()
+    for row in rows:
+        ids.add(str(row.get("asset_id") or "").strip())
+        ids.add(str(row.get("canonical_asset_id") or "").strip())
+        ids.add(str(row.get("display_name") or "").strip())
+    return _trailer_alias_map_from_ids(ids)
+
+
+def _expand_asset_query_ids(asset_type: str, asset_ids: list[str], alias_map: dict[str, str] | None = None) -> list[str]:
+    """Include safe trailer base/canonical variants for history/evidence reads."""
+    alias_map = alias_map or {}
+    out: set[str] = set()
+    for raw in asset_ids:
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        out.add(value)
+        if str(asset_type).lower() == "trailer":
+            match = _DASHED_TRAILER_RE.match(value)
+            if match:
+                out.add(match.group(1))
+            elif value in alias_map:
+                out.add(alias_map[value])
+    return sorted(out, key=_unit_sort_key)
+
+
+def _asset_id_filter(client: Any, asset_type: str, asset_id: str) -> str:
+    alias_map = _load_provider_trailer_alias_map(client) if str(asset_type).lower() == "trailer" else {}
+    ids = _expand_asset_query_ids(asset_type, [asset_id], alias_map)
+    if len(ids) <= 1:
+        return f"eq.{quote(ids[0] if ids else str(asset_id or ''), safe='')}"
+    return "in.(" + ",".join(quote(value, safe="") for value in ids) + ")"
+
+
+def _canonicalize_trailer_rows(
+    rows: list[dict[str, Any]],
+    column: str,
+    alias_map: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    alias_map = dict(alias_map or {})
+    if not alias_map:
+        alias_map = _trailer_alias_map_from_ids([str(row.get(column) or "") for row in rows])
+    if not alias_map:
+        return rows
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        current = str(row.get(column) or "").strip()
+        canonical = _canonicalize_trailer_id(current, alias_map)
+        if canonical == current:
+            out.append(row)
+            continue
+        updated = dict(row)
+        updated[column] = canonical
+        updated[f"original_{column}"] = current
+        out.append(updated)
+    return out
 
 
 def _get_client():
@@ -113,6 +214,112 @@ def load_assignments() -> dict[str, str]:
     return {r["truck_id"]: r["trailer_id"] for r in rows if r.get("truck_id")}
 
 
+def load_analysis_unit_options(days: int = 180) -> list[dict[str, Any]]:
+    """Return units available in detailed GPS history/evidence tables.
+
+    This intentionally does **not** depend on ``assets_current``. The map and
+    dispatch board use current rows; history/timeline/usage analysis needs to
+    include units that are inactive, deactivated, or present only in historical
+    backfills/derived tables.
+    """
+    try:
+        client = _get_client()
+    except Exception as e:
+        logger.warning("Analysis unit list unavailable: %s", e)
+        return []
+
+    since = datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))
+    rows: list[dict[str, Any]] = []
+    try:
+        rows.extend(client.select_all(
+            "asset_hour_tracks",
+            select="asset_type,asset_id,hour_start,provider,source",
+            filters={"hour_start": f"gte.{since.isoformat()}"},
+            order="asset_type.asc,asset_id.asc,hour_start.desc",
+            page_size=1000,
+            hard_cap=200000,
+        ))
+    except Exception as e:
+        logger.info("Analysis unit lookup from asset_hour_tracks failed: %s", e)
+
+    provider_rows: list[dict[str, Any]] = []
+    try:
+        provider_rows = client.select_all(
+            "gps_provider_units",
+            select="asset_type,asset_id,canonical_asset_id,last_seen_at,last_history_at,provider,source",
+            order="asset_type.asc,asset_id.asc,last_history_at.desc",
+            page_size=1000,
+            hard_cap=50000,
+        )
+    except Exception as e:
+        logger.info("Analysis unit lookup from gps_provider_units failed: %s", e)
+
+    trailer_ids = {
+        str(row.get("asset_id") or "").strip()
+        for row in rows + provider_rows
+        if str(row.get("asset_type") or "").lower() == "trailer"
+    }
+    trailer_ids.update(
+        str(row.get("canonical_asset_id") or "").strip()
+        for row in provider_rows
+        if str(row.get("asset_type") or "").lower() == "trailer"
+    )
+    alias_map = _trailer_alias_map_from_ids(trailer_ids)
+
+    units: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        asset_type = str(row.get("asset_type") or "").strip().lower()
+        asset_id = str(row.get("asset_id") or "").strip()
+        if asset_type not in {"truck", "trailer"} or not asset_id:
+            continue
+        if asset_type == "trailer":
+            asset_id = _canonicalize_trailer_id(asset_id, alias_map)
+        key = (asset_type, asset_id)
+        acc = units.setdefault(key, {
+            "asset_type": asset_type,
+            "asset_id": asset_id,
+            "source": "asset_hour_tracks",
+            "latest_at": "",
+            "providers": set(),
+        })
+        latest = str(row.get("hour_start") or "")
+        if latest > str(acc.get("latest_at") or ""):
+            acc["latest_at"] = latest
+        provider = str(row.get("provider") or "").strip()
+        if provider:
+            acc["providers"].add(provider)
+
+    for row in provider_rows:
+        asset_type = str(row.get("asset_type") or "").strip().lower()
+        asset_id = str(row.get("canonical_asset_id") or row.get("asset_id") or "").strip()
+        if asset_type not in {"truck", "trailer"} or not asset_id:
+            continue
+        if asset_type == "trailer":
+            asset_id = _canonicalize_trailer_id(asset_id, alias_map)
+        key = (asset_type, asset_id)
+        acc = units.setdefault(key, {
+            "asset_type": asset_type,
+            "asset_id": asset_id,
+            "source": str(row.get("source") or "gps_provider_units") or "gps_provider_units",
+            "latest_at": "",
+            "providers": set(),
+        })
+        latest = str(row.get("last_history_at") or row.get("last_seen_at") or "")
+        if latest > str(acc.get("latest_at") or ""):
+            acc["latest_at"] = latest
+        provider = str(row.get("provider") or "").strip()
+        if provider:
+            acc["providers"].add(provider)
+
+    out: list[dict[str, Any]] = []
+    for row in units.values():
+        clean = dict(row)
+        clean["providers"] = ", ".join(sorted(clean.get("providers") or []))
+        out.append(clean)
+    out.sort(key=lambda row: (str(row.get("asset_type") or ""), _unit_sort_key(str(row.get("asset_id") or ""))))
+    return out
+
+
 def load_hourly_evidence_timeline(
     unit_id: str,
     unit_type: str,
@@ -134,10 +341,10 @@ def load_hourly_evidence_timeline(
     end = _ensure_aware(end)
     unit_col = "truck_id" if unit_type == "truck" else "trailer_id"
     filters: dict[str, Any] = {
-        unit_col: f"eq.{unit_id}",
         "source": "eq.auto",
         "and": f"(hour_start.gte.{start.isoformat()},hour_start.lte.{end.isoformat()})",
     }
+    filters[unit_col] = _asset_id_filter(client, unit_type, unit_id)
 
     try:
         rows = client.select_all(
@@ -211,19 +418,23 @@ def load_hourly_evidence_rows(
     end = _ensure_aware(end)
     unit_col = "truck_id" if unit_type == "truck" else "trailer_id"
     filters: dict[str, Any] = {
-        unit_col: f"eq.{unit_id}",
         "source": "eq.auto",
         "and": f"(hour_start.gte.{start.isoformat()},hour_start.lte.{end.isoformat()})",
     }
+    filters[unit_col] = _asset_id_filter(client, unit_type, unit_id)
 
     try:
-        return client.select_all(
+        rows = client.select_all(
             "asset_pair_hourly_evidence",
             filters=filters,
             order="hour_start.asc,trailer_id.asc,truck_id.asc",
             page_size=1000,
             hard_cap=50000,
         )
+        if unit_type == "trailer":
+            alias_map = _trailer_alias_map_from_ids([unit_id] + [str(row.get("trailer_id") or "") for row in rows])
+            rows = _canonicalize_trailer_rows(rows, "trailer_id", alias_map)
+        return rows
     except Exception as e:
         logger.info("Hourly evidence detail query unavailable: %s", e)
         return []
@@ -498,13 +709,14 @@ def load_usage_daily_summary(start: datetime, end: datetime) -> list[dict[str, A
         "and": f"(service_date.lte.{end.date().isoformat()},source.eq.auto)",
     }
     try:
-        return client.select_all(
+        rows = client.select_all(
             "asset_pair_daily_summary",
             filters=filters,
             order="service_date.desc,trailer_id.asc,truck_id.asc",
             page_size=1000,
             hard_cap=100000,
         )
+        return _canonicalize_trailer_rows(rows, "trailer_id")
     except Exception as e:
         logger.info("Daily usage summary query unavailable: %s", e)
         return []
@@ -606,13 +818,14 @@ def load_trailer_activity_summary(start: datetime, end: datetime) -> list[dict[s
         "and": f"(service_date.lte.{end.date().isoformat()})",
     }
     try:
-        return client.select_all(
+        rows = client.select_all(
             "trailer_activity_summary",
             filters=filters,
             order="service_date.desc,trailer_id.asc",
             page_size=1000,
             hard_cap=50000,
         )
+        return _canonicalize_trailer_rows(rows, "trailer_id")
     except Exception as e:
         logger.info("Trailer activity summary query unavailable: %s", e)
         return []
@@ -641,7 +854,9 @@ def load_asset_hour_coverage(
 
     start = _ensure_aware(start)
     end = _ensure_aware(end)
-    safe_ids = "in.(" + ",".join(quote(asset_id, safe="") for asset_id in sorted(set(ids))) + ")"
+    alias_map = _load_provider_trailer_alias_map(client) if asset_type == "trailer" else {}
+    query_ids = _expand_asset_query_ids(asset_type, ids, alias_map)
+    safe_ids = "in.(" + ",".join(quote(asset_id, safe="") for asset_id in sorted(set(query_ids))) + ")"
     filters: dict[str, Any] = {
         "asset_type": f"eq.{asset_type}",
         "asset_id": safe_ids,
@@ -663,6 +878,8 @@ def load_asset_hour_coverage(
     result: dict[str, dict[str, Any]] = {}
     for row in rows:
         asset_id = str(row.get("asset_id") or "")
+        if asset_type == "trailer":
+            asset_id = _canonicalize_trailer_id(asset_id, alias_map)
         if not asset_id:
             continue
         acc = result.setdefault(asset_id, {
@@ -696,6 +913,73 @@ def load_asset_hour_coverage(
     return result
 
 
+def load_gps_provider_unit_map(
+    asset_type: str,
+    asset_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Return provider roster/archive metadata keyed by fleet-facing asset ID.
+
+    ``gps_provider_units`` is optional until migration 0023 is applied, so this
+    loader fails softly. It is used only for labels in billing/mismatch UI; GPS
+    evidence continues to come from ``assets_history``/derived evidence tables.
+    """
+    ids = [str(asset_id).strip() for asset_id in asset_ids if str(asset_id or "").strip()]
+    if not ids:
+        return {}
+    try:
+        client = _get_client()
+    except Exception as e:
+        logger.warning("GPS provider-unit archive unavailable: %s", e)
+        return {}
+
+    try:
+        alias_map = _load_provider_trailer_alias_map(client) if asset_type == "trailer" else {}
+    except Exception:
+        alias_map = {}
+    query_ids = _expand_asset_query_ids(asset_type, ids, alias_map)
+    safe_ids = "in.(" + ",".join(quote(asset_id, safe="") for asset_id in sorted(set(query_ids))) + ")"
+    filters: dict[str, Any] = {
+        "asset_type": f"eq.{asset_type}",
+        "asset_id": safe_ids,
+    }
+    try:
+        rows = client.select_all(
+            "gps_provider_units",
+            select=(
+                "provider,provider_account,provider_unit_id,asset_type,asset_id,canonical_asset_id,"
+                "display_name,status,is_active,last_seen_at,last_history_at,source"
+            ),
+            filters=filters,
+            order="asset_id.asc,last_history_at.desc,last_seen_at.desc",
+            page_size=1000,
+            hard_cap=50000,
+        )
+    except Exception as e:
+        logger.info("GPS provider-unit archive query unavailable: %s", e)
+        return {}
+
+    result: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        asset_id = str(row.get("asset_id") or row.get("canonical_asset_id") or "").strip()
+        if asset_type == "trailer":
+            asset_id = _canonicalize_trailer_id(asset_id, alias_map)
+        if not asset_id:
+            continue
+        existing = result.get(asset_id)
+        if existing is None or _provider_unit_rank(row) > _provider_unit_rank(existing):
+            result[asset_id] = row
+    return result
+
+
+def _provider_unit_rank(row: dict[str, Any]) -> tuple[int, str, str]:
+    """Prefer explicit active/inactive roster rows, then freshest history rows."""
+    source = str(row.get("source") or "")
+    roster_score = 1 if source == "provider_roster" else 0
+    last_history = str(row.get("last_history_at") or "")
+    last_seen = str(row.get("last_seen_at") or "")
+    return (roster_score, last_history, last_seen)
+
+
 def load_trailer_unmatched_windows(
     trailer_id: str,
     start: datetime,
@@ -716,7 +1000,7 @@ def load_trailer_unmatched_windows(
 
     track_filters: dict[str, Any] = {
         "asset_type": "eq.trailer",
-        "asset_id": f"eq.{trailer_id}",
+        "asset_id": _asset_id_filter(client, "trailer", trailer_id),
         "moving": "eq.true",
         "and": f"(hour_start.gte.{start.isoformat()},hour_start.lte.{end.isoformat()})",
     }
@@ -736,7 +1020,7 @@ def load_trailer_unmatched_windows(
         return []
 
     pair_filters: dict[str, Any] = {
-        "trailer_id": f"eq.{trailer_id}",
+        "trailer_id": _asset_id_filter(client, "trailer", trailer_id),
         "source": "eq.auto",
         "status": "eq.paired",
         "and": f"(hour_start.gte.{start.isoformat()},hour_start.lte.{end.isoformat()})",
@@ -865,7 +1149,7 @@ def _load_asset_gps_trail(
     start = _ensure_aware(start)
     end = _ensure_aware(end)
     filters: dict[str, Any] = {
-        "asset_id": f"eq.{asset_id}",
+        "asset_id": _asset_id_filter(client, asset_type, asset_id),
         "asset_type": f"eq.{asset_type}",
         "and": f"(recorded_at.gte.{start.isoformat()},recorded_at.lte.{end.isoformat()})",
     }
