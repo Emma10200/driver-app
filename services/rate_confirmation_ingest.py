@@ -6,8 +6,8 @@ First-layer pipeline:
 - Each attachment/document gets at most ONE selected truck.
 - If multiple plausible trucks are found for one attachment, the row is marked
   ambiguous/red instead of creating multiple assignments.
-- PDF parsing/OCR is intentionally second-layer work. This module uses only
-  subject, email body, and attachment filenames for fast matching.
+- PDF text-layer parsing runs first; scanned/image-only PDFs optionally fall
+    back to free Tesseract OCR when Poppler/Tesseract are installed.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from typing import Any, Iterable, Sequence
 
 from services.dispatch_board_data import load_dispatch_board_rows
 from services.qbo_supabase import SupabaseRestClient
+from services.rate_confirmation_ocr import OcrResult, ocr_pdf_text
 from submission_storage import get_runtime_secret
 
 DEFAULT_IMAP_HOST = "imap.gmail.com"
@@ -81,6 +82,21 @@ LOAD_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 RATEISH_SUBJECT_RE = re.compile(r"rate|confirm|load|truck|cancel|carrier|tender|dispatch", re.IGNORECASE)
+
+
+def _truthy_secret(name: str, default: str = "true") -> bool:
+    return str(get_runtime_secret(name, default) or default).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _int_secret(name: str, default: int) -> int:
+    try:
+        return int(get_runtime_secret(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _str_secret(name: str, default: str = "") -> str:
+    return str(get_runtime_secret(name, default) or default).strip()
 
 # ---------------------------------------------------------------------------
 # Sender email → board dispatcher resolution
@@ -912,9 +928,27 @@ def build_document_rows_from_message(
         )
 
         # One text extraction per PDF, reused for parsing AND match fallback.
+        # If the PDF has no text layer, Layer 2 uses free OCR (Tesseract via
+        # pytesseract + pdf2image/Poppler) when available.
         pdf_text_full = ""
+        ocr_result = OcrResult()
         if attachment.get("payload"):
             pdf_text_full = extract_pdf_text(bytes(attachment.get("payload") or b""), max_pages=8, max_chars=20000)
+            if not pdf_text_full.strip() and _truthy_secret("RATE_CONF_OCR_ENABLED", "true"):
+                ocr_result = ocr_pdf_text(
+                    bytes(attachment.get("payload") or b""),
+                    max_pages=_int_secret("RATE_CONF_OCR_MAX_PAGES", 4),
+                    dpi=_int_secret("RATE_CONF_OCR_DPI", 200),
+                    max_chars=_int_secret("RATE_CONF_OCR_MAX_CHARS", 20000),
+                    lang=_str_secret("RATE_CONF_OCR_LANG", "eng") or "eng",
+                    tesseract_config=_str_secret("RATE_CONF_OCR_CONFIG", "--oem 3 --psm 6") or "--oem 3 --psm 6",
+                    poppler_path=_str_secret("POPPLER_PATH", ""),
+                    tesseract_cmd=_str_secret("TESSERACT_CMD", ""),
+                    pdf_timeout=_int_secret("RATE_CONF_OCR_PDF_TIMEOUT", 60),
+                    tesseract_timeout=_int_secret("RATE_CONF_OCR_TESSERACT_TIMEOUT", 30),
+                )
+                if ocr_result.text.strip():
+                    pdf_text_full = ocr_result.text
 
         # Second chance: if subject/body/filename produced nothing, look inside
         # the PDF text layer for board trucks/trailers before giving up.
@@ -983,7 +1017,11 @@ def build_document_rows_from_message(
             "pickup_at": parsed.get("pickup_at"),
             "delivery_at": parsed.get("delivery_at"),
             "rate_amount": parsed.get("rate_amount"),
-            "parsed_fields": {"rate_items": parsed.get("rate_items") or []},
+            "parsed_fields": {
+                "rate_items": parsed.get("rate_items") or [],
+                "text_source": "ocr" if ocr_result.text.strip() else ("pdf_text" if pdf_text_full.strip() else ""),
+                "ocr": ocr_result.as_metadata() if ocr_result.status != "not_started" else {},
+            },
             "parse_status": str(parsed.get("parse_status") or "not_started"),
             "alert_level": alert_level,
             "alert_codes": alert_codes,

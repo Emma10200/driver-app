@@ -9,6 +9,7 @@ from services.rate_confirmation_ingest import (
     extract_number_mentions,
     select_single_truck,
 )
+from services.rate_confirmation_ocr import OcrResult
 
 
 def _board(*truck_ids: str) -> dict[str, BoardTruck]:
@@ -319,3 +320,49 @@ def test_pdf_text_fallback_source_can_match() -> None:
 
     assert result["matched_truck_id"] == "1971"
     assert result["match_status"] == "matched"
+
+
+def test_scanned_pdf_ocr_fallback_matches_and_parses(monkeypatch) -> None:
+    """Blank text-layer PDFs should use OCR text for matching and parsing."""
+    from services import rate_confirmation_ingest as ingest
+
+    monkeypatch.setattr(ingest, "extract_pdf_text", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(
+        ingest,
+        "ocr_pdf_text",
+        lambda *_args, **_kwargs: OcrResult(
+            text="""
+            RXO Load Confirmation
+            TRUCK 1971
+            Total Carrier Pay $1,250.00
+            STOP DETAIL
+            Pick 07/02/26 SHIPPER
+            Chicago, IL 60601
+            Drop 07/03/26 RECEIVER
+            Fontana, CA 92335
+            """,
+            status="ocr_text_extracted",
+            pages_rendered=1,
+            pages_ocrd=1,
+            chars=180,
+        ),
+    )
+
+    msg = EmailMessage()
+    msg["From"] = "Dispatcher <dispatch1@prestige.inc>"
+    msg["Subject"] = "Load confirmation"
+    msg["Message-ID"] = "<ocr-test@example.com>"
+    msg.set_content("Please see attached.")
+    msg.add_attachment(b"%PDF fake scanned", maintype="application", subtype="pdf", filename="scan.pdf")
+
+    rows = build_document_rows_from_message(msg, {"1971": BoardTruck(truck_id="1971", dispatcher="Carlos IL")})
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["matched_truck_id"] == "1971"
+    assert row["match_source"] == "pdf_text"
+    assert row["broker_name"] == "RXO"
+    assert row["rate_amount"] == 1250.0
+    assert row["parse_status"] == "parsed"
+    assert row["parsed_fields"]["text_source"] == "ocr"
+    assert row["parsed_fields"]["ocr"]["status"] == "ocr_text_extracted"
