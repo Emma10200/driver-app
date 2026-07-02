@@ -201,6 +201,15 @@ if _shop_inventory_requested():
 # GPS Fleet Map & Trailer-Truck Matching. Reachable via ?gps=1 or ?route=gps-map.
 # Reads from Supabase assets_current. No ELD API calls from this side.
 if _gps_map_requested():
+    from services.staff_auth import render_staff_login_gate
+
+    if not render_staff_login_gate(
+        title="GPS Fleet Map",
+        caption="GPS locations and truck/trailer pairings are internal-only. Sign in with the approved accounting Google account.",
+    ):
+        render_version_footer()
+        st.stop()
+
     from services.gps_map_page import render_gps_map_page
 
     render_gps_map_page()
@@ -212,6 +221,15 @@ if _gps_map_requested():
 # ?route=dispatch-board. Google Sheets remains editable source of truth while
 # dispatchers can try the web view.
 if _dispatch_board_requested():
+    from services.staff_auth import render_staff_login_gate
+
+    if not render_staff_login_gate(
+        title="Dispatch Board",
+        caption="Dispatch board details, GPS status, and rate confirmations are internal-only. Sign in with the approved accounting Google account.",
+    ):
+        render_version_footer()
+        st.stop()
+
     from services.dispatch_board_page import render_dispatch_board_page
 
     render_dispatch_board_page()
