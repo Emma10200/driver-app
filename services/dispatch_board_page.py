@@ -404,6 +404,19 @@ def _render_truck_detail_expander(row: dict[str, Any]) -> None:
                     duplicate_count = int(doc.get("duplicate_count") or 1)
                     copy_note = f" · {duplicate_count} copies collapsed" if duplicate_count > 1 else ""
                     st.markdown(f"- **{title}** ({received}{copy_note})")
+                    pickup = str(doc.get("pickup_summary") or "").strip()
+                    delivery = str(doc.get("delivery_summary") or "").strip()
+                    rate = doc.get("rate_amount")
+                    route_bits = []
+                    if pickup or delivery:
+                        route_bits.append(f"{pickup or '?'} → {delivery or '?'}")
+                    if rate:
+                        try:
+                            route_bits.append(f"${float(rate):,.2f}")
+                        except (TypeError, ValueError):
+                            pass
+                    if route_bits:
+                        st.caption(" | ".join(route_bits))
                     st.caption(f"Ref: {ref} | {domain}" if ref else domain)
         notes = str(row.get("notes") or "")
         planning = str(row.get("planning_note") or "")

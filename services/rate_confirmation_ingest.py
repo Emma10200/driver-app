@@ -911,20 +911,29 @@ def build_document_rows_from_message(
             gps_active_trucks=gps_active_trucks,
         )
 
+        # One text extraction per PDF, reused for parsing AND match fallback.
+        pdf_text_full = ""
+        if attachment.get("payload"):
+            pdf_text_full = extract_pdf_text(bytes(attachment.get("payload") or b""), max_pages=8, max_chars=20000)
+
         # Second chance: if subject/body/filename produced nothing, look inside
         # the PDF text layer for board trucks/trailers before giving up.
-        if selection["match_status"] == "unmatched" and attachment.get("payload"):
-            pdf_text = extract_pdf_text(bytes(attachment.get("payload") or b""))
-            if pdf_text:
-                pdf_mentions = extract_number_mentions(pdf_text, "pdf_text")
-                if pdf_mentions:
-                    mentions.extend(pdf_mentions)
-                    matches = candidate_matches(mentions, board, trailer_map)
-                    selection = select_single_truck(
-                        matches,
-                        sender_dispatcher=sender_dispatcher,
-                        gps_active_trucks=gps_active_trucks,
-                    )
+        if selection["match_status"] == "unmatched" and pdf_text_full:
+            pdf_mentions = extract_number_mentions(pdf_text_full[:6000], "pdf_text")
+            if pdf_mentions:
+                mentions.extend(pdf_mentions)
+                matches = candidate_matches(mentions, board, trailer_map)
+                selection = select_single_truck(
+                    matches,
+                    sender_dispatcher=sender_dispatcher,
+                    gps_active_trucks=gps_active_trucks,
+                )
+
+        # Layer-1 field parsing (broker/pickup/delivery/rate) from the text
+        # layer. Image-only documents come back as needs_ocr for layer 2.
+        from services.rate_confirmation_parser import parse_rate_confirmation
+
+        parsed = parse_rate_confirmation(pdf_text_full, subject=subject, quoted_body=quoted_body)
         best = selection.get("best_match") or {}
         alert_codes = list(selection["alert_codes"] or [])
         alert_level = str(selection["alert_level"] or "")
@@ -968,6 +977,14 @@ def build_document_rows_from_message(
             "board_division": selected_truck.division if selected_truck else str(best.get("board_division") or ""),
             "board_sheet_row": selected_truck.sheet_row if selected_truck else best.get("board_sheet_row"),
             "load_reference": load_refs[0] if load_refs else "",
+            "broker_name": str(parsed.get("broker_name") or "")[:120],
+            "pickup_summary": str(parsed.get("pickup_summary") or "")[:200],
+            "delivery_summary": str(parsed.get("delivery_summary") or "")[:200],
+            "pickup_at": parsed.get("pickup_at"),
+            "delivery_at": parsed.get("delivery_at"),
+            "rate_amount": parsed.get("rate_amount"),
+            "parsed_fields": {"rate_items": parsed.get("rate_items") or []},
+            "parse_status": str(parsed.get("parse_status") or "not_started"),
             "alert_level": alert_level,
             "alert_codes": alert_codes,
             "alert_notes": alert_notes,
