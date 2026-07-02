@@ -54,3 +54,27 @@ def test_one_attachment_multiple_equal_trucks_is_ambiguous() -> None:
     assert result["match_status"] == "ambiguous"
     assert result["alert_level"] == "red"
     assert "multiple_truck_candidates_one_attachment" in result["alert_codes"]
+
+
+def test_body_noise_bare_numbers_pick_first_not_ambiguous() -> None:
+    """Multiple bare numbers in email_body that match board trucks should NOT
+    produce a red ambiguous alert. The first one gets picked at lower confidence."""
+    mentions = extract_number_mentions("order 333 ref 713 load 973", "email_body")
+    matches = candidate_matches(mentions, _board("333", "713", "973"))
+    result = select_single_truck(matches)
+
+    # Should pick a truck rather than flagging ambiguous
+    assert result["matched_truck_id"] != ""
+    assert result["match_status"] != "ambiguous" or result["alert_level"] != "red"
+
+
+def test_subject_wins_over_body_noise() -> None:
+    """A clear truck in the subject should override random body numbers."""
+    subj_mentions = extract_number_mentions("TRUCK 649", "subject")
+    body_mentions = extract_number_mentions("ref 333 order 713 load 973", "email_body")
+    matches = candidate_matches(subj_mentions + body_mentions, _board("649", "333", "713", "973"))
+    result = select_single_truck(matches)
+
+    assert result["matched_truck_id"] == "649"
+    assert result["match_status"] == "matched"
+    assert result["alert_level"] == ""

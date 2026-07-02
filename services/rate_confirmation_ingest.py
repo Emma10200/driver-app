@@ -290,9 +290,13 @@ def candidate_matches(mentions: Sequence[NumberMention], board: dict[str, BoardT
 def select_single_truck(matches: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """Return selected truck metadata plus alert fields.
 
-    If the best-ranked group contains multiple trucks, do NOT select any truck.
-    That implements the business rule: one attachment should never assign to two
-    trucks; ambiguous rows go to review instead.
+    Uses a **source cascade**: subject beats filename beats email_body.
+    Within the best source, if multiple distinct trucks tie at the same match
+    quality (exact > truck_label > number), only THEN is the row ambiguous.
+
+    This prevents long forwarded email bodies full of random 3-digit numbers
+    from creating false multi-truck alerts when the subject already has a clear
+    truck assignment.
     """
     if not matches:
         return {
@@ -308,54 +312,77 @@ def select_single_truck(matches: Sequence[dict[str, Any]]) -> dict[str, Any]:
             "best_match": None,
         }
 
-    best = matches[0]
-    best_key = (
-        MATCH_RANK.get(str(best["match_type"]), 99),
-        LABEL_RANK.get(str(best["label"]), 99),
-        SOURCE_RANK.get(str(best["source"]), 99),
-    )
-    tied = [
-        item
-        for item in matches
-        if (
-            MATCH_RANK.get(str(item["match_type"]), 99),
-            LABEL_RANK.get(str(item["label"]), 99),
-            SOURCE_RANK.get(str(item["source"]), 99),
+    # Source cascade: try each source tier in priority order.
+    # Within each source, pick the best match quality; if a single truck wins,
+    # use it. If multiple trucks tie, escalate to the next source. Only if ALL
+    # sources produce ties (or are empty) do we flag ambiguous.
+    source_tiers = ["subject", "filename", "email_body", "pdf_text"]
+    for source in source_tiers:
+        source_matches = [m for m in matches if str(m.get("source")) == source]
+        if not source_matches:
+            continue
+        # Within this source, find the best quality tier
+        best = source_matches[0]
+        best_quality = (
+            MATCH_RANK.get(str(best["match_type"]), 99),
+            LABEL_RANK.get(str(best["label"]), 99),
         )
-        == best_key
-    ]
-    tied_trucks = sorted({str(item["matched_truck"]) for item in tied})
-    if len(tied_trucks) > 1:
-        return {
-            "matched_truck_id": "",
-            "match_status": "ambiguous",
-            "match_type": str(best["match_type"]),
-            "match_source": str(best["source"]),
-            "match_token": str(best["token"]),
-            "match_confidence": 0.0,
-            "alert_level": "red",
-            "alert_codes": ["multiple_truck_candidates_one_attachment"],
-            "alert_notes": f"One attachment produced multiple equally ranked truck candidates: {', '.join(tied_trucks)}.",
-            "best_match": best,
-        }
+        tied = [
+            item for item in source_matches
+            if (
+                MATCH_RANK.get(str(item["match_type"]), 99),
+                LABEL_RANK.get(str(item["label"]), 99),
+            ) == best_quality
+        ]
+        tied_trucks = sorted({str(item["matched_truck"]) for item in tied})
+        if len(tied_trucks) == 1:
+            # Clear winner from this source — use it
+            return _build_selected(best, tied_trucks)
+        # Multiple trucks tied at this source. If this is subject or filename
+        # (high-signal sources), that's a real ambiguity. If this is email_body,
+        # try to break the tie: prefer truck_label over bare number, prefer
+        # the first occurrence, otherwise accept the first alphabetically.
+        if source in {"email_body", "pdf_text"} and len(tied_trucks) > 1:
+            # In body, bare numbers are noise; only flag ambiguous if there are
+            # multiple truck_label matches.
+            labeled = [m for m in tied if str(m.get("label")) == "truck_label"]
+            labeled_trucks = sorted({str(m["matched_truck"]) for m in labeled})
+            if len(labeled_trucks) == 1:
+                return _build_selected(labeled[0], labeled_trucks)
+            if not labeled_trucks:
+                # All are bare numbers from body — just take the first one, low confidence
+                return _build_selected(best, [str(best["matched_truck"])], body_noise=True)
+            # Multiple labeled trucks in body — genuinely ambiguous
+            return _build_ambiguous(best, labeled_trucks)
+        # Subject/filename with multiple trucks — genuinely ambiguous
+        return _build_ambiguous(best, tied_trucks)
 
+    # Fell through all sources with no matches (shouldn't happen if matches is non-empty)
+    best = matches[0]
+    return _build_selected(best, [str(best["matched_truck"])])
+
+
+def _build_selected(best: dict[str, Any], trucks: list[str], *, body_noise: bool = False) -> dict[str, Any]:
+    """Build a successful selection result from a single winning truck."""
     match_type = str(best["match_type"])
+    truck_id = trucks[0] if trucks else str(best["matched_truck"])
     if match_type == "exact":
+        confidence = 0.85 if body_noise else 1.0
         return {
-            "matched_truck_id": str(best["matched_truck"]),
-            "match_status": "matched",
+            "matched_truck_id": truck_id,
+            "match_status": "matched" if not body_noise else "near_match",
             "match_type": match_type,
             "match_source": str(best["source"]),
             "match_token": str(best["token"]),
-            "match_confidence": 1.0,
-            "alert_level": "",
-            "alert_codes": [],
-            "alert_notes": "",
+            "match_confidence": confidence,
+            "alert_level": "info" if body_noise else "",
+            "alert_codes": ["body_noise_single_pick"] if body_noise else [],
+            "alert_notes": f"Picked truck {truck_id} from body (multiple bare numbers present, none labeled)." if body_noise else "",
             "best_match": best,
         }
     if match_type == "one_digit_off":
         return {
-            "matched_truck_id": str(best["matched_truck"]),
+            "matched_truck_id": truck_id,
             "match_status": "near_match",
             "match_type": match_type,
             "match_source": str(best["source"]),
@@ -363,19 +390,35 @@ def select_single_truck(matches: Sequence[dict[str, Any]]) -> dict[str, Any]:
             "match_confidence": 0.98,
             "alert_level": "info",
             "alert_codes": ["one_digit_off_truck_match"],
-            "alert_notes": f"Matched board truck {best['matched_truck']} from nearby token {best['token']}.",
+            "alert_notes": f"Matched board truck {truck_id} from nearby token {best['token']}.",
             "best_match": best,
         }
     return {
-        "matched_truck_id": str(best["matched_truck"]),
-        "match_status": "ambiguous",
+        "matched_truck_id": truck_id,
+        "match_status": "near_match",
         "match_type": match_type,
         "match_source": str(best["source"]),
         "match_token": str(best["token"]),
         "match_confidence": 0.65,
         "alert_level": "yellow",
         "alert_codes": ["two_digits_off_truck_match_review"],
-        "alert_notes": f"Only a two-digit-off board truck match was found: {best['token']} -> {best['matched_truck']}.",
+        "alert_notes": f"Only a two-digit-off board truck match was found: {best['token']} -> {truck_id}.",
+        "best_match": best,
+    }
+
+
+def _build_ambiguous(best: dict[str, Any], tied_trucks: list[str]) -> dict[str, Any]:
+    """Build an ambiguous result when multiple trucks genuinely tie."""
+    return {
+        "matched_truck_id": "",
+        "match_status": "ambiguous",
+        "match_type": str(best["match_type"]),
+        "match_source": str(best["source"]),
+        "match_token": str(best["token"]),
+        "match_confidence": 0.0,
+        "alert_level": "red",
+        "alert_codes": ["multiple_truck_candidates_one_attachment"],
+        "alert_notes": f"Multiple equally ranked truck candidates: {', '.join(tied_trucks)}.",
         "best_match": best,
     }
 
