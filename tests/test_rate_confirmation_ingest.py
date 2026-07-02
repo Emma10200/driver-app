@@ -78,3 +78,33 @@ def test_subject_wins_over_body_noise() -> None:
     assert result["matched_truck_id"] == "649"
     assert result["match_status"] == "matched"
     assert result["alert_level"] == ""
+
+
+def test_dispatcher_tiebreak_picks_dispatchers_truck() -> None:
+    """When multiple trucks tie, the sender's dispatcher's truck wins."""
+    board = {
+        "333": BoardTruck(truck_id="333", dispatcher="Anna"),
+        "713": BoardTruck(truck_id="713", dispatcher="Brittany"),
+        "973": BoardTruck(truck_id="973", dispatcher="Carlos CA"),
+    }
+    mentions = extract_number_mentions("ref 333 order 713 load 973", "email_body")
+    matches = candidate_matches(mentions, board)
+    result = select_single_truck(matches, sender_dispatcher="Anna")
+
+    assert result["matched_truck_id"] == "333"
+    assert result["match_status"] == "matched"
+    assert "dispatcher_or_gps_tiebreak" in result["alert_codes"]
+
+
+def test_gps_active_tiebreak() -> None:
+    """When dispatcher can't break the tie, prefer the GPS-active truck."""
+    board = {
+        "333": BoardTruck(truck_id="333", dispatcher="Anna"),
+        "713": BoardTruck(truck_id="713", dispatcher="Anna"),
+    }
+    mentions = extract_number_mentions("ref 333 order 713", "email_body")
+    matches = candidate_matches(mentions, board)
+    result = select_single_truck(matches, sender_dispatcher="Anna", gps_active_trucks={"713"})
+
+    assert result["matched_truck_id"] == "713"
+    assert result["match_status"] == "matched"

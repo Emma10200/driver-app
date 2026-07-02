@@ -48,6 +48,55 @@ LOAD_HINT_RE = re.compile(
 )
 RATEISH_SUBJECT_RE = re.compile(r"rate|confirm|load|truck|cancel|carrier|tender|dispatch", re.IGNORECASE)
 
+# ---------------------------------------------------------------------------
+# Sender email → board dispatcher resolution
+# ---------------------------------------------------------------------------
+# Mapping from known sender emails to board dispatcher names. This handles the
+# two-Carlos split and generic "Prestige DispatchN" senders whose first name
+# doesn't match a board dispatcher.
+_EMAIL_TO_DISPATCHER: dict[str, str] = {
+    "dispatch1@prestige.inc": "Carlos IL",
+    "dispatch1@prestigecalifornia.com": "Carlos CA",
+    "dispatch3@prestige.inc": "Brittany",
+    "dispatch3@prestigecalifornia.com": "Carlos CA",
+    "dispatch4@prestige.inc": "Carlos CA",
+    "dispatch4@prestigecalifornia.com": "Carlos CA",
+    "dispatch5@prestige.inc": "Anna",
+    "dispatch7@prestige.inc": "Felix",
+    "dispatch7@prestigecalifornia.com": "Carlos CA",
+    "dispatch8@prestige.inc": "Lily",
+    "dispatch@prestige.inc": "Felix",
+    "dispatch@prestigecalifornia.com": "Carlos CA",
+    "dispatch@xpresstransinc.com": "Brittany",
+    "brittany@xpresstransinc.com": "Brittany",
+    "carlos@xpresstransinc.com": "Carlos IL",
+    "matt@prestige.inc": "Matt",
+}
+
+
+def resolve_sender_dispatcher(sender_email: str, sender_name: str, board: dict[str, "BoardTruck"]) -> str:
+    """Best-effort resolve a sender email/name to a board dispatcher name.
+
+    Priority:
+    1. Exact email→dispatcher lookup table
+    2. Sender display name first-name match against board dispatcher first names
+    3. Empty string (unknown)
+    """
+    email_lower = sender_email.lower().strip()
+    if email_lower in _EMAIL_TO_DISPATCHER:
+        return _EMAIL_TO_DISPATCHER[email_lower]
+    # First-name match from sender display name
+    sender_first = (sender_name or "").split()[0].lower().strip() if sender_name else ""
+    if sender_first:
+        dispatcher_first_names: dict[str, str] = {}
+        for truck in board.values():
+            if truck.dispatcher:
+                first = truck.dispatcher.split()[0].lower().strip()
+                dispatcher_first_names.setdefault(first, truck.dispatcher)
+        if sender_first in dispatcher_first_names:
+            return dispatcher_first_names[sender_first]
+    return ""
+
 
 @dataclass(frozen=True)
 class MailboxConfig:
@@ -287,16 +336,21 @@ def candidate_matches(mentions: Sequence[NumberMention], board: dict[str, BoardT
     return deduped
 
 
-def select_single_truck(matches: Sequence[dict[str, Any]]) -> dict[str, Any]:
+def select_single_truck(
+    matches: Sequence[dict[str, Any]],
+    *,
+    sender_dispatcher: str = "",
+    gps_active_trucks: set[str] | None = None,
+) -> dict[str, Any]:
     """Return selected truck metadata plus alert fields.
 
     Uses a **source cascade**: subject beats filename beats email_body.
     Within the best source, if multiple distinct trucks tie at the same match
-    quality (exact > truck_label > number), only THEN is the row ambiguous.
-
-    This prevents long forwarded email bodies full of random 3-digit numbers
-    from creating false multi-truck alerts when the subject already has a clear
-    truck assignment.
+    quality (exact > truck_label > number), apply tie-breakers:
+      1. Dispatcher: if the sender maps to a board dispatcher, prefer that
+         dispatcher's truck.
+      2. GPS active: among remaining ties, prefer trucks with a recent GPS ping.
+      3. If still tied, flag ambiguous.
     """
     if not matches:
         return {
@@ -312,10 +366,8 @@ def select_single_truck(matches: Sequence[dict[str, Any]]) -> dict[str, Any]:
             "best_match": None,
         }
 
-    # Source cascade: try each source tier in priority order.
-    # Within each source, pick the best match quality; if a single truck wins,
-    # use it. If multiple trucks tie, escalate to the next source. Only if ALL
-    # sources produce ties (or are empty) do we flag ambiguous.
+    active = gps_active_trucks or set()
+
     source_tiers = ["subject", "filename", "email_body", "pdf_text"]
     for source in source_tiers:
         source_matches = [m for m in matches if str(m.get("source")) == source]
@@ -336,25 +388,24 @@ def select_single_truck(matches: Sequence[dict[str, Any]]) -> dict[str, Any]:
         ]
         tied_trucks = sorted({str(item["matched_truck"]) for item in tied})
         if len(tied_trucks) == 1:
-            # Clear winner from this source — use it
             return _build_selected(best, tied_trucks)
-        # Multiple trucks tied at this source. If this is subject or filename
-        # (high-signal sources), that's a real ambiguity. If this is email_body,
-        # try to break the tie: prefer truck_label over bare number, prefer
-        # the first occurrence, otherwise accept the first alphabetically.
+        # Multiple trucks tied — apply tie-breakers before declaring ambiguous
+        winner = _break_tie(tied, tied_trucks, sender_dispatcher, active)
+        if winner:
+            return _build_selected(winner, [str(winner["matched_truck"])], tiebreak=True)
+        # Body noise: bare numbers are low signal
         if source in {"email_body", "pdf_text"} and len(tied_trucks) > 1:
-            # In body, bare numbers are noise; only flag ambiguous if there are
-            # multiple truck_label matches.
             labeled = [m for m in tied if str(m.get("label")) == "truck_label"]
             labeled_trucks = sorted({str(m["matched_truck"]) for m in labeled})
             if len(labeled_trucks) == 1:
                 return _build_selected(labeled[0], labeled_trucks)
-            if not labeled_trucks:
-                # All are bare numbers from body — just take the first one, low confidence
-                return _build_selected(best, [str(best["matched_truck"])], body_noise=True)
-            # Multiple labeled trucks in body — genuinely ambiguous
-            return _build_ambiguous(best, labeled_trucks)
-        # Subject/filename with multiple trucks — genuinely ambiguous
+            if labeled_trucks:
+                winner = _break_tie(labeled, labeled_trucks, sender_dispatcher, active)
+                if winner:
+                    return _build_selected(winner, [str(winner["matched_truck"])], tiebreak=True)
+                return _build_ambiguous(best, labeled_trucks)
+            # All bare numbers from body — pick first, low confidence
+            return _build_selected(best, [str(best["matched_truck"])], body_noise=True)
         return _build_ambiguous(best, tied_trucks)
 
     # Fell through all sources with no matches (shouldn't happen if matches is non-empty)
@@ -362,11 +413,61 @@ def select_single_truck(matches: Sequence[dict[str, Any]]) -> dict[str, Any]:
     return _build_selected(best, [str(best["matched_truck"])])
 
 
-def _build_selected(best: dict[str, Any], trucks: list[str], *, body_noise: bool = False) -> dict[str, Any]:
+def _break_tie(
+    tied: list[dict[str, Any]],
+    tied_trucks: list[str],
+    sender_dispatcher: str,
+    gps_active: set[str],
+) -> dict[str, Any] | None:
+    """Try to pick a single truck from a tie using dispatcher and GPS signals.
+
+    Returns the winning match dict, or None if the tie can't be broken.
+    """
+    remaining = list(tied)
+    remaining_trucks = list(tied_trucks)
+
+    # Tie-breaker 1: dispatcher match
+    if sender_dispatcher:
+        disp_lower = sender_dispatcher.lower().strip()
+        dispatcher_matches = [
+            m for m in remaining
+            if str(m.get("board_dispatcher") or "").lower().strip() == disp_lower
+        ]
+        dispatcher_trucks = sorted({str(m["matched_truck"]) for m in dispatcher_matches})
+        if len(dispatcher_trucks) == 1:
+            return dispatcher_matches[0]
+        if dispatcher_trucks:
+            remaining = dispatcher_matches
+            remaining_trucks = dispatcher_trucks
+
+    # Tie-breaker 2: GPS active (pinged in last 24h)
+    if gps_active and len(remaining_trucks) > 1:
+        active_matches = [m for m in remaining if str(m["matched_truck"]) in gps_active]
+        active_trucks = sorted({str(m["matched_truck"]) for m in active_matches})
+        if len(active_trucks) == 1:
+            return active_matches[0]
+
+    return None
+
+
+def _build_selected(best: dict[str, Any], trucks: list[str], *, body_noise: bool = False, tiebreak: bool = False) -> dict[str, Any]:
     """Build a successful selection result from a single winning truck."""
     match_type = str(best["match_type"])
     truck_id = trucks[0] if trucks else str(best["matched_truck"])
     if match_type == "exact":
+        if tiebreak:
+            return {
+                "matched_truck_id": truck_id,
+                "match_status": "matched",
+                "match_type": match_type,
+                "match_source": str(best["source"]),
+                "match_token": str(best["token"]),
+                "match_confidence": 0.95,
+                "alert_level": "info",
+                "alert_codes": ["dispatcher_or_gps_tiebreak"],
+                "alert_notes": f"Resolved tie to truck {truck_id} via dispatcher/GPS match.",
+                "best_match": best,
+            }
         confidence = 0.85 if body_noise else 1.0
         return {
             "matched_truck_id": truck_id,
@@ -454,7 +555,12 @@ def _safe_doc_key(message_id: str, attachment_index: int, digest: str) -> str:
     return hashlib.sha256(basis).hexdigest()
 
 
-def build_document_rows_from_message(msg: Message, board: dict[str, BoardTruck]) -> list[dict[str, Any]]:
+def build_document_rows_from_message(
+    msg: Message,
+    board: dict[str, BoardTruck],
+    *,
+    gps_active_trucks: set[str] | None = None,
+) -> list[dict[str, Any]]:
     from_name, from_addr = parseaddr(msg.get("From", ""))
     domain = from_addr.split("@", 1)[-1].lower() if "@" in from_addr else ""
     subject = _decode(msg.get("Subject"))
@@ -463,6 +569,11 @@ def build_document_rows_from_message(msg: Message, board: dict[str, BoardTruck])
     received = _received_at(msg)
     body = message_body_text(msg)
     attachments = _attachment_parts(msg)
+
+    if domain in NOISE_DOMAINS:
+        return []
+
+    sender_dispatcher = resolve_sender_dispatcher(from_addr, _decode(from_name), board)
 
     if domain in NOISE_DOMAINS:
         return []
@@ -478,7 +589,11 @@ def build_document_rows_from_message(msg: Message, board: dict[str, BoardTruck])
         for source, text in (("subject", subject), ("email_body", body), ("filename", filename)):
             mentions.extend(extract_number_mentions(text, source))
         matches = candidate_matches(mentions, board)
-        selection = select_single_truck(matches)
+        selection = select_single_truck(
+            matches,
+            sender_dispatcher=sender_dispatcher,
+            gps_active_trucks=gps_active_trucks,
+        )
         best = selection.get("best_match") or {}
         alert_codes = list(selection["alert_codes"] or [])
         alert_level = str(selection["alert_level"] or "")
@@ -539,7 +654,7 @@ def _imap_since(days: int) -> str:
     return (datetime.now(UTC) - timedelta(days=days)).strftime("%d-%b-%Y")
 
 
-def fetch_recent_document_rows(mailbox: MailboxConfig, board: dict[str, BoardTruck], *, days: int = 14, limit: int = 0) -> list[dict[str, Any]]:
+def fetch_recent_document_rows(mailbox: MailboxConfig, board: dict[str, BoardTruck], *, days: int = 14, limit: int = 0, gps_active_trucks: set[str] | None = None) -> list[dict[str, Any]]:
     client = imaplib.IMAP4_SSL(mailbox.host, mailbox.port)
     try:
         client.login(mailbox.username, mailbox.password)
@@ -558,7 +673,7 @@ def fetch_recent_document_rows(mailbox: MailboxConfig, board: dict[str, BoardTru
             if status != "OK" or not msg_data or not msg_data[0]:
                 continue
             msg = email.message_from_bytes(msg_data[0][1])
-            rows.extend(build_document_rows_from_message(msg, board))
+            rows.extend(build_document_rows_from_message(msg, board, gps_active_trucks=gps_active_trucks))
         return rows
     finally:
         try:
@@ -578,7 +693,19 @@ def ingest_recent_rate_confirmations(*, days: int = 14, limit: int = 0, dry_run:
     board = board_trucks_from_rows(load_dispatch_board_rows())
     if not board:
         raise RuntimeError("No current dispatch-board truck IDs found.")
-    rows = fetch_recent_document_rows(mailbox, board, days=days, limit=limit)
+    # Load GPS-active trucks for tie-breaking
+    gps_active: set[str] = set()
+    try:
+        from services.gps_data import load_current_assets
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
+        for asset in load_current_assets():
+            if asset.asset_type == "truck" and asset.last_ping:
+                if (now - asset.last_ping).total_seconds() < 86400:
+                    gps_active.add(str(asset.asset_id).strip())
+    except Exception:
+        pass  # GPS is a nice-to-have tie-breaker, not critical
+    rows = fetch_recent_document_rows(mailbox, board, days=days, limit=limit, gps_active_trucks=gps_active)
     summary = _summarize_rows(rows)
     summary.update({"days": days, "dry_run": dry_run, "dispatch_board_trucks": len(board)})
     if dry_run or not rows:
