@@ -35,13 +35,27 @@ DEFAULT_MAILBOX_FOLDER = "INBOX"
 RATE_CONF_TABLE = "rate_confirmation_documents"
 NOISE_DOMAINS = {"accounts.google.com", "google.com"}
 
-SOURCE_RANK = {"subject": 0, "filename": 1, "email_body": 2}
+SOURCE_RANK = {"subject": 0, "filename": 1, "email_body": 2, "quoted_body": 3, "pdf_text": 4}
 LABEL_RANK = {"truck_label": 0, "number": 1, "trailer_label": 2}
 MATCH_RANK = {"exact": 0, "one_digit_off": 1, "two_digits_off": 2}
 
-NUMBER_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])(\d{2,6})(?![A-Za-z0-9])")
-TAGGED_TRUCK_RE = re.compile(r"\b(?:truck|unit|tractor)\s*#?\s*(\d{2,6})\b", re.IGNORECASE)
+# Bare numbers must be 3-6 digits: 2-digit standalone tokens (dates, weights,
+# quantities) are far too noisy. Trucks with 2-digit IDs (45, 67, 95) can still
+# match via an explicit "TRUCK 67" label or the subject/filename.
+NUMBER_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])(\d{3,6})(?![A-Za-z0-9])")
+TAGGED_TRUCK_RE = re.compile(r"\b(?:truck|trk|unit|tractor)\s*#?\s*(\d{2,6})\b", re.IGNORECASE)
 TAGGED_TRAILER_RE = re.compile(r"\btrail?er\s*#?\s*(\d{2,6})\b", re.IGNORECASE)
+# Markers that start a quoted reply / forwarded chain inside an email body.
+QUOTE_MARKER_RE = re.compile(
+    r"(?im)^\s*(?:"
+    r">"
+    r"|On .{0,150}wrote:"
+    r"|-{2,}\s*Original Message\s*-{2,}"
+    r"|-{4,}\s*Forwarded message\s*-{4,}"
+    r"|Begin forwarded message:"
+    r"|From:\s\S.{0,150}"
+    r")\s*$"
+)
 LOAD_HINT_RE = re.compile(
     r"\b(?:load|order|carrier|reference|ref|po|paynumber|bol|ldi\s+load)\s*#?\s*[:\-]?\s*([A-Za-z0-9\-]{4,})",
     re.IGNORECASE,
@@ -233,6 +247,21 @@ def board_trucks_from_rows(rows: Sequence[dict[str, Any]]) -> dict[str, BoardTru
     return trucks
 
 
+def split_quoted_reply(body: str) -> tuple[str, str]:
+    """Split an email body into (top_part, quoted_part).
+
+    The top part is what the sender actually typed (e.g. "TRUCK 940 DRIVER SAM").
+    The quoted part is the forwarded broker email / reply chain, which is full of
+    load numbers and other digit noise, so it must be matched at lowest priority.
+    """
+    if not body:
+        return "", ""
+    match = QUOTE_MARKER_RE.search(body)
+    if not match:
+        return body, ""
+    return body[: match.start()], body[match.start():]
+
+
 def extract_number_mentions(text: str, source: str) -> list[NumberMention]:
     mentions: list[NumberMention] = []
     seen: set[tuple[str, str]] = set()
@@ -284,6 +313,26 @@ def _match_kind(token: str, truck_id: str) -> tuple[str, int] | None:
     return None
 
 
+def _match_type_allowed(label: str, source: str, match_type: str, token: str) -> bool:
+    """Gate which match types are allowed per mention label and source.
+
+    - Exact matches are always allowed.
+    - Near matches (one/two digits off) are only trusted for explicitly labeled
+      truck tokens or subject/filename tokens — a bare number in an email body
+      that is "one digit off" a truck is almost always a load-number fragment,
+      not a typo.
+    """
+    if match_type == "exact":
+        return True
+    if label == "truck_label":
+        if match_type == "one_digit_off":
+            return len(token) >= 3
+        return len(token) >= 4
+    if source in {"subject", "filename"}:
+        return match_type == "one_digit_off" and len(token) >= 3
+    return False
+
+
 def candidate_matches(mentions: Sequence[NumberMention], board: dict[str, BoardTruck]) -> list[dict[str, Any]]:
     matches: list[dict[str, Any]] = []
     for mention in mentions:
@@ -296,6 +345,8 @@ def candidate_matches(mentions: Sequence[NumberMention], board: dict[str, BoardT
             if not kind:
                 continue
             match_type, distance = kind
+            if not _match_type_allowed(mention.label, mention.source, match_type, mention.token):
+                continue
             matches.append(
                 {
                     "token": mention.token,
@@ -403,43 +454,54 @@ def _source_cascade(
     *,
     is_dispatcher_filtered: bool,
 ) -> dict[str, Any] | None:
-    """Run the source-priority cascade on a match pool. Returns a selection dict or None."""
-    source_tiers = ["subject", "filename", "email_body", "pdf_text"]
-    for source in source_tiers:
-        source_matches = [m for m in matches if str(m.get("source")) == source]
-        if not source_matches:
-            continue
-        best = source_matches[0]
-        best_quality = (
-            MATCH_RANK.get(str(best["match_type"]), 99),
-            LABEL_RANK.get(str(best["label"]), 99),
-        )
-        tied = [
-            item for item in source_matches
-            if (
-                MATCH_RANK.get(str(item["match_type"]), 99),
-                LABEL_RANK.get(str(item["label"]), 99),
-            ) == best_quality
-        ]
-        tied_trucks = sorted({str(item["matched_truck"]) for item in tied})
+    """Run the priority cascade on a match pool. Returns a selection dict or None.
+
+    Tier 0: explicit "TRUCK ###" labels from ANY source. A dispatcher typing
+            "truck 940" in the body beats every bare number in the subject.
+    Tiers 1+: bare-number tokens per source: subject > filename > top body >
+            quoted reply chain > pdf text.
+    """
+    # Tier 0: explicit truck labels anywhere (sorted by match quality then source)
+    labeled_matches = [m for m in matches if str(m.get("label")) == "truck_label"]
+    if labeled_matches:
+        best = labeled_matches[0]
+        best_rank = MATCH_RANK.get(str(best["match_type"]), 99)
+        tied = [m for m in labeled_matches if MATCH_RANK.get(str(m["match_type"]), 99) == best_rank]
+        tied_trucks = sorted({str(m["matched_truck"]) for m in tied})
         if len(tied_trucks) == 1:
-            # Single truck — clean match regardless of whether dispatcher filtered
             return _build_selected(best, tied_trucks)
-        # Multiple trucks tied — GPS tiebreak
-        if gps_active and len(tied_trucks) > 1:
+        if gps_active:
             active_matches = [m for m in tied if str(m["matched_truck"]) in gps_active]
             active_trucks = sorted({str(m["matched_truck"]) for m in active_matches})
             if len(active_trucks) == 1:
                 return _build_selected(active_matches[0], active_trucks, tiebreak=True)
-        # Body noise handling
-        if source in {"email_body", "pdf_text"} and len(tied_trucks) > 1:
-            labeled = [m for m in tied if str(m.get("label")) == "truck_label"]
-            labeled_trucks = sorted({str(m["matched_truck"]) for m in labeled})
-            if len(labeled_trucks) == 1:
-                return _build_selected(labeled[0], labeled_trucks)
-            if not labeled_trucks:
-                return _build_selected(best, [str(best["matched_truck"])], body_noise=True)
-            return _build_ambiguous(best, labeled_trucks)
+        return _build_ambiguous(best, tied_trucks)
+
+    # Tiers 1+: bare numbers by source priority
+    source_tiers = ["subject", "filename", "email_body", "quoted_body", "pdf_text"]
+    for source in source_tiers:
+        source_matches = [
+            m for m in matches
+            if str(m.get("source")) == source and str(m.get("label")) == "number"
+        ]
+        if not source_matches:
+            continue
+        best = source_matches[0]
+        best_rank = MATCH_RANK.get(str(best["match_type"]), 99)
+        tied = [m for m in source_matches if MATCH_RANK.get(str(m["match_type"]), 99) == best_rank]
+        tied_trucks = sorted({str(item["matched_truck"]) for item in tied})
+        if len(tied_trucks) == 1:
+            return _build_selected(best, tied_trucks)
+        # Multiple trucks tied — GPS tiebreak
+        if gps_active:
+            active_matches = [m for m in tied if str(m["matched_truck"]) in gps_active]
+            active_trucks = sorted({str(m["matched_truck"]) for m in active_matches})
+            if len(active_trucks) == 1:
+                return _build_selected(active_matches[0], active_trucks, tiebreak=True)
+        # Bare numbers in body/quoted text are noise — pick newest-first at low
+        # confidence rather than red-flagging every forwarded email.
+        if source in {"email_body", "quoted_body", "pdf_text"}:
+            return _build_selected(best, [str(best["matched_truck"])], body_noise=True)
         return _build_ambiguous(best, tied_trucks)
     return None
 
@@ -575,12 +637,18 @@ def build_document_rows_from_message(
     # Attachment rows are the core unit. If there is no attachment but the message
     # is clearly an assignment/cancel/rate-con control email, create one message row.
     units = attachments or ([{"filename": "", "content_type": "message/rfc822", "size_bytes": 0, "sha256": ""}] if RATEISH_SUBJECT_RE.search(subject) else [])
+    top_body, quoted_body = split_quoted_reply(body)
     rows: list[dict[str, Any]] = []
     for index, attachment in enumerate(units, start=1):
         filename = str(attachment.get("filename") or "")
         texts = [subject, body, filename]
         mentions: list[NumberMention] = []
-        for source, text in (("subject", subject), ("email_body", body), ("filename", filename)):
+        for source, text in (
+            ("subject", subject),
+            ("email_body", top_body),
+            ("quoted_body", quoted_body),
+            ("filename", filename),
+        ):
             mentions.extend(extract_number_mentions(text, source))
         matches = candidate_matches(mentions, board)
         selection = select_single_truck(

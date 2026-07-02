@@ -109,3 +109,70 @@ def test_gps_active_tiebreak() -> None:
 
     assert result["matched_truck_id"] == "713"
     assert result["match_status"] == "matched"
+
+
+def test_truck_label_in_body_beats_subject_bare_number() -> None:
+    """Explicit 'truck 940' typed in the body must beat a bare subject number."""
+    board = {
+        "940": BoardTruck(truck_id="940", dispatcher="Felix"),
+        "467": BoardTruck(truck_id="467", dispatcher="Anna"),
+    }
+    subj = extract_number_mentions("Fwd: Load 467 pickup", "subject")
+    body = extract_number_mentions("truck 940 driver sam", "email_body")
+    matches = candidate_matches(subj + body, board)
+    result = select_single_truck(matches)
+
+    assert result["matched_truck_id"] == "940"
+    assert result["match_status"] == "matched"
+
+
+def test_quoted_reply_numbers_are_deprioritized() -> None:
+    """Numbers in the quoted/forwarded chain must not beat the dispatcher's text."""
+    from services.rate_confirmation_ingest import split_quoted_reply
+
+    body = "TRUCK 940\n\n---------- Forwarded message ---------\nLoad 333 rate $1500 ref 973"
+    top, quoted = split_quoted_reply(body)
+    assert "TRUCK 940" in top
+    assert "333" in quoted
+
+    board = {
+        "940": BoardTruck(truck_id="940", dispatcher="Felix"),
+        "333": BoardTruck(truck_id="333", dispatcher="Anna"),
+        "973": BoardTruck(truck_id="973", dispatcher="Carlos CA"),
+    }
+    mentions = extract_number_mentions(top, "email_body") + extract_number_mentions(quoted, "quoted_body")
+    matches = candidate_matches(mentions, board)
+    result = select_single_truck(matches)
+
+    assert result["matched_truck_id"] == "940"
+
+
+def test_bare_two_digit_numbers_are_ignored() -> None:
+    """Standalone 2-digit numbers (weights, dates) must not match 2-digit trucks."""
+    board = {"67": BoardTruck(truck_id="67", dispatcher="Felix"), "45": BoardTruck(truck_id="45", dispatcher="Felix")}
+    mentions = extract_number_mentions("45 pallets weight 67 lbs pickup 07 01", "email_body")
+    matches = candidate_matches(mentions, board)
+    result = select_single_truck(matches)
+
+    assert result["matched_truck_id"] == ""
+    assert result["match_status"] == "unmatched"
+
+
+def test_labeled_two_digit_truck_still_matches() -> None:
+    """'TRUCK 67' explicitly labeled must still match the 2-digit truck."""
+    board = {"67": BoardTruck(truck_id="67", dispatcher="Felix")}
+    mentions = extract_number_mentions("TRUCK 67 DRIVER BOB", "subject")
+    matches = candidate_matches(mentions, board)
+    result = select_single_truck(matches)
+
+    assert result["matched_truck_id"] == "67"
+    assert result["match_status"] == "matched"
+
+
+def test_body_bare_number_near_match_not_allowed() -> None:
+    """A bare body number one digit off a truck is a load fragment, not a typo."""
+    board = {"940": BoardTruck(truck_id="940", dispatcher="Felix")}
+    mentions = extract_number_mentions("ref 943 total 1500", "email_body")
+    matches = candidate_matches(mentions, board)
+
+    assert not [m for m in matches if m["match_type"] == "one_digit_off"]
