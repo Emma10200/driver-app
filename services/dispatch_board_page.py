@@ -13,6 +13,7 @@ import streamlit as st
 
 from services.dispatch_board_data import load_dispatch_board_rows
 from services.rate_confirmation_data import (
+    dedupe_rate_confirmation_documents,
     group_rate_confirmations_by_truck,
     load_rate_confirmation_documents,
     normalize_rate_confirmation_doc,
@@ -207,7 +208,8 @@ def render_dispatch_board_page() -> None:
     st.markdown(_BOARD_CSS, unsafe_allow_html=True)
     rows = load_dispatch_board_rows()
     try:
-        rate_docs = [normalize_rate_confirmation_doc(doc) for doc in load_rate_confirmation_documents(days=14)]
+        raw_rate_docs = [normalize_rate_confirmation_doc(doc) for doc in load_rate_confirmation_documents(days=14)]
+        rate_docs = dedupe_rate_confirmation_documents(raw_rate_docs)
     except Exception as exc:
         st.warning(f"Could not load rate confirmations: {exc}")
         rate_docs = []
@@ -389,7 +391,9 @@ def _render_truck_detail_expander(row: dict[str, Any]) -> None:
                     received = _short_dt(doc.get("received_at"))
                     ref = str(doc.get("load_reference") or "")
                     domain = str(doc.get("sender_domain") or "")
-                    st.markdown(f"- **{title}** ({received})")
+                    duplicate_count = int(doc.get("duplicate_count") or 1)
+                    copy_note = f" · {duplicate_count} copies collapsed" if duplicate_count > 1 else ""
+                    st.markdown(f"- **{title}** ({received}{copy_note})")
                     st.caption(f"Ref: {ref} | {domain}" if ref else domain)
         notes = str(row.get("notes") or "")
         planning = str(row.get("planning_note") or "")
@@ -509,30 +513,59 @@ def _rate_conf_cell_html(row: dict[str, Any]) -> str:
 
 
 def _render_alert_bell(alerts: list[dict[str, Any]]) -> None:
-    """Bell-badge notification popover with type/age toggles."""
+    """Bell-badge notification popover with issue-type filters and email previews."""
     count = len(alerts)
     with st.popover(f"🔔 {count} Alert{'s' if count != 1 else ''}" if count else "🔔 Alerts", use_container_width=True):
         if not alerts:
             st.caption("No rate-confirmation alerts right now.")
             return
-        # Filter toggles
-        st.markdown("**Filter alerts**")
-        tc1, tc2, tc3 = st.columns(3)
-        show_red = tc1.toggle("🔴 Red", value=True, key="alert_show_red")
-        show_yellow = tc2.toggle("🟡 Yellow", value=True, key="alert_show_yellow")
-        show_info = tc3.toggle("🔵 Info", value=False, key="alert_show_info")
+        category_counts: dict[str, int] = defaultdict(int)
+        for doc in alerts:
+            category_counts[_alert_category(doc)[0]] += 1
+
+        st.markdown("**What needs review?**")
+        c1, c2 = st.columns(2)
+        show_need_truck = c1.toggle(
+            f"No truck match ({category_counts.get('need_truck', 0)})",
+            value=True,
+            key="alert_show_need_truck",
+        )
+        show_ambiguous = c2.toggle(
+            f"Multiple truck candidates ({category_counts.get('ambiguous', 0)})",
+            value=True,
+            key="alert_show_ambiguous",
+        )
+        c3, c4 = st.columns(2)
+        show_cancel = c3.toggle(
+            f"Cancellations ({category_counts.get('cancel', 0)})",
+            value=True,
+            key="alert_show_cancel",
+        )
+        show_low_conf = c4.toggle(
+            f"Low confidence ({category_counts.get('low_confidence', 0)})",
+            value=False,
+            key="alert_show_low_confidence",
+        )
+        show_other = st.toggle(
+            f"Other ({category_counts.get('other', 0)})",
+            value=False,
+            key="alert_show_other",
+        )
         hide_old = st.toggle("Hide alerts older than 5 days", value=True, key="alert_hide_old")
         st.markdown("---")
 
+        enabled_categories = {
+            "need_truck": show_need_truck,
+            "ambiguous": show_ambiguous,
+            "cancel": show_cancel,
+            "low_confidence": show_low_conf,
+            "other": show_other,
+        }
         now = datetime.now(UTC)
         visible: list[dict[str, Any]] = []
         for doc in alerts:
-            level = _doc_alert_level(doc)
-            if level == "red" and not show_red:
-                continue
-            if level == "yellow" and not show_yellow:
-                continue
-            if level == "info" and not show_info:
+            category, _label = _alert_category(doc)
+            if not enabled_categories.get(category, False):
                 continue
             if hide_old:
                 received = _parse_dt(str(doc.get("received_at") or ""))
@@ -547,27 +580,103 @@ def _render_alert_bell(alerts: list[dict[str, Any]]) -> None:
 
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for doc in visible:
-            dispatcher = str(doc.get("board_dispatcher") or "").strip() or "Unmatched / Needs Review"
-            grouped[dispatcher].append(doc)
-        for dispatcher in sorted(grouped):
-            st.markdown(f'<div class="alert-group-header">{_h(dispatcher)}</div>', unsafe_allow_html=True)
-            for doc in grouped[dispatcher][:15]:
-                level = _doc_alert_level(doc) or "info"
-                truck = str(doc.get("matched_truck_id") or "").strip() or "no truck"
-                notes = str(doc.get("alert_notes") or "").strip() or _rate_doc_title(doc)
-                meta = " · ".join(part for part in [
-                    f"Truck {truck}",
-                    str(doc.get("match_status") or ""),
-                    _short_dt(doc.get("received_at")),
-                ] if part)
-                st.markdown(
-                    f'<div class="alert-list-item alert-list-item-{_h(level)}">'
-                    f'<b>{_h(meta)}</b><br>'
-                    f'{_h(notes)}<br>'
-                    f'<span class="dispatch-muted">{_h(_rate_doc_title(doc))}</span>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
+            category, label = _alert_category(doc)
+            grouped[label].append(doc)
+        for label in sorted(grouped):
+            st.markdown(f'<div class="alert-group-header">{_h(label)}</div>', unsafe_allow_html=True)
+            for doc in grouped[label][:20]:
+                _render_alert_preview(doc)
+
+
+def _alert_category(doc: dict[str, Any]) -> tuple[str, str]:
+    """Return (category_key, display_label) for a rate-confirmation alert."""
+    status = str(doc.get("match_status") or "").strip().lower()
+    codes = {str(code) for code in (doc.get("alert_codes") or [])}
+    if status == "cancelled" or "cancel_notice" in codes:
+        return "cancel", "Cancellations / cancel notices"
+    if status == "unmatched" or "no_board_truck_match" in codes:
+        return "need_truck", "No truck match"
+    if status == "ambiguous" or "multiple_truck_candidates_one_attachment" in codes:
+        return "ambiguous", "Multiple truck candidates"
+    if status == "near_match" or codes.intersection({
+        "one_digit_off_truck_match",
+        "two_digits_off_truck_match_review",
+        "body_noise_single_pick",
+        "dispatcher_or_gps_tiebreak",
+    }):
+        return "low_confidence", "Low-confidence / auto-resolved"
+    return "other", "Other alerts"
+
+
+def _render_alert_preview(doc: dict[str, Any]) -> None:
+    """Render one alert with the email evidence needed to troubleshoot it."""
+    category, _label = _alert_category(doc)
+    truck = str(doc.get("matched_truck_id") or "").strip() or "no truck"
+    sender = str(doc.get("sender_name") or doc.get("sender_email") or "unknown sender").strip()
+    received = _short_dt(doc.get("received_at"))
+    title = _rate_doc_title(doc)
+    status = str(doc.get("match_status") or "").strip()
+    expander_label = f"{truck} · {status or category} · {sender} · {received} · {title}"
+    with st.expander(expander_label[:220], expanded=False):
+        subject = str(doc.get("subject") or "").strip() or "(blank subject)"
+        attachment = str(doc.get("attachment_filename") or "").strip() or "(no attachment filename)"
+        email = str(doc.get("sender_email") or "").strip()
+        notes = str(doc.get("alert_notes") or "").strip()
+        raw = doc.get("raw") if isinstance(doc.get("raw"), dict) else {}
+        body_preview = str(raw.get("body_preview") or "").strip()
+        st.markdown(f"**Issue:** {_alert_category(doc)[1]}")
+        if notes:
+            st.warning(notes)
+        st.markdown(f"**From:** {sender} `<{email}>`")
+        st.markdown(f"**Subject:** {subject}")
+        st.markdown(f"**Attachment:** `{attachment}`")
+        duplicate_count = int(doc.get("duplicate_count") or 1)
+        if duplicate_count > 1:
+            st.info(f"{duplicate_count} duplicate email copies collapsed into this one alert.")
+        st.markdown(f"**Matched truck:** `{truck}`  ")
+        st.caption(
+            " | ".join(part for part in [
+                f"source={doc.get('match_source') or '—'}",
+                f"token={doc.get('match_token') or '—'}",
+                f"confidence={doc.get('match_confidence') or '—'}",
+                f"dispatcher={doc.get('board_dispatcher') or '—'}",
+            ] if part)
+        )
+        candidates = _candidate_preview(doc)
+        if candidates:
+            st.markdown("**Candidate trucks:**")
+            st.caption(candidates)
+        if body_preview:
+            st.markdown("**Email body preview:**")
+            st.text_area(
+                "",
+                body_preview[:3000],
+                height=180,
+                label_visibility="collapsed",
+                disabled=True,
+                key=f"alert_body_{doc.get('document_key')}",
+            )
+
+
+def _candidate_preview(doc: dict[str, Any]) -> str:
+    candidates = doc.get("candidate_matches")
+    if not isinstance(candidates, list):
+        return ""
+    parts: list[str] = []
+    seen: set[str] = set()
+    for item in candidates[:12]:
+        if not isinstance(item, dict):
+            continue
+        truck = str(item.get("matched_truck") or "").strip()
+        if not truck or truck in seen:
+            continue
+        seen.add(truck)
+        dispatcher = str(item.get("board_dispatcher") or "").strip() or "?"
+        token = str(item.get("token") or "").strip()
+        source = str(item.get("source") or "").strip()
+        match_type = str(item.get("match_type") or "").strip()
+        parts.append(f"{truck} ({dispatcher}, token {token}, {source}, {match_type})")
+    return "; ".join(parts)
 
 
 def _rate_doc_title(doc: dict[str, Any]) -> str:

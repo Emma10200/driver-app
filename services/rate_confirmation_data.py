@@ -32,7 +32,7 @@ def load_rate_confirmation_documents(days: int = 14) -> list[dict[str, Any]]:
         return client.select_all(
             "rate_confirmation_documents",
             select=(
-                "document_key,message_id,attachment_index,attachment_filename,attachment_content_type,"
+                "document_key,message_id,attachment_index,attachment_filename,attachment_content_type,attachment_sha256,"
                 "received_at,sender_name,sender_email,sender_domain,domain_division,subject,"
                 "matched_truck_id,match_status,match_type,match_source,match_token,match_confidence,"
                 "candidate_matches,board_dispatcher,board_driver_name,board_division,board_sheet_row,"
@@ -81,6 +81,7 @@ def normalize_rate_confirmation_doc(doc: dict[str, Any]) -> dict[str, Any]:
         "delivery_summary": str(doc.get("delivery_summary") or "").strip(),
         "parse_status": str(doc.get("parse_status") or "").strip(),
         "attachment_filename": str(doc.get("attachment_filename") or "").strip(),
+        "attachment_sha256": str(doc.get("attachment_sha256") or "").strip(),
         "pdf_storage_path": str(doc.get("pdf_storage_path") or "").strip(),
         "alert_level": str(doc.get("alert_level") or "").strip(),
         "alert_codes": alert_codes,
@@ -88,6 +89,44 @@ def normalize_rate_confirmation_doc(doc: dict[str, Any]) -> dict[str, Any]:
         "candidate_matches": candidate_matches,
         "raw": raw,
     }
+
+
+def dedupe_rate_confirmation_documents(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse repeated forwards/replies of the same rate confirmation for display.
+
+    Supabase intentionally stores one row per email attachment/document for audit
+    purposes. The dispatch-board UI should not show five copies of the same PDF
+    under a truck, so this groups likely duplicates by truck + load reference,
+    PDF hash, or filename/subject fallback. The newest row is kept and annotated
+    with ``duplicate_count`` and ``duplicate_documents`` for troubleshooting.
+    """
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for doc in docs:
+        grouped[_dedupe_key(doc)].append(doc)
+
+    out: list[dict[str, Any]] = []
+    for group_docs in grouped.values():
+        group_docs = sorted(group_docs, key=lambda item: str(item.get("received_at") or ""), reverse=True)
+        primary = dict(group_docs[0])
+        primary["duplicate_count"] = len(group_docs)
+        primary["duplicate_documents"] = group_docs[1:]
+        out.append(primary)
+    out.sort(key=lambda item: str(item.get("received_at") or ""), reverse=True)
+    return out
+
+
+def _dedupe_key(doc: dict[str, Any]) -> str:
+    truck = str(doc.get("matched_truck_id") or "no-truck").strip().lower()
+    load_ref = str(doc.get("load_reference") or "").strip().lower()
+    if load_ref:
+        return f"truck:{truck}|load:{load_ref}"
+    digest = str(doc.get("attachment_sha256") or "").strip().lower()
+    if digest:
+        return f"truck:{truck}|sha:{digest}"
+    filename = str(doc.get("attachment_filename") or "").strip().lower()
+    subject = str(doc.get("subject") or "").strip().lower()
+    sender = str(doc.get("sender_domain") or doc.get("sender_email") or "").strip().lower()
+    return f"truck:{truck}|fallback:{sender}|{filename}|{subject}"
 
 
 def group_rate_confirmations_by_truck(docs: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
