@@ -63,7 +63,7 @@ insert into public.dispatch_company_info
 values
     ('Prestig Inc', 'MC 553373', 'DOT 1454866', 'FIN 20-4146962', 'dispatch@prestige.inc', '773-303-4616', '224-715-1371', 'Deyana Koleva', '3810 North Ave, Stone Park, IL 60165', 1),
     ('Prestige Transportation Inc', 'MC 814849', 'DOT 2374229', 'FIN 90-0930803', 'dispatch@prestigecalifornia.com', '877-549-9529', '224-545-2148', 'Lubomir Anguelov', '8622 Hemlock Ave, Fontana, CA 92335', 2),
-    ('Xpress Trans Inc', 'MC 715183', 'DOT 2038003', 'FIN 27-2631230', 'dispatch@xpresstransinc.com', '224-341-6014', '224-522-1354', 'Dayana Sheytanova / Zack', '2905 W Lake St, Melrose Park, IL 60160', 3)
+    ('Xpress Trans Inc', 'MC 715183', 'DOT 2038003', 'FIN 27-2631230', 'dispatch@xpresstransinc.com', '224-341-6014', '224-522-1354', 'Dayana Sheytanova / Zach', '2905 W Lake St, Melrose Park, IL 60160', 3)
 on conflict (division) do nothing;
 
 -- ---------------------------------------------------------------------------
@@ -75,41 +75,42 @@ insert into public.dispatch_contact_entries
 select seed.dispatcher_name, seed.division, seed.email, seed.phone, seed.extension, seed.sort_order
 from (values
     ('Anna',      'Prestig Inc',                  'dispatch5@prestige.inc',           '773-484-9982', '',    1),
-    ('Anna',      'Prestige Transportation Inc',  'dispatch5@prestigecalifornia.com', '708-356-4413', '213', 2),
+    ('Anna',      'Prestige Transportation Inc',  'dispatch5@prestigecalifornia.com', '909-206-2911', '213', 2),
     ('Anna',      'Xpress Trans Inc',             'dispatch@xpresstransinc.com',      '708-356-4423', '203', 3),
     ('Anna',      'Personal Cell (internal)',     '',                                 '773-396-7011', '',    4),
 
-    ('Brittany',  'Prestig Inc',                  'dispatch3@prestige.inc',           '773-440-5468', '',    1),
-    ('Brittany',  'Prestige Transportation Inc',  'dispatch3@prestigecalifornia.com', '',             '',    2),
+    ('Brittany',  'Prestig Inc',                  'dispatch3@prestige.inc',           '708-701-1109', '',    1),
+    ('Brittany',  'Prestige Transportation Inc',  'dispatch3@prestigecalifornia.com', '909-206-4747', '',    2),
     ('Brittany',  'Xpress Trans Inc',             'dispatch@xpresstransinc.com',      '708-356-4421', '210', 3),
     ('Brittany',  'Personal Cell (internal)',     '',                                 '773-440-5468', '',    4),
 
-    ('Carlos IL', 'Prestig Inc',                  'dispatch1@prestige.inc',           '773-965-5396', '',    1),
-    ('Carlos IL', 'Prestige Transportation Inc',  'dispatch1@prestigecalifornia.com', '708-312-1409', '215', 2),
+    ('Carlos IL', 'Prestig Inc',                  'dispatch1@prestige.inc',           '909-900-6411', '',    1),
+    ('Carlos IL', 'Prestige Transportation Inc',  'dispatch1@prestigecalifornia.com', '909-206-5247', '215', 2),
     ('Carlos IL', 'Xpress Trans Inc',             'dispatch@xpresstransinc.com',      '708-356-4424', '214', 3),
     ('Carlos IL', 'Personal Cell (internal)',     '',                                 '708-438-1338', '',    4),
 
     ('Carlos CA', 'Prestig Inc',                  'dispatch4@prestige.inc',           '909-552-5206', '',    1),
-    ('Carlos CA', 'Prestige Transportation Inc',  'dispatch4@prestigecalifornia.com', '909-302-0192', '316', 2),
+    ('Carlos CA', 'Prestige Transportation Inc',  'dispatch4@prestigecalifornia.com', '909-206-4536', '316', 2),
     ('Carlos CA', 'Xpress Trans Inc',             'dispatch@xpresstransinc.com',      '909-302-0186', '306', 3),
 
     ('Felix',     'Prestig Inc',                  'dispatch7@prestige.inc',           '773-726-2998', '',    1),
-    ('Felix',     'Prestige Transportation Inc',  'dispatch7@prestigecalifornia.com', '708-356-4427', '217', 2),
+    ('Felix',     'Prestige Transportation Inc',  'dispatch7@prestigecalifornia.com', '909-206-2005', '217', 2),
     ('Felix',     'Xpress Trans Inc',             'dispatch@xpresstransinc.com',      '708-356-4412', '202', 3),
     ('Felix',     'Personal Cell (internal)',     '',                                 '312-581-2803', '',    4),
 
     ('Lily',      'Prestig Inc',                  'dispatch8@prestige.inc',           '714-272-3260', '',    1),
-    ('Lily',      'Prestige Transportation Inc',  'dispatch8@prestigecalifornia.com', '909-302-0187', '310', 2),
+    ('Lily',      'Prestige Transportation Inc',  'dispatch8@prestigecalifornia.com', '909-206-4365', '310', 2),
     ('Lily',      'Xpress Trans Inc',             'dispatch@xpresstransinc.com',      '909-302-0181', '301', 3),
     ('Lily',      'Personal Cell (internal)',     '',                                 '714-272-3260', '',    4),
 
     ('Sanjuana',  'Prestig Inc',                  'dispatch6@prestige.inc',           '909-243-9167', '',    1),
-    ('Sanjuana',  'Prestige Transportation Inc',  'dispatch6@prestigecalifornia.com', '909-302-0191', '315', 2),
+    ('Sanjuana',  'Prestige Transportation Inc',  'dispatch6@prestigecalifornia.com', '909-206-2445', '315', 2),
     ('Sanjuana',  'Xpress Trans Inc',             'dispatch@xpresstransinc.com',      '909-302-0185', '305', 3),
 
     ('Matt',      'Prestig Inc',                  'matt@prestige.inc',                '',             '',    1),
 
-    ('Operations','Xpress Trans Inc',             'dispatch@xpresstransinc.com',      '224-341-6014', '',    1),
-    ('Zack',      'Xpress Trans Inc',             'dispatch@xpresstransinc.com',      '224-522-1354', '',    2)
+    ('Zach',      'Prestig Inc',                  'operations@prestige.inc',          '708-701-1109', '',    1),
+    ('Zach',      'Prestige Transportation Inc',  'operations@prestigecalifornia.com','224-522-1354', '',    2),
+    ('Zach',      'Xpress Trans Inc',             'dispatch@xpresstransinc.com',      '224-522-1354', '',    3)
 ) as seed(dispatcher_name, division, email, phone, extension, sort_order)
 where not exists (select 1 from public.dispatch_contact_entries);
