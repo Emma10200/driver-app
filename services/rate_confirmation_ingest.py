@@ -37,18 +37,34 @@ NOISE_DOMAINS = {"accounts.google.com", "google.com"}
 # User-requested sender exclusion: BOL chatter is not rate-confirmation input.
 # Do not exclude statements@prestigetransportation.com; statement messages may
 # still carry dispatch/accounting context the user wants retained.
-EXCLUDED_SENDER_EMAILS = {"bol@prestige.inc"}
+EXCLUDED_SENDER_EMAILS = {"bol@prestige.inc", "bol@prestigetransportation.com"}
 
 SOURCE_RANK = {"subject": 0, "filename": 1, "email_body": 2, "quoted_body": 3, "pdf_text": 4}
-LABEL_RANK = {"truck_label": 0, "number": 1, "trailer_label": 2}
+LABEL_RANK = {"truck_label": 0, "number": 1, "trailer_pairing": 2, "short_number": 3, "trailer_label": 4}
 MATCH_RANK = {"exact": 0, "one_digit_off": 1, "two_digits_off": 2}
 
 # Bare numbers must be 3-6 digits: 2-digit standalone tokens (dates, weights,
 # quantities) are far too noisy. Trucks with 2-digit IDs (45, 67, 95) can still
-# match via an explicit "TRUCK 67" label or the subject/filename.
+# match via an explicit "TRUCK 67" label, or as a dispatcher-scoped rescue when
+# the sender's own board has that exact 2-digit truck (label "short_number").
 NUMBER_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])(\d{3,6})(?![A-Za-z0-9])")
+SHORT_NUMBER_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])(\d{2})(?![A-Za-z0-9])")
 TAGGED_TRUCK_RE = re.compile(r"\b(?:truck|trk|unit|tractor)\s*#?\s*(\d{2,6})\b", re.IGNORECASE)
 TAGGED_TRAILER_RE = re.compile(r"\btrail?er\s*#?\s*(\d{2,6})\b", re.IGNORECASE)
+# Standard company signature/footer blocks. Everything from the first marker on
+# is boilerplate (phones, MC numbers, addresses) that poisons number extraction.
+SIGNATURE_MARKER_RE = re.compile(
+    r"(?im)^\s*\*?\s*(?:"
+    r"please verify with us before booking"
+    r"|we do not use any gmail"
+    r"|award-winning service"
+    r"|click here to see truck availability"
+    r"|fleet\s*&\s*safety manager"
+    r"|hazmat approved"
+    r")"
+)
+# Inline signature/logo images that should not become their own document rows.
+INLINE_IMAGE_NAME_RE = re.compile(r"^(?:image\d*|outlook-\w*|icon\w*|logo\w*)\.(?:png|jpe?g|gif)$", re.IGNORECASE)
 # Markers that start a quoted reply / forwarded chain inside an email body.
 QUOTE_MARKER_RE = re.compile(
     r"(?im)^\s*(?:"
@@ -138,6 +154,7 @@ class BoardTruck:
     division: str = ""
     status: str = ""
     sheet_row: int = 0
+    trailer_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -251,9 +268,24 @@ def board_trucks_from_rows(rows: Sequence[dict[str, Any]]) -> dict[str, BoardTru
                 division=str(row.get("division") or "").strip(),
                 status=str(row.get("status") or "").strip(),
                 sheet_row=int(row.get("sheet_row") or 0),
+                trailer_id=clean_unit(row.get("trailer_id")),
             ),
         )
     return trucks
+
+
+def board_trailer_map(board: dict[str, BoardTruck]) -> dict[str, str]:
+    """Trailer number -> truck number from current board pairings.
+
+    Dispatchers often type "39 / 4907 / name" (truck, trailer). Even when the
+    truck token is unusable (2-digit, missing), the trailer uniquely identifies
+    the board row. Trailers paired to more than one truck are dropped.
+    """
+    counts: dict[str, set[str]] = {}
+    for truck in board.values():
+        if truck.trailer_id:
+            counts.setdefault(truck.trailer_id, set()).add(truck.truck_id)
+    return {trailer: next(iter(trucks)) for trailer, trucks in counts.items() if len(trucks) == 1}
 
 
 def split_quoted_reply(body: str) -> tuple[str, str]:
@@ -269,6 +301,18 @@ def split_quoted_reply(body: str) -> tuple[str, str]:
     if not match:
         return body, ""
     return body[: match.start()], body[match.start():]
+
+
+def strip_signature(text: str) -> str:
+    """Cut the dispatcher's text at the first company signature/footer marker.
+
+    The standard footers are full of phone numbers, MC numbers, and addresses
+    that would otherwise become bogus truck candidates.
+    """
+    if not text:
+        return ""
+    match = SIGNATURE_MARKER_RE.search(text)
+    return text[: match.start()] if match else text
 
 
 def extract_number_mentions(text: str, source: str) -> list[NumberMention]:
@@ -291,6 +335,14 @@ def extract_number_mentions(text: str, source: str) -> list[NumberMention]:
         key = (token, "number")
         if key not in seen:
             mentions.append(NumberMention(token=token, source=source, label="number"))
+            seen.add(key)
+    for match in SHORT_NUMBER_TOKEN_RE.finditer(text or ""):
+        token = match.group(1)
+        if token in trailer_only_tokens:
+            continue
+        key = (token, "short_number")
+        if key not in seen:
+            mentions.append(NumberMention(token=token, source=source, label="short_number"))
             seen.add(key)
     return mentions
 
@@ -325,7 +377,8 @@ def _match_kind(token: str, truck_id: str) -> tuple[str, int] | None:
 def _match_type_allowed(label: str, source: str, match_type: str, token: str) -> bool:
     """Gate which match types are allowed per mention label and source.
 
-    - Exact matches are always allowed.
+    - Exact matches are always allowed (short 2-digit tokens are additionally
+      gated by sender dispatcher at selection time).
     - Near matches (one/two digits off) are only trusted for explicitly labeled
       truck tokens or subject/filename tokens — a bare number in an email body
       that is "one digit off" a truck is almost always a load-number fragment,
@@ -333,6 +386,8 @@ def _match_type_allowed(label: str, source: str, match_type: str, token: str) ->
     """
     if match_type == "exact":
         return True
+    if label in {"short_number", "trailer_pairing"}:
+        return False
     if label == "truck_label":
         if match_type == "one_digit_off":
             return len(token) >= 3
@@ -342,9 +397,34 @@ def _match_type_allowed(label: str, source: str, match_type: str, token: str) ->
     return False
 
 
-def candidate_matches(mentions: Sequence[NumberMention], board: dict[str, BoardTruck]) -> list[dict[str, Any]]:
+def candidate_matches(
+    mentions: Sequence[NumberMention],
+    board: dict[str, BoardTruck],
+    trailer_map: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    trailer_map = trailer_map or {}
     matches: list[dict[str, Any]] = []
     for mention in mentions:
+        # A trailer/bare number that exactly matches a board trailer identifies
+        # the paired truck (dispatchers often type "truck / trailer / name").
+        if mention.token in trailer_map and mention.label in {"number", "trailer_label", "short_number"}:
+            paired_truck = board.get(trailer_map[mention.token])
+            if paired_truck is not None:
+                matches.append(
+                    {
+                        "token": mention.token,
+                        "matched_truck": paired_truck.truck_id,
+                        "match_type": "exact",
+                        "digit_distance": 0,
+                        "source": mention.source,
+                        "label": "trailer_pairing",
+                        "board_dispatcher": paired_truck.dispatcher,
+                        "board_driver": paired_truck.driver_name,
+                        "board_division": paired_truck.division,
+                        "board_status": paired_truck.status,
+                        "board_sheet_row": paired_truck.sheet_row,
+                    }
+                )
         # A number explicitly labeled as a trailer should be retained in extracted
         # numbers but should not assign a truck by itself.
         if mention.label == "trailer_label":
@@ -432,6 +512,28 @@ def select_single_truck(
 
     active = gps_active_trucks or set()
 
+    # Bare 2-digit tokens are only usable as a dispatcher-scoped rescue: the
+    # sender's own board must have that exact truck (e.g. Brittany typing "39").
+    disp_lower = sender_dispatcher.lower().strip()
+    matches = [
+        m for m in matches
+        if str(m.get("label")) != "short_number"
+        or (disp_lower and str(m.get("board_dispatcher") or "").lower().strip() == disp_lower)
+    ]
+    if not matches:
+        return {
+            "matched_truck_id": "",
+            "match_status": "unmatched",
+            "match_type": "",
+            "match_source": "",
+            "match_token": "",
+            "match_confidence": None,
+            "alert_level": "red",
+            "alert_codes": ["no_board_truck_match"],
+            "alert_notes": "No exact/near current dispatch-board truck number found in subject, body, or attachment filename.",
+            "best_match": None,
+        }
+
     # Step 1: exact evidence before dispatcher ownership. This prevents a real
     # exact truck (e.g. 9988) from being discarded just because the sender is
     # temporarily covering another dispatcher's unit.
@@ -492,6 +594,21 @@ def _global_exact_selection(matches: list[dict[str, Any]], gps_active: set[str])
         if len(active_trucks) == 1:
             return _build_selected(active_matches[0], active_trucks, tiebreak=True)
         return None
+
+    # A board trailer pairing is the next strongest signal: the trailer number
+    # uniquely identifies the board row even when the truck token is unusable.
+    trailer_paired = [m for m in exact_matches if str(m.get("label")) == "trailer_pairing"]
+    if trailer_paired:
+        tied_trucks = sorted({str(m["matched_truck"]) for m in trailer_paired})
+        if len(tied_trucks) == 1:
+            return _build_selected(trailer_paired[0], tied_trucks, trailer_pairing=True)
+
+    # Dispatcher-scoped short numbers (already filtered to the sender's board).
+    short = [m for m in exact_matches if str(m.get("label")) == "short_number"]
+    if short:
+        tied_trucks = sorted({str(m["matched_truck"]) for m in short})
+        if len(tied_trucks) == 1:
+            return _build_selected(short[0], tied_trucks, short_number=True)
 
     # Then exact bare numbers by source priority. A unique exact body match can
     # still win globally, but multiple exact body numbers are left for dispatcher
@@ -572,11 +689,45 @@ def _source_cascade(
     return None
 
 
-def _build_selected(best: dict[str, Any], trucks: list[str], *, body_noise: bool = False, tiebreak: bool = False) -> dict[str, Any]:
+def _build_selected(
+    best: dict[str, Any],
+    trucks: list[str],
+    *,
+    body_noise: bool = False,
+    tiebreak: bool = False,
+    trailer_pairing: bool = False,
+    short_number: bool = False,
+) -> dict[str, Any]:
     """Build a successful selection result from a single winning truck."""
     match_type = str(best["match_type"])
     truck_id = trucks[0] if trucks else str(best["matched_truck"])
     if match_type == "exact":
+        if trailer_pairing:
+            return {
+                "matched_truck_id": truck_id,
+                "match_status": "matched",
+                "match_type": match_type,
+                "match_source": str(best["source"]),
+                "match_token": str(best["token"]),
+                "match_confidence": 0.93,
+                "alert_level": "info",
+                "alert_codes": ["matched_via_board_trailer"],
+                "alert_notes": f"Trailer {best['token']} is paired to truck {truck_id} on the current board.",
+                "best_match": best,
+            }
+        if short_number:
+            return {
+                "matched_truck_id": truck_id,
+                "match_status": "matched",
+                "match_type": match_type,
+                "match_source": str(best["source"]),
+                "match_token": str(best["token"]),
+                "match_confidence": 0.9,
+                "alert_level": "info",
+                "alert_codes": ["dispatcher_short_truck_match"],
+                "alert_notes": f"2-digit token {best['token']} matches truck {truck_id} on the sender's own board.",
+                "best_match": best,
+            }
         if tiebreak:
             return {
                 "matched_truck_id": truck_id,
@@ -667,9 +818,40 @@ def _attachment_parts(msg: Message) -> list[dict[str, Any]]:
                 "content_type": content_type,
                 "size_bytes": len(payload),
                 "sha256": hashlib.sha256(payload).hexdigest() if payload else "",
+                "payload": payload if content_type == "application/pdf" else b"",
             }
         )
     return out
+
+
+def _is_inline_signature_image(attachment: dict[str, Any]) -> bool:
+    """Logo/signature images (image001.jpg, Outlook-*.png) are not documents."""
+    content_type = str(attachment.get("content_type") or "")
+    if not content_type.startswith("image/"):
+        return False
+    filename = str(attachment.get("filename") or "")
+    return bool(INLINE_IMAGE_NAME_RE.match(filename.strip()))
+
+
+def extract_pdf_text(payload: bytes, *, max_pages: int = 2, max_chars: int = 6000) -> str:
+    """Best-effort text-layer extraction for second-chance truck matching."""
+    if not payload:
+        return ""
+    try:
+        from io import BytesIO
+
+        from pypdf import PdfReader
+
+        reader = PdfReader(BytesIO(payload))
+        chunks: list[str] = []
+        for page in reader.pages[:max_pages]:
+            try:
+                chunks.append(page.extract_text() or "")
+            except Exception:
+                continue
+        return "\n".join(chunks)[:max_chars]
+    except Exception:
+        return ""
 
 
 def _safe_doc_key(message_id: str, attachment_index: int, digest: str) -> str:
@@ -697,11 +879,19 @@ def build_document_rows_from_message(
         return []
 
     sender_dispatcher = resolve_sender_dispatcher(from_addr, _decode(from_name), board)
+    trailer_map = board_trailer_map(board)
+
+    # Inline signature/logo images should not become their own document rows —
+    # they just duplicate the message as junk "unmatched" entries.
+    document_attachments = [a for a in attachments if not _is_inline_signature_image(a)]
+    if not document_attachments and attachments:
+        document_attachments = attachments[:1]
 
     # Attachment rows are the core unit. If there is no attachment but the message
     # is clearly an assignment/cancel/rate-con control email, create one message row.
-    units = attachments or ([{"filename": "", "content_type": "message/rfc822", "size_bytes": 0, "sha256": ""}] if RATEISH_SUBJECT_RE.search(subject) else [])
+    units = document_attachments or ([{"filename": "", "content_type": "message/rfc822", "size_bytes": 0, "sha256": ""}] if RATEISH_SUBJECT_RE.search(subject) else [])
     top_body, quoted_body = split_quoted_reply(body)
+    top_body = strip_signature(top_body)
     rows: list[dict[str, Any]] = []
     for index, attachment in enumerate(units, start=1):
         filename = str(attachment.get("filename") or "")
@@ -714,12 +904,27 @@ def build_document_rows_from_message(
             ("filename", filename),
         ):
             mentions.extend(extract_number_mentions(text, source))
-        matches = candidate_matches(mentions, board)
+        matches = candidate_matches(mentions, board, trailer_map)
         selection = select_single_truck(
             matches,
             sender_dispatcher=sender_dispatcher,
             gps_active_trucks=gps_active_trucks,
         )
+
+        # Second chance: if subject/body/filename produced nothing, look inside
+        # the PDF text layer for board trucks/trailers before giving up.
+        if selection["match_status"] == "unmatched" and attachment.get("payload"):
+            pdf_text = extract_pdf_text(bytes(attachment.get("payload") or b""))
+            if pdf_text:
+                pdf_mentions = extract_number_mentions(pdf_text, "pdf_text")
+                if pdf_mentions:
+                    mentions.extend(pdf_mentions)
+                    matches = candidate_matches(mentions, board, trailer_map)
+                    selection = select_single_truck(
+                        matches,
+                        sender_dispatcher=sender_dispatcher,
+                        gps_active_trucks=gps_active_trucks,
+                    )
         best = selection.get("best_match") or {}
         alert_codes = list(selection["alert_codes"] or [])
         alert_level = str(selection["alert_level"] or "")
@@ -845,7 +1050,15 @@ def ingest_recent_rate_confirmations(*, days: int = 14, limit: int = 0, dry_run:
             RATE_CONF_TABLE,
             filters={"sender_email": f"eq.{sender_email}", "received_at": f"gte.{since}"},
         )
-    # Upsert in modest chunks to avoid huge PostgREST payloads.
+    # Delete-then-insert: matching-rule changes can renumber attachments within
+    # a message (e.g. inline images no longer get rows), which collides with the
+    # unique (message_id, attachment_index) index if stale rows linger.
+    message_ids = sorted({str(row.get("message_id") or "") for row in rows if row.get("message_id")})
+    for start in range(0, len(message_ids), 50):
+        batch_ids = message_ids[start : start + 50]
+        quoted = ",".join('"' + mid.replace('"', "") + '"' for mid in batch_ids)
+        client.delete(RATE_CONF_TABLE, filters={"message_id": f"in.({quoted})"})
+    # Insert in modest chunks to avoid huge PostgREST payloads.
     upserted = 0
     for start in range(0, len(rows), 250):
         batch = rows[start : start + 250]

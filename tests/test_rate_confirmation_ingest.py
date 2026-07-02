@@ -237,3 +237,85 @@ def test_stale_bol_rows_are_not_ui_alerts() -> None:
     alerts = rate_confirmation_alerts(docs)
     assert len(alerts) == 1
     assert alerts[0]["sender_email"] == "statements@prestigetransportation.com"
+
+
+def test_trailer_pairing_rescues_dispatcher_shorthand() -> None:
+    """'39 / 4907 / Brittany' should match truck 39 via the board trailer 4907."""
+    from services.rate_confirmation_ingest import board_trailer_map
+
+    board = {
+        "39": BoardTruck(truck_id="39", dispatcher="Brittany", trailer_id="4907"),
+        "713": BoardTruck(truck_id="713", dispatcher="Brittany", trailer_id="5001"),
+    }
+    trailer_map = board_trailer_map(board)
+    assert trailer_map == {"4907": "39", "5001": "713"}
+
+    mentions = extract_number_mentions("39\n4907\nBrittany", "email_body")
+    matches = candidate_matches(mentions, board, trailer_map)
+    result = select_single_truck(matches, sender_dispatcher="Brittany")
+
+    assert result["matched_truck_id"] == "39"
+    assert result["match_status"] == "matched"
+    assert "matched_via_board_trailer" in result["alert_codes"] or "dispatcher_short_truck_match" in result["alert_codes"]
+
+
+def test_short_number_only_matches_senders_own_board() -> None:
+    """Bare 2-digit tokens only count when the sender's own board has that truck."""
+    board = {"39": BoardTruck(truck_id="39", dispatcher="Brittany")}
+    mentions = extract_number_mentions("39 loaded and rolling", "email_body")
+    matches = candidate_matches(mentions, board)
+
+    own = select_single_truck(matches, sender_dispatcher="Brittany")
+    assert own["matched_truck_id"] == "39"
+    assert "dispatcher_short_truck_match" in own["alert_codes"]
+
+    unknown = select_single_truck(matches, sender_dispatcher="")
+    assert unknown["matched_truck_id"] == ""
+    assert unknown["match_status"] == "unmatched"
+
+
+def test_signature_footer_numbers_are_stripped() -> None:
+    """Company footer phones/MC numbers must not become truck candidates."""
+    from services.rate_confirmation_ingest import strip_signature
+
+    body = (
+        "TRUCK 940 DRIVER SAM\n"
+        "*Please verify with us before booking any loads by calling 224-715-1371*\n"
+        "*We do not use any GMAIL.com, we only use PRESTIGE.INC*\n"
+        "MC 553373 3810 North Ave 60165 773 303 4616"
+    )
+    stripped = strip_signature(body)
+    assert "TRUCK 940" in stripped
+    assert "553373" not in stripped
+    assert "1371" not in stripped
+
+
+def test_inline_signature_images_do_not_create_rows() -> None:
+    """image001.jpg logo attachments must not become separate unmatched docs."""
+    from services.rate_confirmation_ingest import _is_inline_signature_image
+
+    assert _is_inline_signature_image({"content_type": "image/jpeg", "filename": "image001.jpg"})
+    assert _is_inline_signature_image({"content_type": "image/png", "filename": "Outlook-abc123.png"})
+    assert not _is_inline_signature_image({"content_type": "image/png", "filename": "signed_rate_con_photo.png"})
+    assert not _is_inline_signature_image({"content_type": "application/pdf", "filename": "image001.pdf"})
+
+
+def test_pt_bol_sender_is_also_excluded() -> None:
+    board = {"649": BoardTruck(truck_id="649", dispatcher="Carlos CA")}
+    msg = EmailMessage()
+    msg["From"] = "Proof of Delivery Department <bol@prestigetransportation.com>"
+    msg["Subject"] = "TRUCK 649"
+    msg.set_content("TRUCK 649")
+
+    assert build_document_rows_from_message(msg, board) == []
+
+
+def test_pdf_text_fallback_source_can_match() -> None:
+    """pdf_text mentions should resolve when nothing else matched."""
+    board = {"1971": BoardTruck(truck_id="1971", dispatcher="Carlos IL")}
+    mentions = extract_number_mentions("TRUCK 1971 PICKUP MONDAY", "pdf_text")
+    matches = candidate_matches(mentions, board)
+    result = select_single_truck(matches)
+
+    assert result["matched_truck_id"] == "1971"
+    assert result["match_status"] == "matched"
